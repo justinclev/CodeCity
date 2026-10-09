@@ -5,8 +5,8 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { authorColor, depthColor, heat, languageColor } from './colors';
-import { buildingMaterial, type BuildingUniforms } from './material';
-import { skyTexture, THEMES, type Theme, type ThemeName } from './theme';
+import { buildingMaterial, circuitMaterial, type BuildingUniforms, type CircuitUniforms } from './material';
+import { circuitTexture, codeTexture, glyphAtlas, skyTexture, THEMES, type Theme, type ThemeName } from './theme';
 import type { City, ColorMode, Metric, ScaleMode } from './types';
 
 const DISTRICT_STEP = 0.12; // vertical rise per directory depth
@@ -25,7 +25,23 @@ export const RISK = ['no history', '3+ authors', '2 authors', 'single author', '
 export const RISK_COLORS = ['#596277', '#51cf66', '#ffd43b', '#ff922b', '#ff4d4f'];
 export const INACTIVE_DAYS = 180;
 
-export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | null;
+export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | null;
+
+/** One floor of an exploded building (a piece of the file). */
+export interface Floor { name: string; kind: string; loc: number; complexity: number; piece: number }
+
+interface Exploded {
+  building: number;
+  floors: Floor[];
+  mesh: THREE.InstancedMesh;
+  labels: THREE.Group;
+  heights: number[];
+  colors: THREE.Color[];
+  uniforms: BuildingUniforms;
+  t: number; // 0 collapsed → 1 fully exploded
+  dir: 1 | -1;
+  highlight: number;
+}
 
 const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 
@@ -39,6 +55,12 @@ export class CityScene {
   private hemi = new THREE.HemisphereLight();
   private sun = new THREE.DirectionalLight();
   private ground: THREE.Mesh;
+  private groundU: CircuitUniforms;
+  private districtU?: CircuitUniforms;
+  private glyphTex?: THREE.Texture;
+  private circuitTex?: THREE.Texture;
+  private time = 0;
+  private skin: { building: number; mesh: THREE.Mesh; content: string } | null = null;
   private grid?: THREE.GridHelper;
   private outlines?: THREE.LineSegments;
   theme: Theme = THEMES.night;
@@ -49,6 +71,7 @@ export class CityScene {
   private lastTs!: Float64Array; // newest change time (unix s) at or before each commit; 0 = unknown
   private commitTs: number[] = [];
   private arcs = new THREE.Group();
+  private exploded: Exploded | null = null;
   private cumCommits!: Int32Array; // cumulative churn up to and including each commit
   private cumLines!: Int32Array;
   private buildingMesh?: THREE.InstancedMesh;
@@ -108,7 +131,9 @@ export class CityScene {
     this.sun.shadow.normalBias = 0.02;
     this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs);
 
-    this.ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshStandardMaterial({ roughness: 1 }));
+    const gm = circuitMaterial('#000000', false);
+    this.groundU = gm.uniforms;
+    this.ground = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), gm.material);
     this.ground.rotation.x = -Math.PI / 2;
     this.ground.receiveShadow = true;
     this.scene.add(this.ground);
@@ -128,6 +153,11 @@ export class CityScene {
     const now = performance.now();
     const dt = Math.min((now - this.last) / 1000, 0.1);
     this.last = now;
+    if (this.theme.hacker) {
+      this.time += dt;
+      for (const u of [this.uniforms, this.exploded?.uniforms, this.groundU, this.districtU]) if (u) u.uTime.value = this.time;
+      this.updateSkin();
+    }
     if (this.fly) {
       const t = Math.min(1, (now - this.fly.start) / this.fly.dur);
       const e = easeInOut(t);
@@ -136,6 +166,7 @@ export class CityScene {
       if (t >= 1) this.fly = null;
     }
     if (this.moving) this.step(dt);
+    if (this.exploded) this.animateExplode(dt);
     if (this.pulse > 0) {
       this.pulse = Math.max(0, this.pulse - dt / 1.6);
       for (const i of this.changed) this.paint(i);
@@ -176,8 +207,24 @@ export class CityScene {
     this.bloom.strength = t.bloom.strength;
     this.bloom.radius = t.bloom.radius;
     this.bloom.threshold = t.bloom.threshold;
-    if (this.uniforms) this.uniforms.uNight.value = t.night;
+    if (t.hacker) {
+      this.circuitTex ??= circuitTexture();
+      if (this.city && !this.glyphTex) this.glyphTex = glyphAtlas(this.glyphWords());
+    }
+    for (const u of [this.uniforms, this.exploded?.uniforms]) {
+      if (!u) continue;
+      u.uNight.value = t.night;
+      u.uHacker.value = t.hacker;
+      u.uGlyphs.value = this.glyphTex ?? null;
+    }
+    for (const u of [this.groundU, this.districtU]) {
+      if (!u) continue;
+      u.uHacker.value = t.hacker;
+      u.uCircuit.value = this.circuitTex ?? null;
+    }
+    if (this.skin) this.skin.mesh.visible = !!t.hacker;
     if (this.grid) {
+      this.grid.visible = !t.hacker;
       const m = this.grid.material as THREE.LineBasicMaterial;
       m.color.set(t.grid);
       m.opacity = t.gridOpacity;
@@ -188,7 +235,7 @@ export class CityScene {
       m.opacity = t.outlineOpacity;
     }
     if (this.districtMesh) this.paintDistricts();
-    if (this.city) { this.makeLabels(); this.refresh(false); }
+    if (this.city) { this.makeLabels(); this.refresh(false); this.collapse(true); }
   }
 
   private size() { return Math.max(this.city.bounds.w, this.city.bounds.d); }
@@ -199,6 +246,10 @@ export class CityScene {
     this.city = city;
     this.C = city.commits.length;
     this.commit = this.C - 1;
+    this.collapse(true);
+    this.setSkin(-1, '');
+    this.glyphTex?.dispose();
+    this.glyphTex = undefined;
     this.hovered = this.selected = this.selectedDistrict = -1;
     this.authorFilter = -1;
     this.baseline = 0;
@@ -234,8 +285,11 @@ export class CityScene {
     this.sun.shadow.normalBias = s * 0.0012; // scale with the city to avoid acne on low slabs
 
     // districts
-    this.districtMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
-      new THREE.MeshStandardMaterial({ roughness: 0.9, metalness: 0.05 }), city.districts.length);
+    const dm = circuitMaterial('#ffffff', true);
+    this.districtU = dm.uniforms;
+    this.districtU.uTile.value = this.groundU.uTile.value = Math.max(10, s * 0.3);
+    for (const u of [this.districtU, this.groundU]) { u.uCenter.value.set(cx, cz); u.uRadius.value = s * 0.75; }
+    this.districtMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), dm.material, city.districts.length);
     this.districtMesh.receiveShadow = true;
     city.districts.forEach((dist, i) => {
       const top = this.districtTop(dist.depth);
@@ -258,6 +312,7 @@ export class CityScene {
     this.uniforms = uniforms;
     const widths = city.buildings.map(b => Math.min(b.w, b.d)).sort((a, b) => a - b);
     uniforms.uCell.value = Math.max(0.15, (widths[Math.floor(widths.length / 2)] ?? 1) / 3.2);
+    uniforms.uGlyphScale.value = uniforms.uCell.value * 4.5;
     this.buildingMesh = new THREE.InstancedMesh(geo, material, n);
     this.buildingMesh.castShadow = true;
     this.buildingMesh.receiveShadow = true;
@@ -427,7 +482,7 @@ export class CityScene {
     let maxShaped = 0;
     const arr = this.vals[this.metric];
     for (let k = 0; k < arr.length; k++) if (arr[k] > 0) maxShaped = Math.max(maxShaped, this.shape(arr[k]));
-    const tallest = this.size() * 0.16 * this.mult;
+    const tallest = this.size() * 0.16 * this.mult * this.theme.heightBoost;
     for (let i = 0; i < n; i++) {
       this.target[i] = this.exists(i)
         ? Math.max(MIN_H, maxShaped > 0 ? (this.shape(this.value(i)) / maxShaped) * tallest : MIN_H)
@@ -512,7 +567,8 @@ export class CityScene {
       const b = this.city.buildings[i];
       const h = Math.max(c, 0.01);
       // absent buildings sink below the district surface so they neither show nor get picked
-      this.tmp.position.set(b.x + b.w / 2, c > 0.02 ? this.baseY[i] + h / 2 : this.baseY[i] - 1, b.z + b.d / 2);
+      const hide = c <= 0.02 || this.exploded?.building === i;
+      this.tmp.position.set(b.x + b.w / 2, hide ? this.baseY[i] - 1 : this.baseY[i] + h / 2, b.z + b.d / 2);
       this.tmp.scale.set(b.w, h, b.d);
       this.tmp.updateMatrix();
       mesh.setMatrixAt(i, this.tmp.matrix);
@@ -524,7 +580,7 @@ export class CityScene {
 
   private colorFor(i: number): THREE.Color {
     const c = this.baseColors[i].clone();
-    if (i === this.selected) return c.lerp(new THREE.Color(0xffffff), 0.35);
+    if (i === this.selected) return this.theme.hacker ? c : c.lerp(new THREE.Color(0xffffff), 0.35);
     if (i === this.hovered) return c.lerp(new THREE.Color(0xffffff), 0.25);
     if (this.dimmed[i]) return c.lerp(new THREE.Color(this.theme.dim), 0.85);
     if (this.showChanges && this.pulse > 0 && this.change[i]) {
@@ -535,7 +591,7 @@ export class CityScene {
 
   private glowFor(i: number): number {
     const night = this.theme.night;
-    if (i === this.selected) return 0.1 + 0.15 * night;
+    if (i === this.selected) return this.theme.hacker ? 0.05 : 0.1 + 0.15 * night;
     if (this.dimmed[i]) return 0;
     let g = 0;
     if (this.showChanges && this.change[i] && this.pulse > 0) g = (0.2 + 0.6 * night) * this.pulse;
@@ -604,6 +660,10 @@ export class CityScene {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
+    if (this.exploded) {
+      const f = this.raycaster.intersectObject(this.exploded.mesh, false)[0];
+      if (f?.instanceId !== undefined) return { kind: 'floor', index: f.instanceId };
+    }
     const hits = this.raycaster.intersectObjects([this.buildingMesh, this.districtMesh], false);
     for (const hit of hits) {
       const id = hit.instanceId ?? -1;
@@ -735,6 +795,202 @@ export class CityScene {
     this.flyTo(t.clone().addScaledVector(dir, dist), t);
   }
 
+  // ------------------------------------------------------------------ hacker mode
+
+  /** Words for the glyph atlas: the repo's own file and directory names. */
+  private glyphWords(): string[] {
+    const set = new Set<string>();
+    for (const b of this.city.buildings) {
+      set.add(b.name.replace(/\.[^.]+$/, '').toUpperCase());
+      if (set.size > 400) break;
+    }
+    for (const d of this.city.districts) if (d.name) set.add(d.name.toUpperCase() + '/');
+    return [...set].filter(w => w.length > 1 && w.length < 28);
+  }
+
+  /** In hacker mode the selected building wears its own source code. */
+  setSkin(i: number, content: string) {
+    if (this.skin) {
+      this.scene.remove(this.skin.mesh);
+      this.skin.mesh.geometry.dispose();
+      for (const m of this.skin.mesh.material as THREE.MeshBasicMaterial[]) { m.map?.dispose(); m.dispose(); }
+      this.skin = null;
+    }
+    if (i < 0 || !content) return;
+    const b = this.city.buildings[i];
+    const lines = content.split('\n').filter(l => l.trim());
+    const h = Math.max(this.target[i], MIN_H);
+    const tex = codeTexture(lines, h / Math.max(b.w, b.d));
+    const side = new THREE.MeshBasicMaterial({ map: tex, color: new THREE.Color(0.14, 0.55, 0.75), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+    const none = new THREE.MeshBasicMaterial({ visible: false });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), [side, side, none, none, side, side]);
+    mesh.renderOrder = 4;
+    mesh.visible = !!this.theme.hacker;
+    this.scene.add(mesh);
+    this.skin = { building: i, mesh, content };
+    this.updateSkin();
+  }
+
+  private updateSkin() {
+    const k = this.skin;
+    if (!k) return;
+    const i = k.building;
+    const b = this.city.buildings[i];
+    const h = this.cur[i];
+    k.mesh.visible = !!this.theme.hacker && h > 0.05 && this.exploded?.building !== i;
+    k.mesh.position.set(b.x + b.w / 2, this.baseY[i] + h / 2, b.z + b.d / 2);
+    k.mesh.scale.set(b.w * 1.004, h * 1.002, b.d * 1.004);
+  }
+
+  // ------------------------------------------------------------------ exploded view (pieces as floors)
+
+  get explodedBuilding() { return this.exploded?.building ?? -1; }
+  /** The building that is exploded or exploding (not collapsing). */
+  get explodingBuilding() { return this.exploded && this.exploded.dir > 0 ? this.exploded.building : -1; }
+
+  /** Split building i into stacked floors, one per piece, separated by gaps. */
+  explode(i: number, floors: Floor[]) {
+    this.collapse(true);
+    if (!floors.length) return;
+    const b = this.city.buildings[i];
+    const total = floors.reduce((a, f) => a + Math.max(1, f.loc), 0);
+    const H = Math.max(this.target[i], this.size() * 0.04, floors.length * 0.6);
+    const heights = floors.map(f => Math.max(H * 0.012, (Math.max(1, f.loc) / total) * H));
+    let maxDensity = 0;
+    for (const f of floors) maxDensity = Math.max(maxDensity, f.complexity / Math.max(1, f.loc));
+    const colors = floors.map(f => {
+      if (f.kind === 'imports' || f.kind === 'scope') return new THREE.Color(this.theme.night ? '#4a5470' : '#9aa4b6');
+      return heat(maxDensity > 0 ? (f.complexity / Math.max(1, f.loc)) / maxDensity : 0).multiplyScalar(this.theme.buildingTint);
+    });
+    const { material, uniforms } = buildingMaterial();
+    uniforms.uCell.value = this.uniforms!.uCell.value;
+    uniforms.uGlyphScale.value = this.uniforms!.uGlyphScale.value * 0.6;
+    uniforms.uNight.value = this.theme.night;
+    uniforms.uHacker.value = this.theme.hacker;
+    uniforms.uGlyphs.value = this.glyphTex ?? null;
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    geo.setAttribute('aGlow', new THREE.InstancedBufferAttribute(new Float32Array(floors.length), 1));
+    const mesh = new THREE.InstancedMesh(geo, material, floors.length);
+    mesh.castShadow = true;
+    colors.forEach((c, k) => mesh.setColorAt(k, c));
+    const labels = new THREE.Group();
+    this.scene.add(mesh, labels);
+    this.exploded = { building: i, floors, mesh, labels, heights, colors, uniforms, t: 0, dir: 1, highlight: -1 };
+    this.makeFloorLabels();
+    this.layoutFloors();
+    this.moving = true; // hides the original instance on the next step
+    // frame the exploded tower
+    const gapTotal = this.floorGap() * (floors.length - 1);
+    const mid = new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + (H + gapTotal) / 2, b.z + b.d / 2);
+    const dist = Math.max((H + gapTotal) * 1.25, Math.max(b.w, b.d) * 4);
+    const dir = this.camera.position.clone().sub(this.controls.target).normalize();
+    dir.y = Math.min(Math.max(dir.y, 0.15), 0.45);
+    dir.normalize();
+    this.flyTo(mid.clone().addScaledVector(dir, dist), mid, 900);
+  }
+
+  /** Put the floors back (animated) or remove them immediately. */
+  collapse(immediate = false) {
+    const e = this.exploded;
+    if (!e) return;
+    if (!immediate) { e.dir = -1; return; }
+    this.scene.remove(e.mesh, e.labels);
+    e.mesh.geometry.dispose();
+    (e.mesh.material as THREE.Material).dispose();
+    e.mesh.dispose();
+    for (const o of e.labels.children) { const sp = o as THREE.Sprite; sp.material.map?.dispose(); sp.material.dispose(); }
+    this.exploded = null;
+    this.moving = true; // shows the original instance again
+    this.step(0);
+  }
+
+  highlightFloor(k: number) {
+    const e = this.exploded;
+    if (!e) return;
+    e.highlight = k;
+    const glow = e.mesh.geometry.getAttribute('aGlow') as THREE.InstancedBufferAttribute;
+    e.colors.forEach((c, j) => {
+      e.mesh.setColorAt(j, j === k ? c.clone().lerp(new THREE.Color(0xffffff), 0.45) : c);
+      glow.setX(j, j === k ? 0.25 + 0.4 * this.theme.night : 0);
+    });
+    e.mesh.instanceColor!.needsUpdate = true;
+    glow.needsUpdate = true;
+    e.labels.children.forEach((o, j) => { (o as THREE.Sprite).material.opacity = k < 0 || j === k ? 1 : 0.45; });
+  }
+
+  floorAt(k: number): Floor | undefined { return this.exploded?.floors[k]; }
+
+  private floorGap() {
+    const b = this.city.buildings[this.exploded!.building];
+    return Math.max(0.25, Math.min(b.w, b.d) * 0.18);
+  }
+
+  private animateExplode(dt: number) {
+    const e = this.exploded!;
+    const before = e.t;
+    e.t = Math.min(1, Math.max(0, e.t + e.dir * dt * 2.2));
+    if (e.t !== before) this.layoutFloors();
+    if (e.dir < 0 && e.t <= 0) this.collapse(true);
+  }
+
+  private layoutFloors() {
+    const e = this.exploded!;
+    const i = e.building;
+    const b = this.city.buildings[i];
+    const ease = easeInOut(e.t);
+    const gap = this.floorGap() * ease;
+    let y = this.baseY[i];
+    e.floors.forEach((_, k) => {
+      const h = e.heights[k];
+      const inset = 1 - 0.08 * ease * (k % 2); // alternate floors slightly so the slices read as separate
+      this.tmp.position.set(b.x + b.w / 2, y + h / 2, b.z + b.d / 2);
+      this.tmp.scale.set(b.w * inset, h, b.d * inset);
+      this.tmp.updateMatrix();
+      e.mesh.setMatrixAt(k, this.tmp.matrix);
+      const label = e.labels.children[k] as THREE.Sprite | undefined;
+      if (label) {
+        label.position.set(b.x + b.w + label.scale.x * 0.55 + 0.2, y + h / 2, b.z + b.d / 2);
+        label.visible = ease > 0.6;
+      }
+      y += h + gap;
+    });
+    e.mesh.instanceMatrix.needsUpdate = true;
+    e.mesh.computeBoundingSphere();
+    e.mesh.computeBoundingBox();
+  }
+
+  private makeFloorLabels() {
+    const e = this.exploded!;
+    const b = this.city.buildings[e.building];
+    const H = e.heights.reduce((a, h) => a + h, 0);
+    const size = Math.max(0.3, this.size() * 0.007, Math.min(Math.min(b.w, b.d) * 0.35, (H / Math.max(8, e.floors.length)) * 1.6, this.size() * 0.015));
+    e.floors.forEach((f, k) => {
+      if (k >= 80) return;
+      const text = (f.name.length > 40 ? f.name.slice(0, 39) + '…' : f.name) + `  ${f.loc}`;
+      const cv = document.createElement('canvas');
+      const ctx = cv.getContext('2d')!;
+      const font = '500 34px "JetBrains Mono", ui-monospace, monospace';
+      ctx.font = font;
+      const tw = Math.ceil(ctx.measureText(text).width) + 28;
+      cv.width = tw; cv.height = 52;
+      ctx.font = font;
+      ctx.fillStyle = this.theme.labelBg;
+      ctx.beginPath(); ctx.roundRect(1, 1, tw - 2, 50, 10); ctx.fill();
+      ctx.fillStyle = '#' + e.colors[k].clone().lerp(new THREE.Color(this.theme.labelFg), 0.55).getHexString();
+      ctx.fillRect(8, 14, 5, 24);
+      ctx.fillStyle = this.theme.labelFg;
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, 20, 27);
+      const tex = new THREE.CanvasTexture(cv);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, fog: false }));
+      sp.scale.set((size * tw) / 52, size, 1);
+      sp.renderOrder = 11;
+      sp.visible = false;
+      e.labels.add(sp);
+    });
+  }
+
   // ------------------------------------------------------------------ decorations
 
   private makeOutlines() {
@@ -781,10 +1037,11 @@ export class CityScene {
       .sort((a, b) => b.w * b.d - a.w * a.d)
       .slice(0, 40);
     for (const d of cand) {
-      const text = d.name.length > 28 ? '…' + d.name.slice(-27) : d.name;
+      let text = d.name.length > 28 ? '…' + d.name.slice(-27) : d.name;
+      if (this.theme.hacker) text = text.toUpperCase() + '/';
       const cv = document.createElement('canvas');
       const ctx = cv.getContext('2d')!;
-      const font = '600 40px Inter, system-ui, sans-serif';
+      const font = this.theme.hacker ? '600 38px "JetBrains Mono", ui-monospace, monospace' : '600 40px Inter, system-ui, sans-serif';
       ctx.font = font;
       const tw = Math.ceil(ctx.measureText(text).width) + 40;
       cv.width = tw; cv.height = 68;

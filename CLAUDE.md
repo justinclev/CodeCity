@@ -10,10 +10,11 @@ Go CLI does the analysis and emits `city.json`; a Vite + three.js viewer renders
 - `internal/layout` – squarified treemap (deterministic: ties broken by name)
 - `internal/city` – `city.json` schema (version 3); `web/src/types.ts` must mirror it (`SCHEMA_VERSION`)
 - `internal/analyze` – glue: repo → sampled commits → per-file size/complexity history + churn → one layout over every file ever seen → `City`; `churn.go` adds owners (case-insensitive author merge) and change coupling
+- `internal/outline` – heuristic per-language outline (types, functions, methods, gaps as imports/scope) used for a file's "pieces"; `codecity outline <file>` prints it
 - `internal/insights` – findings at the newest commit (hotspots, coupling, knowledge risk, complexity, areas) + Markdown; used by `codecity report`
-- `internal/server` – HTTP server + job API (`/api/status`, `POST /api/analyze`, `POST /api/cancel`, `/api/city`); loopback-only Host/Origin guard; local paths only accepted when bound to loopback
+- `internal/server` – HTTP server + job API (`/api/status`, `POST /api/analyze`, `POST /api/cancel`, `/api/city`, `GET /api/file?path=&commit=` → content + pieces). Keeps the analyzed repo open (temp clones are removed on the next analysis or ctrl-c); file reads are limited to paths and commits of the loaded city. Loopback-only Host/Origin guard; local paths only accepted when bound to loopback
 - `internal/web` – `//go:embed all:dist` of the built viewer
-- `web/` – viewer (plain three.js, TypeScript, no framework): `scene.ts` (rendering, picking, camera), `material.ts` (window/glow shader), `theme.ts`, `insights.ts` (mirrors `internal/insights` for the current commit), `ui.ts` (DOM), `main.ts` (wiring, jobs, deep links)
+- `web/` – viewer (plain three.js, TypeScript, no framework): `scene.ts` (rendering, picking, camera), `material.ts` (window/hacker/glow shader + circuit floor), `theme.ts` (night/day/hacker + procedural glyph/circuit/code textures), `code.ts` (source viewer), `insights.ts` (mirrors `internal/insights` for the current commit), `ui.ts` (DOM), `main.ts` (wiring, jobs, deep links)
 
 ## Commands
 - `make build` – builds viewer, copies it into `internal/web/dist`, builds `bin/codecity`
@@ -34,9 +35,14 @@ Go CLI does the analysis and emits `city.json`; a Vite + three.js viewer renders
 - Floats in `city.json` are rounded to 3 decimals.
 - Angular components (if any are ever added): never use inline templates or inline CSS.
 
+## Viewer notes
+- Exploded view: floors = top-level pieces with containers replaced by their members (`floorsOf` in main.ts); floor height ∝ LOC, color ∝ complexity density.
+- Hacker mode is a theme (`THEMES.hacker`, `uHacker` in shaders): text atlas built from repo names, circuit traces in world space, selected building wears its real source (`setSkin`). Keep color modes meaningful in it (text is tinted by the mode color).
+
 ## Roadmap
 1. (done) static city from HEAD
 2. (done) history: sampled first-parent commits, time scrubber/playback, repo picker in the page
 3. (done) churn + hotspot coloring from `git log`
 4. (done) complexity, coupling, ownership/knowledge risk, code age, compare mode, insights panel, `report` command
-5. tree-sitter metrics; rename tracking; performance on very large repos (parallel blob reads, cached analyses)
+5. (done) pieces: outline, exploded floors, code viewer; hacker mode
+6. tree-sitter metrics/outlines; rename tracking; performance on very large repos (parallel blob reads, cached analyses)

@@ -46,9 +46,11 @@ export function setBusy(busy: boolean) {
   $('cancel').hidden = !busy;
 }
 
-export function setTheme(name: 'night' | 'day') {
+export function setTheme(name: 'night' | 'day' | 'hacker') {
   document.body.classList.toggle('day', name === 'day');
+  document.body.classList.toggle('hacker', name === 'hacker');
   $('theme').textContent = name === 'day' ? '☀' : '☾';
+  $('hacker').classList.toggle('on', name === 'hacker');
 }
 
 export function showRepo(c: City) {
@@ -166,14 +168,23 @@ export interface BuildingInfo {
   owner?: { name: string; share: number; authors: number; risk: number; lastActive: number };
   coupled: { index: number; path: string; shared: number; degree: number }[];
   links: { label: string; href: string }[];
+  pieces: PiecesState;
 }
+
+export type PiecesState =
+  | { status: 'loading' }
+  | { status: 'unavailable'; message: string }
+  | { status: 'ready'; pieces: import('./code').Piece[]; exploded: boolean; active: number };
 
 export interface DistrictInfo {
   name: string; path: string; files: number; loc: number; complexity: number; commits: number; owners: number;
   top: { index: number; path: string; label: string }[];
 }
 
-export interface InfoHandlers { onClose(): void; onPick(i: number): void; onZoomDistrict(): void }
+export interface InfoHandlers {
+  onClose(): void; onPick(i: number): void; onZoomDistrict(): void;
+  onPiece(k: number): void; onExplode(): void; onCode(): void;
+}
 
 function infoHead(title: string, h: InfoHandlers) {
   const head = el('div', 'head');
@@ -239,6 +250,7 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     }
     box.append(list);
   }
+  box.append(piecesSection(d.pieces, h));
   if (d.links.length) {
     const links = el('div', 'links');
     for (const l of d.links) {
@@ -253,6 +265,41 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     box.append(links);
   }
   box.hidden = false;
+}
+
+function piecesSection(st: PiecesState, h: InfoHandlers): HTMLElement {
+  const wrap = el('div', 'pieces');
+  const head = el('div', 'pieces-head');
+  const title = el('h4', '', 'Pieces');
+  head.append(title);
+  wrap.append(head);
+  if (st.status === 'loading') { wrap.append(el('div', 'empty', 'Reading file…')); return wrap; }
+  if (st.status === 'unavailable') { wrap.append(el('div', 'empty', st.message)); return wrap; }
+  const decls = st.pieces.filter(p => p.kind !== 'imports' && p.kind !== 'scope').length;
+  title.textContent = `Pieces · ${decls} declarations`;
+  const ex = el('button', st.exploded ? 'on' : '', st.exploded ? 'Collapse' : 'Explode');
+  ex.title = 'split the building into floors, one per piece (E)';
+  ex.onclick = h.onExplode;
+  const code = el('button', '', 'Code');
+  code.title = 'open the source';
+  code.onclick = h.onCode;
+  head.append(ex, code);
+  const maxCx = Math.max(1, ...st.pieces.map(p => p.complexity / Math.max(1, p.loc)));
+  const list = el('div', 'list');
+  st.pieces.slice(0, 300).forEach((p, k) => {
+    const b = el('button', 'pc' + (p.parent >= 0 ? ' child' : '') + (k === st.active ? ' on' : ''));
+    b.title = `${p.kind} ${p.name}\nlines ${p.start}–${p.end} · ${p.loc} LOC · complexity ${p.complexity}`;
+    const cx = el('span', 'cx');
+    const fill = el('i');
+    fill.style.width = Math.round(((p.complexity / Math.max(1, p.loc)) / maxCx) * 100) + '%';
+    cx.append(fill);
+    b.append(el('span', 'kind', p.kind), el('span', 'nm', p.name), el('span', 'num', p.loc), cx);
+    b.onclick = () => h.onPiece(k);
+    list.append(b);
+  });
+  if (st.pieces.length > 300) list.append(el('div', 'help', `+${st.pieces.length - 300} more`));
+  wrap.append(list);
+  return wrap;
 }
 
 export function showDistrict(d: DistrictInfo | null, h: InfoHandlers) {
@@ -492,6 +539,7 @@ export interface Controls {
   onChurnWindow(v: number): void;
   onSetBaseline(): void;
   onTheme(): void;
+  onHacker(): void;
   onTab(t: Tab): void;
   onCopyReport(): void;
 }
@@ -517,6 +565,7 @@ export function bindControls(h: Controls) {
   sel('speed').onchange = () => h.onSpeed(parseFloat(sel('speed').value));
   $('setbase').onclick = () => h.onSetBaseline();
   $('theme').onclick = () => h.onTheme();
+  $('hacker').onclick = () => h.onHacker();
   document.querySelectorAll<HTMLButtonElement>('.tabs button').forEach(b => { b.onclick = () => h.onTab(b.dataset.tab as Tab); });
   $('copyreport').onclick = () => h.onCopyReport();
 }

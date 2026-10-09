@@ -47,6 +47,16 @@ type fileHist struct {
 
 // Run opens the source, scans the sampled commits and lays out the city.
 func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) {
+	c, repo, err := RunRepo(ctx, o, progress)
+	if repo != nil {
+		repo.Close()
+	}
+	return c, err
+}
+
+// RunRepo is Run but hands back the open repository (for reading files later);
+// the caller must Close it. On error the repository is already closed.
+func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, repo *gitx.Repo, err error) {
 	if progress == nil {
 		progress = func(string, int, int) {}
 	}
@@ -54,14 +64,20 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 		o.MaxCommits = 1
 	}
 	progress("opening repository", 0, 0)
-	repo, err := gitx.Open(ctx, o.Source, o.Ref, o.MaxCommits == 1 && o.NoChurn)
+	repo, err = gitx.Open(ctx, o.Source, o.Ref, o.MaxCommits == 1 && o.NoChurn)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer repo.Close()
+	opened := repo // named results are overwritten by `return nil, nil, err`
+	defer func() {
+		if err != nil {
+			opened.Close()
+			repo = nil
+		}
+	}()
 	tip, label, err := repo.Resolve(ctx, o.Ref)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	n := 0
 	if o.MaxCommits == 1 {
@@ -69,17 +85,17 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 	}
 	all, err := repo.Log(ctx, tip, n)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(all) == 0 {
-		return nil, errors.New("no commits")
+		return nil, nil, errors.New("no commits")
 	}
 	commits := Sample(all, o.MaxCommits)
 
 	so := scan.Options{Excludes: o.Excludes, IncludeVendored: o.IncludeVendored, IncludeGenerated: o.IncludeGenerated}
 	br, err := repo.NewBlobReader(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer br.Close()
 
@@ -91,11 +107,11 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 	for ci, c := range commits {
 		progress("scanning commits", ci, len(commits))
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		entries, err := repo.ListFiles(ctx, c.Hash)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		isLast := ci == len(commits)-1
 		seen := map[string]bool{}
@@ -111,9 +127,9 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 				b, err := br.Read(e.Oid, scan.DefaultMaxBytes)
 				if err != nil {
 					if ctx.Err() != nil {
-						return nil, ctx.Err()
+						return nil, nil, ctx.Err()
 					}
-					return nil, err
+					return nil, nil, err
 				}
 				bi.skip = scan.ContentSkip(b, so)
 				if bi.skip == "" {
@@ -152,7 +168,7 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 			idx[p] = i
 		}
 		if cd, err = collectChurn(ctx, repo, commits, hist, idx, progress); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	progress("laying out", 0, 0)
@@ -161,7 +177,7 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 	for _, p := range order {
 		files = append(files, hist[p])
 	}
-	c := build(files, o.MinWeight)
+	c = build(files, o.MinWeight)
 	if cd != nil {
 		c.HasChurn = true
 		assignOwners(c, hist, cd.authors)
@@ -173,7 +189,7 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 	}
 	c.Repo = city.Repo{Name: repo.Name(), Source: o.Source, Remote: repo.Remote(ctx), Path: repo.LocalPath(ctx), Ref: label, Commit: tip,
 		AnalyzedAt: time.Now().UTC().Format(time.RFC3339)}
-	return c, nil
+	return c, repo, nil
 }
 
 // record appends pt to h if it differs from the previous state.

@@ -8,11 +8,15 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/justinclev/codecity/internal/analyze"
 	"github.com/justinclev/codecity/internal/city"
 	"github.com/justinclev/codecity/internal/insights"
+	"github.com/justinclev/codecity/internal/outline"
+	"github.com/justinclev/codecity/internal/scan"
 	"github.com/justinclev/codecity/internal/server"
 )
 
@@ -24,6 +28,7 @@ Usage:
   codecity analyze <repo> [flags]   write city.json
   codecity serve   [repo] [flags]   serve the viewer; repo is optional, you can also pick one in the page
   codecity report  <repo> [flags]   print a Markdown report: hotspots, coupling, knowledge risk
+  codecity outline <file>           show the pieces (types, functions, …) found in a source file
   codecity version
 
 <repo> is a local path or a git URL (https://, ssh://, git@host:path).
@@ -62,6 +67,23 @@ func main() {
 		if err := run(cmd, args); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
+		}
+	case "outline":
+		if len(args) != 1 {
+			fmt.Fprintln(os.Stderr, "usage: codecity outline <file>")
+			os.Exit(2)
+		}
+		src, err := os.ReadFile(args[0])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		for _, p := range outline.Outline(scan.Language(args[0]), src) {
+			ind := ""
+			if p.Parent >= 0 {
+				ind = "    "
+			}
+			fmt.Printf("%5d-%-5d %s%-10s %s  (loc %d, complexity %d)\n", p.Start, p.End, ind, p.Kind, p.Name, p.LOC, p.Complexity)
 		}
 	case "version", "--version":
 		fmt.Println("codecity", version)
@@ -148,6 +170,14 @@ func run(cmd string, args []string) error {
 	if err != nil {
 		return err
 	}
+	// remove temporary clones on ctrl-c
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		srv.Close()
+		os.Exit(0)
+	}()
 	logf("serving on http://%s  (ctrl-c to stop)", ln.Addr())
 	if len(pos) == 1 {
 		if _, err := srv.Start(server.Request{Source: pos[0], Ref: *ref, MaxCommits: *maxC, NoChurn: *noChurn}); err != nil {

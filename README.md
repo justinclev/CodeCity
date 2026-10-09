@@ -10,6 +10,7 @@ make build
 ./bin/codecity serve . --ref v1.2.0 --exclude 'docs/' --exclude '*.snap'
 ./bin/codecity analyze . -o city.json                    # just the data
 ./bin/codecity report https://github.com/expressjs/express > report.md   # Markdown findings for CI / PRs
+./bin/codecity outline internal/server/server.go          # the pieces found in one file
 ```
 
 Open http://127.0.0.1:8080. Type a local path or git URL in the panel (plus optional ref and number of history samples) and press Analyze; progress is shown and can be cancelled.
@@ -21,7 +22,9 @@ Open http://127.0.0.1:8080. Type a local path or git URL in the panel (plus opti
 - **Code age, complexity, compare:** color by time since last change, by complexity, or by growth since a baseline commit (shift-click the timeline).
 - **Insights panel:** Hotspots / Coupling / Risk / Complex / Areas / People, all clickable, plus *Copy report as Markdown*.
 - **Inspector:** metrics, history sparkline, ownership, coupled files, GitHub / VS Code links. Click a directory for its stats. Deep links: the URL hash keeps the commit, color mode and selected file.
-- Day/night themes (T), search with jump (/ then Enter), F for overview, Esc to clear.
+- **Pieces:** a selected file lists its classes, functions, methods and types (lines, complexity). *Explode* (E) splits the building into floors, one per piece; click a floor or list entry to read that piece's source at the current commit ([ and ] step through pieces).
+- **Hacker mode** (`>_` or H): black void, glass towers of glowing scrolling data, a magenta circuit-board floor; the selected building wears its own source code. Color modes still apply.
+- Day/night themes (T), search with jump (/ then Enter), F for overview, Esc to step back.
 - Orbit with the mouse, hover for details, click a building (with a LOC sparkline), search to dim non-matches, change height metric / scale / color. You can also drop a `city.json` onto the page.
 
 Requirements: Go 1.24+, git, Node 20+ (to build the viewer).

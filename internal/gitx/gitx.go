@@ -127,7 +127,7 @@ func (r *Repo) LocalPath(ctx context.Context) string {
 
 // Close removes any temporary clone.
 func (r *Repo) Close() {
-	if r.cleanup != nil {
+	if r != nil && r.cleanup != nil {
 		r.cleanup()
 	}
 }
@@ -401,6 +401,29 @@ func (r *Repo) Churn(ctx context.Context, from, to string) (*ChurnResult, error)
 	}
 	flush()
 	return res, nil
+}
+
+// ReadFile returns the content of path at commit (at most max bytes).
+func (r *Repo) ReadFile(ctx context.Context, commit, path string, max int64) ([]byte, error) {
+	if strings.ContainsAny(path, "\n\x00") || strings.HasPrefix(commit, "-") {
+		return nil, fmt.Errorf("invalid path")
+	}
+	cmd := git(ctx, r.Dir, "cat-file", "blob", commit+":"+path)
+	var errb bytes.Buffer
+	cmd.Stderr = &errb
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	b, rerr := io.ReadAll(io.LimitReader(out, max))
+	io.Copy(io.Discard, out)
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("git cat-file: %v: %s", err, strings.TrimSpace(errb.String()))
+	}
+	return b, rerr
 }
 
 // IsShallow reports whether the repository lacks full history.

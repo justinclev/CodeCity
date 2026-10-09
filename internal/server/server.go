@@ -10,12 +10,16 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/justinclev/codecity/internal/analyze"
 	"github.com/justinclev/codecity/internal/city"
 	"github.com/justinclev/codecity/internal/gitx"
+	"github.com/justinclev/codecity/internal/outline"
+	"github.com/justinclev/codecity/internal/scan"
 	"github.com/justinclev/codecity/internal/web"
 )
 
@@ -51,6 +55,9 @@ type Server struct {
 
 	mu     sync.Mutex
 	body   []byte
+	city   *city.City
+	repo   *gitx.Repo        // kept open for /api/file
+	paths  map[string]string // path → language, for the loaded city
 	job    *Job
 	cancel context.CancelFunc
 	nextID int
@@ -109,19 +116,19 @@ func (s *Server) Start(req Request) (int, error) {
 	opts.Source, opts.Ref, opts.MaxCommits, opts.NoChurn = req.Source, req.Ref, req.MaxCommits, req.NoChurn || s.Base.NoChurn
 	go func() {
 		defer cancel()
-		c, err := analyze.Run(ctx, opts, func(stage string, done, total int) {
+		c, repo, err := analyze.RunRepo(ctx, opts, func(stage string, done, total int) {
 			s.mu.Lock()
 			if s.job == j {
 				j.Stage, j.Done, j.Total = stage, done, total
 			}
 			s.mu.Unlock()
 		})
-		s.finish(j, c, err, ctx)
+		s.finish(j, c, repo, err, ctx)
 	}()
 	return j.ID, nil
 }
 
-func (s *Server) finish(j *Job, c *city.City, err error, ctx context.Context) {
+func (s *Server) finish(j *Job, c *city.City, repo *gitx.Repo, err error, ctx context.Context) {
 	var body []byte
 	if err == nil {
 		body, err = json.Marshal(c)
@@ -135,8 +142,91 @@ func (s *Server) finish(j *Job, c *city.City, err error, ctx context.Context) {
 		j.State, j.Error = "error", err.Error()
 	default:
 		j.State = "done"
-		s.body = body
+		s.body, s.city = body, c
+		s.paths = make(map[string]string, len(c.Buildings))
+		for _, b := range c.Buildings {
+			s.paths[b.Path] = b.Lang
+		}
+		if old := s.repo; old != nil { // let in-flight file reads finish before removing a temp clone
+			time.AfterFunc(30*time.Second, old.Close)
+		}
+		s.repo, repo = repo, nil
 	}
+	if repo != nil {
+		repo.Close()
+	}
+}
+
+// Close releases the open repository (removing a temporary clone).
+func (s *Server) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.repo != nil {
+		s.repo.Close()
+		s.repo = nil
+	}
+}
+
+// FileResponse is the body of GET /api/file.
+type FileResponse struct {
+	Path    string          `json:"path"`
+	Commit  string          `json:"commit"`
+	Lang    string          `json:"lang"`
+	Content string          `json:"content"`
+	Lines   int             `json:"lines"`
+	Pieces  []outline.Piece `json:"pieces"`
+	Partial bool            `json:"partial,omitempty"` // content was truncated
+}
+
+const maxFileBytes = 1 << 20
+
+// File returns the content and outline of a file of the loaded city at one of its commits.
+func (s *Server) File(ctx context.Context, path, commit string) (*FileResponse, error) {
+	s.mu.Lock()
+	c, repo, paths := s.city, s.repo, s.paths
+	s.mu.Unlock()
+	if c == nil || repo == nil {
+		return nil, &httpErr{http.StatusNotFound, "no repository loaded"}
+	}
+	lang, ok := paths[path]
+	if !ok {
+		return nil, errBad("unknown path")
+	}
+	hash := ""
+	if i, err := strconv.Atoi(commit); err == nil && i >= 0 && i < len(c.Commits) {
+		hash = c.Commits[i].Hash
+	} else {
+		for _, k := range c.Commits {
+			if commit != "" && strings.HasPrefix(k.Hash, commit) {
+				hash = k.Hash
+				break
+			}
+		}
+	}
+	if hash == "" {
+		return nil, errBad("unknown commit")
+	}
+	b, err := repo.ReadFile(ctx, hash, path, maxFileBytes+1)
+	if err != nil {
+		return nil, &httpErr{http.StatusNotFound, "file not present at that commit"}
+	}
+	partial := len(b) > maxFileBytes
+	if partial {
+		b = b[:maxFileBytes]
+	}
+	if scan.ContentSkip(b, scan.Options{IncludeGenerated: true}) == "binary" {
+		return nil, errBad("binary file")
+	}
+	text := strings.ToValidUTF8(string(b), "\uFFFD")
+	pieces := outline.Outline(lang, []byte(text))
+	lines := strings.Count(text, "\n")
+	if text != "" && !strings.HasSuffix(text, "\n") {
+		lines++
+	}
+	return &FileResponse{Path: path, Commit: hash, Lang: lang, Content: text, Lines: lines, Pieces: pieces, Partial: partial}, nil
 }
 
 // Current returns a copy of the latest job (zero value if none).
@@ -218,6 +308,15 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusAccepted, map[string]int{"id": id})
+	})
+	mux.HandleFunc("GET /api/file", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		f, err := s.File(r.Context(), q.Get("path"), q.Get("commit"))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, f)
 	})
 	mux.HandleFunc("POST /api/cancel", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()

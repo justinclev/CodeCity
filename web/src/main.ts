@@ -1,5 +1,6 @@
 import './style.css';
-import { CityScene } from './scene';
+import { CityScene, type Floor } from './scene';
+import { showCode, type FileData } from './code';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
 import { SCHEMA_VERSION, type City, type ColorMode } from './types';
@@ -12,6 +13,108 @@ let tab: ui.Tab = 'hotspots';
 let insights: Insights | null = null;
 let selected = -1;
 let selectedDistrict = -1;
+let apiAvailable = false;
+
+// ---------------------------------------------------------------- file pieces (needs the server)
+const fileCache = new Map<string, Promise<FileData>>();
+let file: FileData | null = null; // for the selected building at the current commit
+let fileError = '';
+let activePiece = -1;
+let floors: Floor[] = [];
+let codeOpen = false;
+
+function fetchFile(path: string, commit: number): Promise<FileData> {
+  const key = `${path}@${commit}`;
+  let p = fileCache.get(key);
+  if (!p) {
+    p = api<FileData>(`/api/file?path=${encodeURIComponent(path)}&commit=${commit}`);
+    p.catch(() => fileCache.delete(key));
+    fileCache.set(key, p);
+  }
+  return p;
+}
+
+/** Floors for the exploded view: top-level pieces, with containers replaced by their members. */
+function floorsOf(f: FileData): Floor[] {
+  const out: Floor[] = [];
+  f.pieces.forEach((p, k) => {
+    if (p.parent >= 0) return;
+    const kids = f.pieces.map((c, j) => ({ c, j })).filter(x => x.c.parent === k);
+    if (!kids.length) { out.push({ name: p.name, kind: p.kind, loc: p.loc, complexity: p.complexity, piece: k }); return; }
+    const rest = p.loc - kids.reduce((a, x) => a + x.c.loc, 0);
+    if (rest > 2) out.push({ name: `${p.name} (body)`, kind: p.kind, loc: rest, complexity: 0, piece: k });
+    for (const { c, j } of kids) out.push({ name: `${p.name}.${c.name}`, kind: c.kind, loc: c.loc, complexity: c.complexity, piece: j });
+  });
+  return out;
+}
+
+async function loadPieces(i: number) {
+  if (!city) return;
+  const path = city.buildings[i].path, commit = scene.commit;
+  file = null; fileError = ''; activePiece = -1; floors = [];
+  scene.setSkin(-1, '');
+  if (!apiAvailable) { fileError = 'Pieces and source need the server (codecity serve).'; return; }
+  try {
+    const f = await fetchFile(path, commit);
+    if (selected !== i || scene.commit !== commit) return; // selection moved on
+    file = f;
+    floors = floorsOf(f);
+    refreshSkin();
+  } catch (e) {
+    if (selected !== i) return;
+    fileError = `Could not read the file: ${(e as Error).message}`;
+  }
+  refreshSelection();
+}
+
+/** The selected building wears its source in hacker mode. */
+function refreshSkin() {
+  if (selected >= 0 && file && scene.theme.name === 'hacker' && scene.exists(selected)) scene.setSkin(selected, file.content);
+  else scene.setSkin(-1, '');
+}
+
+function piecesState(): ui.PiecesState {
+  if (fileError) return { status: 'unavailable', message: fileError };
+  if (!file) return { status: 'loading' };
+  return { status: 'ready', pieces: file.pieces, exploded: scene.explodingBuilding === selected, active: activePiece };
+}
+
+const codeHandlers = {
+  onClose: () => closeCode(),
+  onStep: (delta: number) => stepPiece(delta),
+};
+
+function openPiece(k: number) {
+  if (!file) return;
+  activePiece = k;
+  codeOpen = true;
+  showCode(file, k, codeHandlers);
+  const fl = floors.findIndex(f => f.piece === k);
+  scene.highlightFloor(fl);
+  refreshSelection();
+}
+
+function stepPiece(delta: number) {
+  if (!file || !floors.length) return;
+  const cur = Math.max(0, floors.findIndex(f => f.piece === activePiece));
+  const next = floors[(cur + delta + floors.length) % floors.length];
+  openPiece(next.piece);
+}
+
+function closeCode() {
+  codeOpen = false;
+  activePiece = -1;
+  showCode(null, -1, codeHandlers);
+  scene.highlightFloor(-1);
+  refreshSelection();
+}
+
+function toggleExplode() {
+  if (selected < 0 || !file) return;
+  if (scene.explodingBuilding === selected) scene.collapse();
+  else scene.explode(selected, floors);
+  refreshSelection();
+}
 
 // ---------------------------------------------------------------- storage helpers (best effort)
 const store = {
@@ -20,12 +123,18 @@ const store = {
 };
 
 // ---------------------------------------------------------------- theme
+let lastPlainTheme: ThemeName = 'night'; // where H returns to
 function applyTheme(name: ThemeName) {
+  if (name !== 'hacker') lastPlainTheme = name;
   ui.setTheme(name);
   scene.setTheme(name);
   store.set('theme', name);
-  if (city) redrawChart();
+  store.set('plainTheme', lastPlainTheme);
+  if (city) { redrawChart(); refreshSkin(); }
 }
+lastPlainTheme = store.get<ThemeName>('plainTheme') ?? 'night';
+const toggleHacker = () => applyTheme(scene.theme.name === 'hacker' ? lastPlainTheme : 'hacker');
+const toggleDayNight = () => applyTheme(scene.theme.name === 'night' ? 'day' : 'night');
 applyTheme(store.get<ThemeName>('theme') ?? 'night');
 
 // ---------------------------------------------------------------- loading
@@ -177,7 +286,13 @@ function onCommitChanged() {
 }
 
 function setCommit(i: number) {
+  const before = scene.commit;
   scene.setCommit(i);
+  if (scene.commit !== before && selected >= 0) {
+    if (scene.explodedBuilding >= 0) scene.collapse(true);
+    if (codeOpen) closeCode();
+    if (scene.exists(selected)) void loadPieces(selected);
+  }
   onCommitChanged();
 }
 
@@ -216,6 +331,9 @@ function links(path: string): { label: string; href: string }[] {
 }
 
 const infoHandlers: ui.InfoHandlers = {
+  onPiece: k => openPiece(k),
+  onExplode: () => toggleExplode(),
+  onCode: () => openPiece(activePiece >= 0 ? activePiece : (floors[0]?.piece ?? 0)),
   onClose: () => closeInfo(),
   onPick: i => selectBuilding(i, true),
   onZoomDistrict: () => { if (selectedDistrict >= 0) scene.focusDistrict(selectedDistrict); },
@@ -237,11 +355,18 @@ function buildingInfo(i: number): ui.BuildingInfo {
       authors: b.own[2], risk: scene.risk(i), lastActive: author.last } : undefined,
     coupled: (b.cpl ?? []).filter(([j]) => scene.exists(j)).map(([j, shared, degree]) => ({ index: j, path: c.buildings[j].path, shared, degree })),
     links: links(b.path),
+    pieces: piecesState(),
   };
 }
 
 function selectBuilding(i: number, fly: boolean) {
   if (!city || i < 0 || !scene.exists(i)) return;
+  if (i !== selected) {
+    if (scene.explodedBuilding >= 0) scene.collapse();
+    if (codeOpen) closeCode();
+    selected = i;
+    void loadPieces(i);
+  }
   selected = i;
   selectedDistrict = -1;
   scene.setSelectedDistrict(-1);
@@ -272,6 +397,8 @@ function districtInfo(d: number): ui.DistrictInfo {
 
 function selectDistrict(d: number, fly: boolean) {
   if (!city) return;
+  if (scene.explodedBuilding >= 0) scene.collapse();
+  if (codeOpen) closeCode();
   selected = -1;
   scene.setSelected(-1);
   selectedDistrict = d;
@@ -282,6 +409,10 @@ function selectDistrict(d: number, fly: boolean) {
 }
 
 function closeInfo() {
+  if (scene.explodedBuilding >= 0) scene.collapse();
+  if (codeOpen) closeCode();
+  file = null;
+  scene.setSkin(-1, '');
   selected = selectedDistrict = -1;
   scene.setSelected(-1);
   scene.setSelectedDistrict(-1);
@@ -363,7 +494,8 @@ ui.bindControls({
   onChanges: v => scene.setShowChanges(v),
   onSpeed: v => { speed = v; },
   onSetBaseline: () => { scene.baseline = scene.commit; scene.refresh(false); refreshLegend(); redrawChart(); },
-  onTheme: () => applyTheme(scene.theme.name === 'night' ? 'day' : 'night'),
+  onTheme: () => toggleDayNight(),
+  onHacker: () => toggleHacker(),
   onTab: t => { tab = t; store.set('tab', t); refreshInsights(); },
   onCopyReport: () => {
     if (!city || !insights) return;
@@ -393,9 +525,17 @@ addEventListener('keydown', e => {
   if (e.code === 'Space') { e.preventDefault(); playing ? stopPlayback() : startPlayback(); }
   else if (e.key === 'ArrowLeft' && city) { stopPlayback(); setCommit(scene.commit - 1); }
   else if (e.key === 'ArrowRight' && city) { stopPlayback(); setCommit(scene.commit + 1); }
-  else if (e.key === 'Escape') { closeInfo(); if (scene.authorFilter >= 0) setAuthorFilter(-1); }
+  else if (e.key === 'Escape') {
+    if (codeOpen) closeCode();
+    else if (scene.explodedBuilding >= 0) { scene.collapse(); refreshSelection(); }
+    else { closeInfo(); if (scene.authorFilter >= 0) setAuthorFilter(-1); }
+  }
+  else if (e.key === 'e' || e.key === 'E') toggleExplode();
+  else if (e.key === '[') stepPiece(-1);
+  else if (e.key === ']') stepPiece(1);
   else if (e.key === 'f' || e.key === 'F') { if (city) scene.frame(); }
-  else if (e.key === 't' || e.key === 'T') applyTheme(scene.theme.name === 'night' ? 'day' : 'night');
+  else if (e.key === 't' || e.key === 'T') toggleDayNight();
+  else if (e.key === 'h' || e.key === 'H') toggleHacker();
   else if (e.key === '/') { e.preventDefault(); (document.getElementById('search') as HTMLInputElement).focus(); }
 });
 
@@ -411,7 +551,12 @@ canvas.addEventListener('pointermove', e => {
     const p = pending; pending = null;
     if (!p || !city) return;
     const hit = scene.pick(p.x, p.y);
-    if (hit?.kind === 'building') {
+    if (hit?.kind === 'floor') {
+      const f = scene.floorAt(hit.index)!;
+      scene.setHover(-1);
+      ui.showTip([f.name, `${f.kind} · ${ui.fmt(f.loc)} LOC · complexity ${ui.fmt(f.complexity)} · click for code`], p.x, p.y);
+      canvas.style.cursor = 'pointer';
+    } else if (hit?.kind === 'building') {
       const i = hit.index, b = city.buildings[i], v = scene.valuesAt(i);
       scene.setHover(i);
       const extra: string[] = [`${b.lang}`, `${ui.fmt(v.loc)} LOC`, `complexity ${ui.fmt(v.complexity)}`];
@@ -436,7 +581,8 @@ canvas.addEventListener('pointerup', e => {
   down = null;
   if (moved || e.button !== 0) return; // orbit / pan drag
   const hit = scene.pick(e.clientX, e.clientY);
-  if (hit?.kind === 'building') selectBuilding(hit.index, false);
+  if (hit?.kind === 'floor') openPiece(scene.floorAt(hit.index)!.piece);
+  else if (hit?.kind === 'building') selectBuilding(hit.index, false);
   else if (hit?.kind === 'district') selectDistrict(hit.index, false);
   else closeInfo();
 });
@@ -470,6 +616,7 @@ async function start() {
   let st: Status;
   try {
     st = await api<Status>('/api/status');
+    apiAvailable = true;
   } catch {
     fetchCity('city.json').catch(() => ui.setMessage('No city loaded.\n\nDrop a city.json onto this page.'));
     return;

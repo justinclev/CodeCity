@@ -102,3 +102,26 @@ func TestBusy(t *testing.T) {
 		t.Errorf("want conflict, got %v", err)
 	}
 }
+
+func TestFileAPI(t *testing.T) {
+	s := New("127.0.0.1:8080", t.TempDir())
+	h := s.Handler()
+	body, _ := json.Marshal(Request{Source: repo(t), MaxCommits: 5})
+	if w := do(h, "POST", "/api/analyze", string(body), "127.0.0.1:8080", ""); w.Code != 202 {
+		t.Fatalf("analyze: %d", w.Code)
+	}
+	for i := 0; i < 100 && s.Current().State == "running"; i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	defer s.Close()
+	w := do(h, "GET", "/api/file?path=a.go&commit=0", "", "127.0.0.1:8080", "")
+	var f FileResponse
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &f) != nil || f.Content != "package a\n" || f.Lang != "Go" || len(f.Pieces) == 0 {
+		t.Fatalf("file: %d %s", w.Code, w.Body)
+	}
+	for _, q := range []string{"path=../../etc/passwd&commit=0", "path=a.go&commit=zzz", "path=a.go&commit=99"} {
+		if w := do(h, "GET", "/api/file?"+q, "", "127.0.0.1:8080", ""); w.Code != 400 {
+			t.Errorf("%s: %d", q, w.Code)
+		}
+	}
+}
