@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/justinclev/codecity/internal/city"
@@ -145,7 +146,7 @@ func TestHistory(t *testing.T) {
 		by[b.Path] = b
 	}
 	a := by["a.go"]
-	if len(a.H) != 3 || a.H[0] != (city.Point{0, 1, 1, 10}) || a.H[1] != (city.Point{1, 3, 4, 31}) ||
+	if len(a.H) != 3 || a.H[0] != (city.Point{0, 1, 1, 10, 0}) || a.H[1] != (city.Point{1, 3, 4, 31, 0}) ||
 		a.H[2][0] != 2 || a.H[2][1] != city.Absent {
 		t.Errorf("a.go history = %v", a.H)
 	}
@@ -155,11 +156,17 @@ func TestHistory(t *testing.T) {
 	if !c.HasChurn {
 		t.Fatal("churn should be on by default")
 	}
-	if len(a.Churn) != 3 || a.Churn[0] != [3]int{0, 1, 1} || a.Churn[1] != [3]int{1, 1, 3} || a.Churn[2][0] != 2 {
+	if len(a.Churn) != 3 || [3]int64(a.Churn[0][:3]) != [3]int64{0, 1, 1} || [3]int64(a.Churn[1][:3]) != [3]int64{1, 1, 3} || a.Churn[0][3] == 0 || a.Churn[2][0] != 2 {
 		t.Errorf("a.go churn = %v", a.Churn)
 	}
-	if b := by["pkg/b.go"]; len(b.Churn) != 2 || b.Churn[0] != [3]int{1, 1, 1} || b.Churn[1] != [3]int{3, 1, 1} {
+	if b := by["pkg/b.go"]; len(b.Churn) != 2 || [3]int64(b.Churn[0][:3]) != [3]int64{1, 1, 1} || [3]int64(b.Churn[1][:3]) != [3]int64{3, 1, 1} {
 		t.Errorf("b.go churn = %v", b.Churn)
+	}
+	if len(c.Authors) != 1 || c.Authors[0].Name != "t" || c.Authors[0].Commits != 4 || c.Authors[0].Last == 0 {
+		t.Errorf("authors = %+v", c.Authors)
+	}
+	if b := by["pkg/b.go"]; b.Own == nil || *b.Own != [3]int{0, 2, 1} {
+		t.Errorf("b.go own = %v", b.Own)
 	}
 	// the footprint of a deleted file is still laid out, sized by its peak LOC
 	if a.W <= 0 || a.D <= 0 {
@@ -211,5 +218,58 @@ func TestSample(t *testing.T) {
 	}
 	if len(Sample(all, 100)) != 10 || len(Sample(all, 1)) != 1 || Sample(all, 1)[0].Hash != "j" {
 		t.Error("bounds")
+	}
+}
+
+func TestCoupling(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "-q", "-b", "main")
+	for i := 0; i < 4; i++ { // api.go and api_test.go always change together
+		write(t, dir, "api.go", strings.Repeat("x\n", i+1))
+		write(t, dir, "api_test.go", strings.Repeat("y\n", i+1))
+		commit(t, dir, "both")
+	}
+	for i := 0; i < 4; i++ { // lone.go changes alone
+		write(t, dir, "lone.go", strings.Repeat("z\n", i+1))
+		commit(t, dir, "lone")
+	}
+	c, err := Run(context.Background(), Options{Source: dir, MaxCommits: 3}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := map[string]int{}
+	for i, b := range c.Buildings {
+		idx[b.Path] = i
+	}
+	api := c.Buildings[idx["api.go"]]
+	if len(api.Coupling) != 1 || api.Coupling[0] != [3]int{idx["api_test.go"], 4, 100} {
+		t.Errorf("api.go coupling = %v", api.Coupling)
+	}
+	if l := c.Buildings[idx["lone.go"]]; len(l.Coupling) != 0 {
+		t.Errorf("lone.go coupling = %v", l.Coupling)
+	}
+}
+
+func TestAuthorCaseMerge(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "-q", "-b", "main")
+	for i, name := range []string{"TJ Smith", "Tj Smith", "tj  smith"} {
+		write(t, dir, "a.go", strings.Repeat("x\n", i+1))
+		cmd := exec.Command("git", "commit", "-q", "-am", "c", "--author", name+" <t@t>")
+		if i == 0 {
+			gitIn(t, dir, "add", "-A")
+		}
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	c, err := Run(context.Background(), Options{Source: dir, MaxCommits: 2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Authors) != 1 || c.Authors[0].Commits != 3 || c.Buildings[0].Own[2] != 1 {
+		t.Errorf("authors = %+v own = %v", c.Authors, c.Buildings[0].Own)
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/justinclev/codecity/internal/city"
 )
 
 func repo(t *testing.T) string {
@@ -62,7 +64,7 @@ func TestAnalyzeFlow(t *testing.T) {
 		Version int
 		Commits []any
 	}
-	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &c) != nil || c.Version != 2 || len(c.Commits) != 1 {
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &c) != nil || c.Version != city.Version || len(c.Commits) != 1 {
 		t.Fatalf("city: %d %s", w.Code, w.Body)
 	}
 }

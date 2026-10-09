@@ -36,12 +36,13 @@ type blobInfo struct {
 }
 
 type fileHist struct {
-	path   string
-	lang   string
-	weight int // peak LOC
-	pts    []city.Point
-	last   city.Point
-	churn  [][3]int
+	path    string
+	lang    string
+	weight  int // peak LOC
+	pts     []city.Point
+	last    city.Point
+	churn   [][4]int64
+	authors map[string]int
 }
 
 // Run opens the source, scans the sampled commits and lays out the city.
@@ -127,10 +128,10 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 				continue
 			}
 			seen[e.Path] = true
-			pt := city.Point{ci, bi.m.LOC, bi.m.Lines, int(e.Size)}
+			pt := city.Point{ci, bi.m.LOC, bi.m.Lines, int(e.Size), bi.m.Complexity}
 			h := hist[e.Path]
 			if h == nil {
-				h = &fileHist{path: e.Path, lang: scan.Language(e.Path), last: city.Point{-1, city.Absent, 0, 0}}
+				h = &fileHist{path: e.Path, lang: scan.Language(e.Path), last: city.Point{-1, city.Absent, 0, 0, 0}}
 				hist[e.Path] = h
 				order = append(order, e.Path)
 			}
@@ -139,29 +140,19 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 		// files that vanished at this commit
 		for _, p := range order {
 			if h := hist[p]; !seen[p] && h.last[1] != city.Absent {
-				record(h, city.Point{ci, city.Absent, 0, 0})
+				record(h, city.Point{ci, city.Absent, 0, 0, 0})
 			}
 		}
 	}
 
-	hasChurn := false
+	var cd *churnData
 	if !o.NoChurn && !repo.IsShallow(ctx) {
-		hasChurn = true
-		for ci, c := range commits {
-			progress("computing churn", ci, len(commits))
-			from := ""
-			if ci > 0 {
-				from = commits[ci-1].Hash
-			}
-			m, err := repo.Churn(ctx, from, c.Hash)
-			if err != nil {
-				return nil, err
-			}
-			for p, st := range m {
-				if h := hist[p]; h != nil {
-					h.churn = append(h.churn, [3]int{ci, st.Commits, st.Lines})
-				}
-			}
+		idx := make(map[string]int, len(order))
+		for i, p := range order {
+			idx[p] = i
+		}
+		if cd, err = collectChurn(ctx, repo, commits, hist, idx, progress); err != nil {
+			return nil, err
 		}
 	}
 	progress("laying out", 0, 0)
@@ -171,19 +162,23 @@ func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) 
 		files = append(files, hist[p])
 	}
 	c := build(files, o.MinWeight)
-	c.HasChurn = hasChurn
+	if cd != nil {
+		c.HasChurn = true
+		assignOwners(c, hist, cd.authors)
+		assignCoupling(c, order, cd)
+	}
 	c.Stats.Skipped = skipped
 	for _, k := range commits {
 		c.Commits = append(c.Commits, city.Commit(k))
 	}
-	c.Repo = city.Repo{Name: repo.Name(), Source: o.Source, Remote: repo.Remote(ctx), Ref: label, Commit: tip,
+	c.Repo = city.Repo{Name: repo.Name(), Source: o.Source, Remote: repo.Remote(ctx), Path: repo.LocalPath(ctx), Ref: label, Commit: tip,
 		AnalyzedAt: time.Now().UTC().Format(time.RFC3339)}
 	return c, nil
 }
 
 // record appends pt to h if it differs from the previous state.
 func record(h *fileHist, pt city.Point) {
-	if h.last[1] == pt[1] && h.last[2] == pt[2] && h.last[3] == pt[3] {
+	if h.last[1] == pt[1] && h.last[2] == pt[2] && h.last[3] == pt[3] && h.last[4] == pt[4] {
 		return
 	}
 	h.pts = append(h.pts, pt)

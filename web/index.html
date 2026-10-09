@@ -4,78 +4,131 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Code City</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 </head>
 <body>
   <canvas id="c"></canvas>
 
-  <div id="hud">
-    <div id="title">Code City <span id="repo"></span></div>
-    <form id="repoform">
-      <input id="source" type="text" placeholder="repo path or git URL" autocomplete="off" spellcheck="false" required />
-      <div class="row">
-        <input id="ref" type="text" placeholder="ref (HEAD)" autocomplete="off" spellcheck="false" />
-        <input id="commits" type="number" min="1" max="1000" value="100" title="history samples (1 = snapshot only)" />
+  <aside id="left" class="panel">
+    <header class="brand">
+      <div class="logo" aria-hidden="true"><i></i><i></i><i></i></div>
+      <div class="brandtext">
+        <div class="name">Code City</div>
+        <div id="repo" class="sub">no repository</div>
       </div>
-      <label class="chk" title="analyze change frequency from git log (needs a full clone)"><input id="churn" type="checkbox" checked /> churn &amp; hotspots</label>
-      <div class="row">
-        <button id="go" type="submit">Analyze</button>
-        <button id="cancel" type="button" hidden>Cancel</button>
-      </div>
-      <div id="jobstatus"></div>
-    </form>
-    <div id="stats"></div>
-    <label>Height
-      <select id="metric">
-        <option value="loc">lines of code</option>
-        <option value="lines">total lines</option>
-        <option value="bytes">bytes</option>
-      </select>
-    </label>
-    <label>Scale
-      <select id="scale">
-        <option value="sqrt">sqrt</option>
-        <option value="linear">linear</option>
-        <option value="log">log</option>
-      </select>
-    </label>
-    <label>Height ×
-      <input id="mult" type="range" min="0.2" max="3" step="0.05" value="1" />
-    </label>
-    <label>Color
-      <select id="color">
-        <option value="language">language</option>
-        <option value="size">size</option>
-        <option value="depth">depth</option>
-        <option value="churn">churn</option>
-        <option value="hotspot">hotspot</option>
-      </select>
-    </label>
-    <label id="cwinrow">Churn over
-      <select id="cwin">
-        <option value="0">all time</option>
-        <option value="5">last 5 samples</option>
-        <option value="10">last 10 samples</option>
-        <option value="25">last 25 samples</option>
-      </select>
-    </label>
-    <div id="hotspots" hidden></div>
-    <input id="search" type="search" placeholder="search files…" autocomplete="off" />
-    <div id="legend"></div>
-  </div>
+      <button id="theme" class="icon" type="button" title="toggle day / night (T)">☾</button>
+    </header>
 
-  <div id="timeline" hidden>
+    <details id="repobox" open>
+      <summary>Repository</summary>
+      <form id="repoform">
+        <input id="source" type="text" placeholder="local path or git URL" autocomplete="off" spellcheck="false" required />
+        <div class="row">
+          <input id="ref" type="text" placeholder="ref (HEAD)" autocomplete="off" spellcheck="false" />
+          <input id="commits" type="number" min="1" max="1000" value="100" title="history samples (1 = snapshot only)" />
+        </div>
+        <label class="chk" title="change frequency, coupling and ownership from git log (needs a full clone)"><input id="churn" type="checkbox" checked /> history analysis (churn, coupling, owners)</label>
+        <div class="row">
+          <button id="go" type="submit" class="primary">Analyze</button>
+          <button id="cancel" type="button" hidden>Cancel</button>
+        </div>
+        <div id="progress" hidden><div id="bar"></div></div>
+        <div id="jobstatus"></div>
+      </form>
+    </details>
+
+    <div id="stats" class="stats"></div>
+
+    <section class="controls">
+      <label>Color
+        <select id="color">
+          <option value="language">language</option>
+          <option value="hotspot">hotspots (churn × complexity)</option>
+          <option value="churn">churn (change frequency)</option>
+          <option value="complexity">complexity</option>
+          <option value="age">code age (last change)</option>
+          <option value="owner">owner</option>
+          <option value="knowledge">knowledge risk</option>
+          <option value="compare">compare to baseline</option>
+          <option value="depth">directory depth</option>
+        </select>
+      </label>
+      <label id="cwinrow">Window
+        <select id="cwin">
+          <option value="0">all history so far</option>
+          <option value="5">last 5 samples</option>
+          <option value="10">last 10 samples</option>
+          <option value="25">last 25 samples</option>
+        </select>
+      </label>
+      <div id="baserow" class="row baserow" hidden>
+        <span id="basedate"></span>
+        <button id="setbase" type="button" title="use the current commit as the baseline (or shift-click the timeline)">set to current</button>
+      </div>
+      <label>Height
+        <select id="metric">
+          <option value="loc">lines of code</option>
+          <option value="complexity">complexity</option>
+          <option value="lines">total lines</option>
+          <option value="bytes">bytes</option>
+        </select>
+      </label>
+      <label>Scale
+        <div class="row">
+          <select id="scale">
+            <option value="sqrt">sqrt</option>
+            <option value="linear">linear</option>
+            <option value="log">log</option>
+          </select>
+          <input id="mult" type="range" min="0.2" max="3" step="0.05" value="1" title="height multiplier" />
+        </div>
+      </label>
+    </section>
+
+    <div class="searchbox">
+      <input id="search" type="search" placeholder="search files…  ( / )" autocomplete="off" spellcheck="false" />
+      <div id="results"></div>
+    </div>
+
+    <div id="legend"></div>
+  </aside>
+
+  <aside id="right">
+    <div id="info" class="panel" hidden></div>
+    <section id="insights" class="panel" hidden>
+      <div class="tabs" role="tablist">
+        <button data-tab="hotspots" class="on">Hotspots</button>
+        <button data-tab="coupling">Coupling</button>
+        <button data-tab="risk">Risk</button>
+        <button data-tab="complex">Complex</button>
+        <button data-tab="areas">Areas</button>
+        <button data-tab="authors">People</button>
+      </div>
+      <div id="tabhelp" class="help"></div>
+      <div id="tabbody"></div>
+      <footer><button id="copyreport" type="button">Copy report as Markdown</button><span id="copied"></span></footer>
+    </section>
+  </aside>
+
+  <div id="timeline" class="panel" hidden>
     <button id="play" type="button" title="play / pause (space)">▶</button>
-    <input id="scrub" type="range" min="0" max="0" step="1" value="0" />
-    <select id="speed" title="commits per second">
-      <option value="1">1/s</option><option value="3" selected>3/s</option><option value="8">8/s</option><option value="20">20/s</option>
-    </select>
-    <label class="chk"><input id="changes" type="checkbox" checked /> changes</label>
+    <div class="chartwrap">
+      <canvas id="chart"></canvas>
+      <input id="scrub" type="range" min="0" max="0" step="1" value="0" aria-label="commit" />
+    </div>
+    <div class="tlside">
+      <select id="speed" title="commits per second">
+        <option value="1">1/s</option><option value="3" selected>3/s</option><option value="8">8/s</option><option value="20">20/s</option>
+      </select>
+      <label class="chk" title="tint files added / changed in this commit"><input id="changes" type="checkbox" checked /> changes</label>
+    </div>
     <div id="when"></div>
   </div>
 
   <div id="tip" hidden></div>
-  <div id="info" hidden></div>
   <div id="msg"></div>
+  <div id="keys" class="help">drag: orbit · right-drag: pan · scroll: zoom · click: inspect · dbl-click: zoom in · F: overview · Esc: clear</div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

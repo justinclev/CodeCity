@@ -1,16 +1,44 @@
+import { authorColor, AUTHOR_COLORS, languageColor } from './colors';
+import type { Insights } from './insights';
+import { RISK, RISK_COLORS, type Totals } from './scene';
 import type { City, ColorMode, Metric, ScaleMode } from './types';
-import { languageColor } from './colors';
 
-const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-
+export const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 export const fmt = (n: number) => n.toLocaleString('en-US');
+
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: string | number): HTMLElementTagNameMap[K] {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = String(text);
+  return e;
+}
+
+export function ago(unix: number, now: number): string {
+  if (!unix) return 'unknown';
+  const d = Math.max(0, now - unix) / 86400;
+  if (d < 1) return 'within a day';
+  if (d < 45) return `${Math.round(d)} days ago`;
+  if (d < 540) return `${Math.round(d / 30)} months ago`;
+  return `${(d / 365).toFixed(1)} years ago`;
+}
+const day = (unix: number) => (unix ? new Date(unix * 1000).toISOString().slice(0, 10) : '');
+
+// ------------------------------------------------------------------ status
 
 export function setMessage(text: string) { $('msg').textContent = text; }
 
 export function setJobStatus(text: string, isError = false) {
-  const el = $('jobstatus');
-  el.textContent = text;
-  el.className = isError ? 'err' : '';
+  const s = $('jobstatus');
+  s.textContent = text;
+  s.className = isError ? 'err' : '';
+}
+
+export function setProgress(p: { done: number; total: number } | null) {
+  const box = $('progress');
+  box.hidden = !p;
+  if (!p) return;
+  box.classList.toggle('indeterminate', !p.total);
+  $('bar').style.width = p.total ? `${Math.round((p.done / p.total) * 100)}%` : '';
 }
 
 export function setBusy(busy: boolean) {
@@ -18,103 +46,435 @@ export function setBusy(busy: boolean) {
   $('cancel').hidden = !busy;
 }
 
-export function showCityInfo(c: City) {
-  $('repo').textContent = c.repo.name;
-  document.title = `Code City – ${c.repo.name}`;
-  const skipped = Object.values(c.stats.skipped).reduce((a, b) => a + b, 0);
-  $('stats').title = skipped ? `${fmt(skipped)} files skipped at the newest commit (vendored, binary, generated, …)` : '';
+export function setTheme(name: 'night' | 'day') {
+  document.body.classList.toggle('day', name === 'day');
+  $('theme').textContent = name === 'day' ? '☀' : '☾';
+}
 
-  const langs = Object.entries(c.stats.languages).sort((a, b) => b[1].loc - a[1].loc).slice(0, 12);
-  const legend = $('legend');
-  legend.replaceChildren();
-  for (const [name, s] of langs) {
-    const row = document.createElement('div');
-    row.className = 'lg';
-    const sw = document.createElement('i');
-    sw.style.background = '#' + languageColor(name).getHexString();
-    const label = document.createElement('span');
-    label.textContent = name;
-    const n = document.createElement('span');
-    n.textContent = fmt(s.loc);
-    row.append(sw, label, n);
-    legend.append(row);
+export function showRepo(c: City) {
+  $('repo').textContent = `${c.repo.name} · ${c.repo.ref}`;
+  $('repo').title = c.repo.remote || c.repo.path || c.repo.source;
+  document.title = `${c.repo.name} · Code City`;
+  $('insights').hidden = false;
+}
+
+export function showStats(t: Totals, prev: Totals | null, authors: number | null) {
+  const box = $('stats');
+  box.replaceChildren();
+  const add = (v: string, label: string, delta?: number) => {
+    const s = el('div', 'stat');
+    s.append(el('b', '', v));
+    const l = el('span', '', label);
+    if (delta) {
+      const d = el('span', `delta ${delta > 0 ? 'up' : 'down'}`, ` ${delta > 0 ? '+' : ''}${fmt(delta)}`);
+      l.append(d);
+    }
+    s.append(l);
+    box.append(s);
+  };
+  add(fmt(t.files), 'files', prev ? t.files - prev.files : 0);
+  add(t.loc >= 1e6 ? (t.loc / 1e6).toFixed(2) + 'M' : t.loc >= 1e4 ? Math.round(t.loc / 1000) + 'k' : fmt(t.loc), 'LOC', prev ? t.loc - prev.loc : 0);
+  add(authors === null ? '–' : fmt(authors), 'people');
+}
+
+// ------------------------------------------------------------------ legend
+
+export interface LegendOpts {
+  mode: ColorMode;
+  city: City;
+  ownedFiles?: Map<number, number>;
+  authorFilter: number;
+  onAuthor(i: number): void;
+  baselineLabel?: string;
+}
+
+export function showLegend(o: LegendOpts) {
+  const box = $('legend');
+  box.replaceChildren();
+  const title = (t: string) => box.append(el('div', 'title', t));
+  const row = (color: string, label: string, n?: string, onclick?: () => void, on = false) => {
+    const r = el('div', 'lg' + (onclick ? ' click' : '') + (on ? ' on' : ''));
+    const sw = el('i');
+    sw.style.background = color;
+    r.append(sw, el('span', '', label), el('span', '', n ?? ''));
+    if (onclick) r.onclick = onclick;
+    box.append(r);
+  };
+  const gradient = (lo: string, hi: string) => {
+    box.append(el('div', 'gradient'));
+    const l = el('div', 'gradlabels');
+    l.append(el('span', '', lo), el('span', '', hi));
+    box.append(l);
+  };
+  switch (o.mode) {
+    case 'language': {
+      title('Languages (LOC at newest commit)');
+      Object.entries(o.city.stats.languages).sort((a, b) => b[1].loc - a[1].loc).slice(0, 10)
+        .forEach(([name, s]) => row('#' + languageColor(name).getHexString(), name, fmt(s.loc)));
+      break;
+    }
+    case 'hotspot': title('Hotspots'); gradient('stable or simple', 'changes often & complex'); break;
+    case 'churn': title('Churn'); gradient('rarely changed', 'changed often'); break;
+    case 'complexity': title('Indentation complexity'); gradient('flat', 'deeply nested'); break;
+    case 'age': title('Last change'); gradient('a year or more', 'just now'); break;
+    case 'depth': title('Directory depth'); break;
+    case 'knowledge': {
+      title('Knowledge risk');
+      [4, 3, 2, 1, 0].forEach(k => row(RISK_COLORS[k], RISK[k]));
+      break;
+    }
+    case 'compare': {
+      title(`Since ${o.baselineLabel ?? 'baseline'}`);
+      row('#40c057', 'added');
+      row('#ff8c42', 'grew');
+      row('#4dabf7', 'shrank');
+      row('#7d8597', 'unchanged');
+      break;
+    }
+    case 'owner': {
+      title('Owners: click to filter');
+      const authors = o.city.authors ?? [];
+      const shown = authors.map((a, i) => ({ a, i, n: o.ownedFiles?.get(i) ?? 0 })).filter(x => x.n > 0)
+        .filter(x => x.i < AUTHOR_COLORS).sort((x, y) => y.n - x.n);
+      for (const { a, i, n } of shown) {
+        row('#' + authorColor(i).getHexString(), a.name, `${fmt(n)} files`, () => o.onAuthor(o.authorFilter === i ? -1 : i), o.authorFilter === i);
+      }
+      if (authors.length > shown.length) row('#7d8597', 'everyone else');
+      break;
+    }
   }
 }
 
-export function showStats(files: number, loc: number, c: City) {
-  $('stats').textContent = `${fmt(files)} files · ${fmt(loc)} LOC\n${c.repo.ref}`;
-  $('stats').style.whiteSpace = 'pre-line';
-}
+// ------------------------------------------------------------------ tooltip
 
-export function showTip(text: [string, string] | null, x: number, y: number) {
+export function showTip(lines: [string, string] | null, x: number, y: number) {
   const tip = $('tip');
-  if (!text) { tip.hidden = true; return; }
-  tip.replaceChildren();
-  const name = document.createElement('b');
-  name.textContent = text[0];
-  tip.append(name, document.createElement('br'), text[1]);
+  if (!lines) { tip.hidden = true; return; }
+  tip.replaceChildren(el('b', '', lines[0]), el('br'), el('span', 'm', lines[1]));
   tip.hidden = false;
-  tip.style.left = Math.min(x + 14, innerWidth - 340) + 'px';
-  tip.style.top = Math.min(y + 14, innerHeight - 60) + 'px';
+  tip.style.left = Math.min(x + 16, innerWidth - 370) + 'px';
+  tip.style.top = Math.min(y + 16, innerHeight - 70) + 'px';
 }
 
-export interface InfoData {
+// ------------------------------------------------------------------ inspector
+
+export interface BuildingInfo {
   name: string; path: string; lang: string; district: string;
-  loc: number; lines: number; bytes: number;
+  loc: number; lines: number; bytes: number; complexity: number;
   series: number[]; commit: number;
-  churn?: { commits: number; lines: number; allCommits: number; allLines: number; windowLabel: string };
+  churn?: { commits: number; lines: number; allCommits: number; allLines: number; windowLabel: string; lastChange: number; now: number };
+  owner?: { name: string; share: number; authors: number; risk: number; lastActive: number };
+  coupled: { index: number; path: string; shared: number; degree: number }[];
+  links: { label: string; href: string }[];
 }
 
-export function showInfo(d: InfoData | null) {
-  const el = $('info');
-  if (!d) { el.hidden = true; return; }
-  el.replaceChildren();
-  const title = document.createElement('b');
-  title.textContent = d.name;
-  el.append(title);
-  const rows: [string, string][] = [
-    ['path', d.path], ['language', d.lang], ['LOC', fmt(d.loc)], ['lines', fmt(d.lines)],
-    ['bytes', fmt(d.bytes)], ['district', d.district || '(root)'],
-  ];
+export interface DistrictInfo {
+  name: string; path: string; files: number; loc: number; complexity: number; commits: number; owners: number;
+  top: { index: number; path: string; label: string }[];
+}
+
+export interface InfoHandlers { onClose(): void; onPick(i: number): void; onZoomDistrict(): void }
+
+function infoHead(title: string, h: InfoHandlers) {
+  const head = el('div', 'head');
+  const close = el('button', 'close icon', '×');
+  close.title = 'close (Esc)';
+  close.onclick = h.onClose;
+  head.append(el('h3', '', title), close);
+  return head;
+}
+
+function metrics(items: [string, string][]) {
+  const m = el('div', 'metrics');
+  for (const [v, l] of items) { const d = el('div'); d.append(el('b', '', v), el('span', '', l)); m.append(d); }
+  return m;
+}
+
+function kv(rows: [string, string | Node][]) {
+  const g = el('div', 'kv');
+  for (const [k, v] of rows) { g.append(el('span', '', k)); const s = el('span'); s.append(v); g.append(s); }
+  return g;
+}
+
+export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
+  const box = $('info');
+  if (!d) { box.hidden = true; return; }
+  box.replaceChildren(infoHead(d.name, h), el('div', 'p', d.path));
+  box.append(metrics([[fmt(d.loc), 'LOC'], [fmt(d.complexity), 'complexity'], [fmt(d.lines), 'lines'], [d.bytes >= 1024 ? (d.bytes / 1024).toFixed(1) + 'k' : fmt(d.bytes), 'bytes']]));
+  const rows: [string, string | Node][] = [['language', d.lang], ['directory', d.district || '(root)']];
   if (d.churn) {
-    if (d.churn.windowLabel !== 'all so far') rows.push([`changes (${d.churn.windowLabel})`, `${fmt(d.churn.commits)} commits · ${fmt(d.churn.lines)} lines`]);
-    rows.push(['changes (all so far)', `${fmt(d.churn.allCommits)} commits · ${fmt(d.churn.allLines)} lines`]);
+    if (d.churn.windowLabel) rows.push([`changes (${d.churn.windowLabel})`, `${fmt(d.churn.commits)} commits · ${fmt(d.churn.lines)} lines`]);
+    rows.push(['changes (all)', `${fmt(d.churn.allCommits)} commits · ${fmt(d.churn.allLines)} lines`]);
+    rows.push(['last change', `${day(d.churn.lastChange)} (${ago(d.churn.lastChange, d.churn.now)} before this commit)`]);
   }
-  for (const [k, v] of rows) {
-    const line = document.createElement('div');
-    const key = document.createElement('span');
-    key.className = 'k';
-    key.textContent = k + ': ';
-    line.append(key, v);
-    el.append(line);
+  if (d.owner) {
+    rows.push(['owner', `${d.owner.name} · ${d.owner.share}% of commits`]);
+    const badge = el('span', 'badge', RISK[d.owner.risk]);
+    badge.style.background = RISK_COLORS[d.owner.risk];
+    const who = el('span', '', `${d.owner.authors} ${d.owner.authors === 1 ? 'author' : 'authors'} `);
+    who.append(badge);
+    rows.push(['knowledge', who]);
+    rows.push(['owner last seen', day(d.owner.lastActive)]);
   }
+  box.append(kv(rows));
   if (d.series.length > 1) {
-    const cv = document.createElement('canvas');
-    el.append(cv);
+    box.append(el('h4', '', 'Size over time'));
+    const cv = el('canvas');
+    box.append(cv);
     spark(cv, d.series, d.commit);
   }
-  el.hidden = false;
+  if (d.coupled.length) {
+    box.append(el('h4', '', 'Changes together with'));
+    const list = el('div', 'list');
+    for (const c of d.coupled) {
+      const b = el('button');
+      b.title = `${c.path}\n${c.shared} shared commits, ${c.degree}% coupling`;
+      const bar = el('span', 'bar');
+      const fill = el('i');
+      fill.style.width = c.degree + '%';
+      bar.append(fill);
+      b.append(el('span', 'path', '‎' + c.path), bar, el('span', 'num', c.degree + '%'));
+      b.onclick = () => h.onPick(c.index);
+      list.append(b);
+    }
+    box.append(list);
+  }
+  if (d.links.length) {
+    const links = el('div', 'links');
+    for (const l of d.links) {
+      const a = el('a', '', l.label);
+      a.href = l.href;
+      if (l.href.startsWith('http')) { a.target = '_blank'; a.rel = 'noopener'; }
+      links.append(a);
+    }
+    const copy = el('button', '', 'Copy path');
+    copy.onclick = () => void navigator.clipboard?.writeText(d.path).then(() => { copy.textContent = 'Copied'; });
+    links.append(copy);
+    box.append(links);
+  }
+  box.hidden = false;
+}
+
+export function showDistrict(d: DistrictInfo | null, h: InfoHandlers) {
+  const box = $('info');
+  if (!d) { box.hidden = true; return; }
+  box.replaceChildren(infoHead(d.name + '/', h), el('div', 'p', d.path || '(root)'));
+  box.append(metrics([[fmt(d.files), 'files'], [fmt(d.loc), 'LOC'], [fmt(d.complexity), 'complexity'], [fmt(d.owners), 'owners']]));
+  box.append(kv([['changes', `${fmt(d.commits)} file-commits`]]));
+  if (d.top.length) {
+    box.append(el('h4', '', 'Top hotspots here'));
+    const list = el('div', 'list');
+    d.top.forEach((t, i) => {
+      const b = el('button');
+      b.append(el('span', 'rank', i + 1), el('span', 'path', '‎' + t.path), el('span', 'num', t.label));
+      b.onclick = () => h.onPick(t.index);
+      list.append(b);
+    });
+    box.append(list);
+  }
+  const links = el('div', 'links');
+  const zoom = el('button', '', 'Zoom to directory');
+  zoom.onclick = h.onZoomDistrict;
+  links.append(zoom);
+  box.append(links);
+  box.hidden = false;
 }
 
 function spark(cv: HTMLCanvasElement, s: number[], at: number) {
   const dpr = devicePixelRatio || 1;
-  const w = 256, h = 44;
+  const w = cv.clientWidth || 300, h = 48;
   cv.width = w * dpr; cv.height = h * dpr;
   const ctx = cv.getContext('2d')!;
   ctx.scale(dpr, dpr);
   const max = Math.max(1, ...s);
-  const x = (i: number) => (i / (s.length - 1)) * (w - 4) + 2;
-  const y = (v: number) => h - 3 - (v / max) * (h - 8);
-  ctx.strokeStyle = '#6ea8ff';
-  ctx.lineWidth = 1.5;
+  const x = (i: number) => (i / (s.length - 1)) * (w - 6) + 3;
+  const y = (v: number) => h - 4 - (v / max) * (h - 10);
+  const accent = getComputedStyle(document.body).getPropertyValue('--accent').trim() || '#7aa2ff';
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, accent + '66');
+  g.addColorStop(1, accent + '00');
   ctx.beginPath();
   s.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
-  ctx.stroke();
-  ctx.fillStyle = '#fff';
+  ctx.lineTo(x(s.length - 1), h); ctx.lineTo(x(0), h); ctx.closePath();
+  ctx.fillStyle = g; ctx.fill();
   ctx.beginPath();
-  ctx.arc(x(at), y(s[at]), 3, 0, Math.PI * 2);
-  ctx.fill();
+  s.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v))));
+  ctx.strokeStyle = accent; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = accent;
+  ctx.beginPath(); ctx.arc(x(at), y(s[at]), 3.5, 0, Math.PI * 2); ctx.fill();
 }
+
+// ------------------------------------------------------------------ search results
+
+export function showResults(rows: { index: number; path: string }[], total: number, onPick: (i: number) => void) {
+  const box = $('results');
+  box.replaceChildren();
+  for (const r of rows) {
+    const b = el('button');
+    b.append(el('span', 'path', '‎' + r.path));
+    b.onclick = () => onPick(r.index);
+    box.append(b);
+  }
+  if (total > rows.length) box.append(el('div', 'help', `+${fmt(total - rows.length)} more · Enter jumps to the first`));
+}
+
+// ------------------------------------------------------------------ insights
+
+export type Tab = 'hotspots' | 'coupling' | 'risk' | 'complex' | 'areas' | 'authors';
+const HELP: Record<Tab, string> = {
+  hotspots: 'Change frequency × complexity: where refactoring pays off most.',
+  coupling: 'Files that keep changing in the same commits. Fine for code + test; elsewhere often a hidden dependency.',
+  risk: 'Complex code whose owner has gone quiet, or that only one person has ever touched.',
+  complex: 'Indentation complexity: total nesting depth, a language-neutral proxy for cyclomatic complexity.',
+  areas: 'Top-level directories ranked by hotspot load.',
+  authors: 'Owners = most commits to a file. Click someone to show only their files.',
+};
+
+export interface InsightHandlers {
+  onPick(i: number): void;
+  onPair(a: number, b: number): void;
+  onArea(d: number): void;
+  onAuthor(i: number): void;
+}
+
+export function showInsights(ins: Insights | null, tab: Tab, hasChurn: boolean, authorFilter: number, now: number, h: InsightHandlers) {
+  document.querySelectorAll<HTMLButtonElement>('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === tab));
+  $('tabhelp').textContent = HELP[tab];
+  const body = $('tabbody');
+  body.replaceChildren();
+  if (!ins) return;
+  const list = el('div', 'list');
+  const fileRow = (rank: number, index: number, path: string, num: string, title?: string) => {
+    const b = el('button');
+    if (title) b.title = title;
+    b.append(el('span', 'rank', rank), el('span', 'path', '‎' + path), el('span', 'num', num));
+    b.onclick = () => h.onPick(index);
+    list.append(b);
+  };
+  const needChurn = () => body.append(el('div', 'empty', 'Needs history analysis: re-run with “history analysis” checked.'));
+  switch (tab) {
+    case 'hotspots':
+      if (!hasChurn) return needChurn();
+      ins.hotspots.forEach((r, i) => fileRow(i + 1, r.index, r.path, `${r.a} × ${fmt(r.b)}`, `${r.a} commits × complexity ${fmt(r.b)}${r.note ? `\nowner: ${r.note}` : ''}`));
+      break;
+    case 'coupling':
+      if (!hasChurn) return needChurn();
+      for (const p of ins.coupling) {
+        const b = el('button', 'pair');
+        b.title = `${p.shared} shared commits · ${p.degree}% coupling`;
+        b.append(el('span', 'path', pathOf(p.a)), el('span', 'num', `${p.degree}%`),
+          el('span', 'path', '↳ ' + pathOf(p.b)), el('span', 'num', `${p.shared}×`));
+        b.onclick = () => h.onPair(p.a, p.b);
+        list.append(b);
+      }
+      break;
+    case 'risk': {
+      if (!hasChurn) return needChurn();
+      const section = (title: string, rows: typeof ins.orphaned) => {
+        if (!rows.length) return;
+        list.append(el('h4', '', title));
+        rows.forEach((r, i) => fileRow(i + 1, r.index, r.path, fmt(r.a), `owner: ${r.note}\ncomplexity ${fmt(r.a)}`));
+      };
+      section('Owner inactive', ins.orphaned);
+      section('Single author', ins.single);
+      break;
+    }
+    case 'complex':
+      ins.complex.forEach((r, i) => fileRow(i + 1, r.index, r.path, fmt(r.a), `complexity ${fmt(r.a)} · ${fmt(r.b)} LOC`));
+      break;
+    case 'areas':
+      ins.areas.forEach((a, i) => {
+        const b = el('button');
+        b.title = `${fmt(a.files)} files · ${fmt(a.loc)} LOC · complexity ${fmt(a.complexity)} · ${fmt(a.commits)} file-commits · ${a.owners} owners`;
+        b.append(el('span', 'rank', i + 1), el('span', 'path', '‎' + a.name + '/'), el('span', 'num', `${fmt(a.files)} files`));
+        b.onclick = () => h.onArea(a.district);
+        list.append(b);
+      });
+      break;
+    case 'authors':
+      if (!hasChurn) return needChurn();
+      ins.authors.slice(0, 40).forEach(a => {
+        const b = el('button');
+        if (a.index === authorFilter) b.style.background = 'rgba(122,162,255,0.18)';
+        b.title = `${fmt(a.commits)} commits · owns ${fmt(a.files)} files · last commit ${day(a.last)}`;
+        const dot = el('span', 'badge', a.active ? 'active' : ago(a.last, now));
+        dot.style.background = a.active ? 'var(--good)' : 'var(--faint)';
+        b.append(el('span', 'path', a.name), dot, el('span', 'num', `${fmt(a.files)} files`));
+        b.querySelector('.path')!.setAttribute('style', 'direction:ltr');
+        b.onclick = () => h.onAuthor(a.index === authorFilter ? -1 : a.index);
+        list.append(b);
+      });
+      break;
+  }
+  if (!list.children.length) body.append(el('div', 'empty', 'Nothing to show at this commit.'));
+  else body.append(list);
+}
+
+let pathOf: (i: number) => string = i => String(i);
+export function setPathResolver(f: (i: number) => string) { pathOf = f; }
+
+// ------------------------------------------------------------------ timeline
+
+export function setupTimeline(c: City) {
+  $('timeline').hidden = c.commits.length < 2;
+  document.body.classList.toggle('hastimeline', c.commits.length >= 2);
+  const sc = $<HTMLInputElement>('scrub');
+  sc.max = String(c.commits.length - 1);
+  sc.value = String(c.commits.length - 1);
+  setPlaying(false);
+}
+
+export function setPlaying(p: boolean) { $('play').textContent = p ? '❚❚' : '▶'; }
+
+export function showCommit(c: City, i: number) {
+  const k = c.commits[i];
+  $<HTMLInputElement>('scrub').value = String(i);
+  const when = $('when');
+  when.replaceChildren();
+  when.title = k.subject;
+  when.append(el('b', '', k.date.slice(0, 10)), ` · ${i + 1}/${c.commits.length} · `, el('span', 'h', k.hash.slice(0, 8)), ` · ${k.author} · ${k.subject}`);
+}
+
+/** Activity chart: LOC area + file-count line, current and baseline markers. */
+export function drawChart(totals: Totals[], at: number, baseline: number | null, hover: number | null) {
+  const cv = $<HTMLCanvasElement>('chart');
+  const dpr = devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w || !h) return;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d')!;
+  ctx.scale(dpr, dpr);
+  const n = totals.length;
+  const x = (i: number) => (n > 1 ? (i / (n - 1)) * (w - 2) + 1 : w / 2);
+  const maxL = Math.max(1, ...totals.map(t => t.loc)), maxF = Math.max(1, ...totals.map(t => t.files));
+  const yL = (v: number) => h - 2 - (v / maxL) * (h - 6);
+  const yF = (v: number) => h - 2 - (v / maxF) * (h - 6);
+  const css = getComputedStyle(document.body);
+  const accent = css.getPropertyValue('--accent').trim(), accent2 = css.getPropertyValue('--accent2').trim();
+  const g = ctx.createLinearGradient(0, 0, 0, h);
+  g.addColorStop(0, accent + '88'); g.addColorStop(1, accent + '08');
+  ctx.beginPath();
+  totals.forEach((t, i) => (i ? ctx.lineTo(x(i), yL(t.loc)) : ctx.moveTo(x(i), yL(t.loc))));
+  ctx.lineTo(x(n - 1), h); ctx.lineTo(x(0), h); ctx.closePath();
+  ctx.fillStyle = g; ctx.fill();
+  ctx.beginPath();
+  totals.forEach((t, i) => (i ? ctx.lineTo(x(i), yF(t.files)) : ctx.moveTo(x(i), yF(t.files))));
+  ctx.strokeStyle = accent2; ctx.lineWidth = 1.2; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+  const mark = (i: number, color: string, width: number) => {
+    ctx.fillStyle = color;
+    ctx.fillRect(x(i) - width / 2, 0, width, h);
+  };
+  if (baseline !== null) mark(baseline, '#40c057', 2);
+  if (hover !== null) mark(hover, css.getPropertyValue('--dim').trim(), 1);
+  mark(at, css.getPropertyValue('--fg').trim(), 2);
+}
+
+export function chartIndex(ev: MouseEvent, n: number): number {
+  const r = $('chart').getBoundingClientRect();
+  return Math.max(0, Math.min(n - 1, Math.round(((ev.clientX - r.left) / r.width) * (n - 1))));
+}
+
+// ------------------------------------------------------------------ form & controls
 
 export interface Controls {
   onMetric(v: Metric): void;
@@ -122,112 +482,69 @@ export interface Controls {
   onMult(v: number): void;
   onColor(v: ColorMode): void;
   onSearch(q: string): void;
+  onSearchEnter(): void;
   onSubmit(source: string, ref: string, commits: number, churn: boolean): void;
-  onChurnWindow(v: number): void;
-  onHotspot(index: number): void;
   onCancel(): void;
   onScrub(i: number): void;
   onPlay(): void;
   onChanges(v: boolean): void;
   onSpeed(v: number): void;
+  onChurnWindow(v: number): void;
+  onSetBaseline(): void;
+  onTheme(): void;
+  onTab(t: Tab): void;
+  onCopyReport(): void;
 }
 
 export function bindControls(h: Controls) {
-  $<HTMLSelectElement>('metric').onchange = e => h.onMetric((e.target as HTMLSelectElement).value as Metric);
-  $<HTMLSelectElement>('scale').onchange = e => h.onScale((e.target as HTMLSelectElement).value as ScaleMode);
+  const sel = (id: string) => $<HTMLSelectElement>(id);
+  sel('metric').onchange = () => h.onMetric(sel('metric').value as Metric);
+  sel('scale').onchange = () => h.onScale(sel('scale').value as ScaleMode);
   $<HTMLInputElement>('mult').oninput = e => h.onMult(parseFloat((e.target as HTMLInputElement).value));
-  $<HTMLSelectElement>('color').onchange = e => h.onColor((e.target as HTMLSelectElement).value as ColorMode);
+  sel('color').onchange = () => h.onColor(sel('color').value as ColorMode);
+  sel('cwin').onchange = () => h.onChurnWindow(parseInt(sel('cwin').value, 10));
   $<HTMLInputElement>('search').oninput = e => h.onSearch((e.target as HTMLInputElement).value);
+  $<HTMLInputElement>('search').onkeydown = e => { if (e.key === 'Enter') h.onSearchEnter(); if (e.key === 'Escape') (e.target as HTMLInputElement).blur(); };
   $('repoform').onsubmit = e => {
     e.preventDefault();
-    h.onSubmit(
-      $<HTMLInputElement>('source').value.trim(),
-      $<HTMLInputElement>('ref').value.trim(),
-      Math.max(1, parseInt($<HTMLInputElement>('commits').value, 10) || 1),
-      $<HTMLInputElement>('churn').checked,
-    );
+    h.onSubmit($<HTMLInputElement>('source').value.trim(), $<HTMLInputElement>('ref').value.trim(),
+      Math.max(1, parseInt($<HTMLInputElement>('commits').value, 10) || 1), $<HTMLInputElement>('churn').checked);
   };
-  $<HTMLSelectElement>('cwin').onchange = e => h.onChurnWindow(parseInt((e.target as HTMLSelectElement).value, 10));
-  hotspotHandler = h.onHotspot;
   $('cancel').onclick = () => h.onCancel();
   $<HTMLInputElement>('scrub').oninput = e => h.onScrub(parseInt((e.target as HTMLInputElement).value, 10));
   $('play').onclick = () => h.onPlay();
   $<HTMLInputElement>('changes').onchange = e => h.onChanges((e.target as HTMLInputElement).checked);
-  $<HTMLSelectElement>('speed').onchange = e => h.onSpeed(parseFloat((e.target as HTMLSelectElement).value));
+  sel('speed').onchange = () => h.onSpeed(parseFloat(sel('speed').value));
+  $('setbase').onclick = () => h.onSetBaseline();
+  $('theme').onclick = () => h.onTheme();
+  document.querySelectorAll<HTMLButtonElement>('.tabs button').forEach(b => { b.onclick = () => h.onTab(b.dataset.tab as Tab); });
+  $('copyreport').onclick = () => h.onCopyReport();
 }
 
-let hotspotHandler: (i: number) => void = () => undefined;
+export function setColorMode(m: ColorMode) { $<HTMLSelectElement>('color').value = m; }
 
-/** Enable churn-based color modes only when the city carries churn data. */
 export function setChurnAvailable(on: boolean) {
-  for (const v of ['churn', 'hotspot']) {
-    $<HTMLSelectElement>('color').querySelectorAll<HTMLOptionElement>(`option[value="${v}"]`).forEach(o => { o.disabled = !on; });
+  for (const v of ['churn', 'hotspot', 'age', 'owner', 'knowledge']) {
+    document.querySelectorAll<HTMLOptionElement>(`#color option[value="${v}"]`).forEach(o => { o.disabled = !on; });
   }
   $<HTMLSelectElement>('cwin').disabled = !on;
-  if (!on && ['churn', 'hotspot'].includes($<HTMLSelectElement>('color').value)) $<HTMLSelectElement>('color').value = 'language';
 }
 
-export interface HotspotRow { index: number; path: string; commits: number; loc: number; score: number }
-
-export function showHotspots(rows: HotspotRow[] | null) {
-  const el = $('hotspots');
-  if (!rows) { el.hidden = true; return; }
-  el.replaceChildren();
-  const h = document.createElement('h4');
-  h.textContent = 'Top hotspots (changes × LOC)';
-  h.title = 'Code files only: docs, data and config are excluded from hotspots';
-  el.append(h);
-  for (const r of rows) {
-    const b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'hs';
-    b.title = `${r.path}\n${r.commits} commits × ${r.loc} LOC`;
-    const name = document.createElement('span');
-    name.textContent = '\u200E' + r.path; // keep the file name visible when the path is truncated on the left
-    const n = document.createElement('span');
-    n.textContent = `${r.commits}×${fmt(r.loc)}`;
-    b.append(name, n);
-    b.onclick = () => hotspotHandler(r.index);
-    el.append(b);
-  }
-  el.hidden = rows.length === 0;
+export function setBaselineRow(visible: boolean, label: string) {
+  $('baserow').hidden = !visible;
+  $('basedate').textContent = `baseline: ${label}`;
+  $('cwinrow').hidden = visible;
 }
 
 export function setForm(source: string, ref: string, commits: number, churn = true) {
-  $<HTMLInputElement>('churn').checked = churn;
   $<HTMLInputElement>('source').value = source;
   $<HTMLInputElement>('ref').value = ref;
   $<HTMLInputElement>('commits').value = String(commits);
+  $<HTMLInputElement>('churn').checked = churn;
 }
 
-export function getForm() {
-  return {
-    source: $<HTMLInputElement>('source').value.trim(),
-    ref: $<HTMLInputElement>('ref').value.trim(),
-    commits: parseInt($<HTMLInputElement>('commits').value, 10) || 100,
-    churn: $<HTMLInputElement>('churn').checked,
-  };
-}
-
-/** Configure the timeline for a city (hidden when there is only one commit). */
-export function setupTimeline(c: City) {
-  const tl = $('timeline');
-  tl.hidden = c.commits.length < 2;
-  const sc = $<HTMLInputElement>('scrub');
-  sc.max = String(c.commits.length - 1);
-  sc.value = String(c.commits.length - 1);
-  setPlaying(false);
-}
-
-export function setPlaying(p: boolean) { $('play').textContent = p ? '⏸' : '▶'; }
-
-export function showCommit(c: City, i: number) {
-  const k = c.commits[i];
-  $<HTMLInputElement>('scrub').value = String(i);
-  const when = $('when');
-  when.replaceChildren();
-  const date = new Date(k.date);
-  const b = document.createElement('b');
-  b.textContent = isNaN(date.getTime()) ? k.date : date.toISOString().slice(0, 10);
-  when.append(b, ` · ${i + 1}/${c.commits.length} · ${k.hash.slice(0, 8)} · ${k.author} · `, k.subject);
+export function flashCopied(text: string) {
+  const c = $('copied');
+  c.textContent = text;
+  setTimeout(() => { if (c.textContent === text) c.textContent = ''; }, 2500);
 }

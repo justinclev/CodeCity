@@ -1,45 +1,77 @@
 import './style.css';
 import { CityScene } from './scene';
+import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
-import type { City } from './types';
+import { SCHEMA_VERSION, type City, type ColorMode } from './types';
+import type { ThemeName } from './theme';
 
 const scene = new CityScene(document.getElementById('c') as HTMLCanvasElement);
 let city: City | null = null;
+let totals: { files: number; loc: number }[] = [];
+let tab: ui.Tab = 'hotspots';
+let insights: Insights | null = null;
+let selected = -1;
+let selectedDistrict = -1;
+
+// ---------------------------------------------------------------- storage helpers (best effort)
+const store = {
+  get<T>(k: string): T | null { try { return JSON.parse(localStorage.getItem('codecity.' + k) ?? 'null'); } catch { return null; } },
+  set(k: string, v: unknown) { try { localStorage.setItem('codecity.' + k, JSON.stringify(v)); } catch { /* unavailable */ } },
+};
+
+// ---------------------------------------------------------------- theme
+function applyTheme(name: ThemeName) {
+  ui.setTheme(name);
+  scene.setTheme(name);
+  store.set('theme', name);
+  if (city) redrawChart();
+}
+applyTheme(store.get<ThemeName>('theme') ?? 'night');
 
 // ---------------------------------------------------------------- loading
 function isCity(x: unknown): x is City {
   const c = x as City;
-  return !!c && c.version === 2 && Array.isArray(c.districts) && Array.isArray(c.buildings) &&
+  return !!c && c.version === SCHEMA_VERSION && Array.isArray(c.districts) && Array.isArray(c.buildings) &&
     Array.isArray(c.commits) && c.commits.length > 0 && !!c.bounds;
 }
 
 function show(c: City) {
   if (c.buildings.length === 0) { ui.setMessage('This repository has no countable source files.'); return; }
   stopPlayback();
+  const wanted = new URLSearchParams(location.hash.slice(1)).get('file'); // read before writeHash() replaces it
   city = c;
+  selected = selectedDistrict = -1;
   ui.setMessage('');
-  scene.load(c);
-  ui.showCityInfo(c);
+  ui.setPathResolver(i => c.buildings[i].path);
   ui.setChurnAvailable(c.churn === true);
-  scene.colorMode = (document.getElementById('color') as HTMLSelectElement).value as typeof scene.colorMode;
-  scene.refresh(true);
+  if (!c.churn && ['churn', 'hotspot', 'age', 'owner', 'knowledge'].includes(scene.colorMode)) scene.colorMode = 'language';
+  ui.setColorMode(scene.colorMode);
+  scene.load(c);
+  totals = scene.allTotals();
+  ui.showRepo(c);
   ui.setupTimeline(c);
+  (document.getElementById('repobox') as HTMLDetailsElement).open = false;
+  applyHash();
   onCommitChanged();
-  ui.showInfo(null);
+  closeInfo();
+  if (wanted) {
+    const i = c.buildings.findIndex(b => b.path === wanted);
+    if (i >= 0 && scene.exists(i)) setTimeout(() => { if (city === c) selectBuilding(i, true); }, 2700); // after the intro
+  }
 }
 
 async function fetchCity(url: string) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
   const data: unknown = await res.json();
-  if (!isCity(data)) throw new Error('not a city.json (schema version 2)');
+  if (!isCity(data)) throw new Error(`not a city.json (schema version ${SCHEMA_VERSION}); re-run the analysis`);
   show(data);
 }
 
 async function loadFile(f: File) {
   try {
     const data: unknown = JSON.parse(await f.text());
-    if (!isCity(data)) throw new Error('not a city.json (schema version 2)');
+    if (!isCity(data)) throw new Error(`not a city.json (schema version ${SCHEMA_VERSION})`);
     show(data);
   } catch (e) { ui.setJobStatus(`Could not read ${f.name}: ${(e as Error).message}`, true); }
 }
@@ -62,25 +94,22 @@ async function watchJob() {
   ui.setBusy(true);
   try {
     for (;;) {
-      const st = await api<Status>('/api/status');
-      const j = st.job;
+      const j = (await api<Status>('/api/status')).job;
       if (!j) break;
       if (j.state === 'running') {
+        ui.setProgress({ done: j.done, total: j.total });
         ui.setJobStatus(j.total ? `${j.stage} ${j.done}/${j.total}` : `${j.stage}…`);
         await new Promise(r => setTimeout(r, 400));
         continue;
       }
-      if (j.state === 'done') {
-        ui.setJobStatus('');
-        await fetchCity('/api/city');
-      } else if (j.state === 'error') {
-        ui.setJobStatus(j.error ?? 'analysis failed', true);
-      } else {
-        ui.setJobStatus('cancelled');
-      }
+      ui.setProgress(null);
+      if (j.state === 'done') { ui.setJobStatus(''); await fetchCity('/api/city'); }
+      else if (j.state === 'error') { ui.setJobStatus(j.error ?? 'analysis failed', true); (document.getElementById('repobox') as HTMLDetailsElement).open = true; }
+      else ui.setJobStatus('cancelled');
       break;
     }
   } catch (e) {
+    ui.setProgress(null);
     ui.setJobStatus((e as Error).message, true);
   } finally {
     watching = false;
@@ -88,53 +117,209 @@ async function watchJob() {
   }
 }
 
-function remember(source: string, ref: string, commits: number, churn: boolean) {
-  try { localStorage.setItem('codecity.form', JSON.stringify({ source, ref, commits, churn })); } catch { /* storage unavailable */ }
-}
-function recall(): { source: string; ref: string; commits: number; churn?: boolean } | null {
-  try { return JSON.parse(localStorage.getItem('codecity.form') ?? 'null'); } catch { return null; }
-}
-
 async function submit(source: string, ref: string, commits: number, churn: boolean) {
-  remember(source, ref, commits, churn);
+  store.set('form', { source, ref, commits, churn });
   ui.setJobStatus('starting…');
+  ui.setProgress({ done: 0, total: 0 });
   try {
-    await api('/api/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source, ref, maxCommits: commits, noChurn: !churn }),
-    });
+    await api('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source, ref, maxCommits: commits, noChurn: !churn }) });
     void watchJob();
   } catch (e) {
+    ui.setProgress(null);
     ui.setJobStatus((e as Error).message, true);
   }
 }
 
-// ---------------------------------------------------------------- playback
-let playing = false;
-let speed = 3; // commits per second
-let acc = 0;
-let last = 0;
+// ---------------------------------------------------------------- derived views
+const windowLabel = () => (scene.churnWindow ? `last ${scene.churnWindow} samples` : '');
+const commitLabel = (i: number) => city ? `${city.commits[i].date.slice(0, 10)} (${city.commits[i].hash.slice(0, 7)})` : '';
+
+function ownedFiles() {
+  const m = new Map<number, number>();
+  city!.buildings.forEach((b, i) => { if (b.own && scene.exists(i)) m.set(b.own[0], (m.get(b.own[0]) ?? 0) + 1); });
+  return m;
+}
+
+function refreshLegend() {
+  if (!city) return;
+  ui.showLegend({ mode: scene.colorMode, city, ownedFiles: ownedFiles(), authorFilter: scene.authorFilter,
+    onAuthor: setAuthorFilter, baselineLabel: commitLabel(scene.baseline) });
+  ui.setBaselineRow(scene.colorMode === 'compare', commitLabel(scene.baseline));
+}
+
+function refreshInsights() {
+  if (!city) return;
+  insights = compute(city, scene, 15);
+  ui.showInsights(insights, tab, city.churn, scene.authorFilter, scene.timeOf(), {
+    onPick: i => selectBuilding(i, true),
+    onPair: (a, b) => { selectBuilding(a, true); void b; },
+    onArea: d => selectDistrict(d, true),
+    onAuthor: setAuthorFilter,
+  });
+}
+
+let chartHover: number | null = null;
+function redrawChart() {
+  if (!city || city.commits.length < 2) return;
+  ui.drawChart(totals, scene.commit, scene.colorMode === 'compare' ? scene.baseline : null, chartHover);
+}
 
 function onCommitChanged() {
   if (!city) return;
   ui.showCommit(city, scene.commit);
-  const t = scene.totals();
-  ui.showStats(t.files, t.loc, city);
-  updateHotspots();
+  ui.showStats(totals[scene.commit], scene.commit > 0 ? totals[scene.commit - 1] : null, city.churn ? ownedFiles().size : null);
+  redrawChart();
+  refreshLegend();
+  refreshInsights();
   refreshSelection();
-}
-
-function updateHotspots() {
-  if (!city) return;
-  const show = city.churn && (scene.colorMode === 'churn' || scene.colorMode === 'hotspot');
-  ui.showHotspots(show ? scene.topHotspots(10).map(h => ({ ...h, path: city!.buildings[h.index].path })) : null);
+  writeHash();
 }
 
 function setCommit(i: number) {
   scene.setCommit(i);
   onCommitChanged();
 }
+
+function setColor(m: ColorMode) {
+  scene.colorMode = m;
+  ui.setColorMode(m);
+  scene.refresh(false);
+  refreshLegend();
+  redrawChart();
+  writeHash();
+}
+
+function setAuthorFilter(a: number) {
+  scene.setAuthorFilter(a);
+  if (a >= 0 && scene.colorMode !== 'owner') setColor('owner');
+  refreshLegend();
+  refreshInsights();
+}
+
+// ---------------------------------------------------------------- selection
+function links(path: string): { label: string; href: string }[] {
+  const out: { label: string; href: string }[] = [];
+  const hash = city!.commits[scene.commit].hash;
+  const remote = city!.repo.remote ?? '';
+  const gh = remote.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  const gl = remote.match(/gitlab\.com[/:](.+?)(?:\.git)?\/?$/);
+  const enc = path.split('/').map(encodeURIComponent).join('/');
+  if (gh) {
+    out.push({ label: 'GitHub ↗', href: `https://github.com/${gh[1]}/${gh[2]}/blob/${hash}/${enc}` });
+    out.push({ label: 'History ↗', href: `https://github.com/${gh[1]}/${gh[2]}/commits/${hash}/${enc}` });
+  } else if (gl) {
+    out.push({ label: 'GitLab ↗', href: `https://gitlab.com/${gl[1]}/-/blob/${hash}/${enc}` });
+  }
+  if (city!.repo.path) out.push({ label: 'Open in VS Code', href: `vscode://file${encodeURI(city!.repo.path.replace(/\\/g, '/'))}/${enc}` });
+  return out;
+}
+
+const infoHandlers: ui.InfoHandlers = {
+  onClose: () => closeInfo(),
+  onPick: i => selectBuilding(i, true),
+  onZoomDistrict: () => { if (selectedDistrict >= 0) scene.focusDistrict(selectedDistrict); },
+};
+
+function buildingInfo(i: number): ui.BuildingInfo {
+  const c = city!;
+  const b = c.buildings[i];
+  const v = scene.valuesAt(i);
+  const ch = scene.churnAt(i);
+  const now = scene.timeOf();
+  const author = b.own ? c.authors?.[b.own[0]] : undefined;
+  return {
+    name: b.name, path: b.path, lang: b.lang, district: c.districts[b.district].path,
+    loc: v.loc, lines: v.lines, bytes: v.bytes, complexity: v.complexity,
+    series: scene.series(i), commit: scene.commit,
+    churn: c.churn ? { ...ch, windowLabel: windowLabel(), lastChange: v.lastChange, now } : undefined,
+    owner: b.own && author ? { name: author.name, share: Math.round((b.own[1] / Math.max(1, scene.totalCommits(i))) * 100),
+      authors: b.own[2], risk: scene.risk(i), lastActive: author.last } : undefined,
+    coupled: (b.cpl ?? []).filter(([j]) => scene.exists(j)).map(([j, shared, degree]) => ({ index: j, path: c.buildings[j].path, shared, degree })),
+    links: links(b.path),
+  };
+}
+
+function selectBuilding(i: number, fly: boolean) {
+  if (!city || i < 0 || !scene.exists(i)) return;
+  selected = i;
+  selectedDistrict = -1;
+  scene.setSelectedDistrict(-1);
+  scene.setSelected(i);
+  ui.showBuilding(buildingInfo(i), infoHandlers);
+  if (fly) scene.focus(i);
+  writeHash();
+}
+
+function districtInfo(d: number): ui.DistrictInfo {
+  const c = city!;
+  const x = c.districts[d];
+  const members = scene.districtMembers(d);
+  const owners = new Set<number>();
+  let loc = 0, complexity = 0, commits = 0;
+  for (const i of members) {
+    const v = scene.valuesAt(i);
+    loc += v.loc;
+    if (scene.isCode(i)) complexity += v.complexity;
+    commits += scene.churnAt(i).commits;
+    const o = c.buildings[i].own;
+    if (o) owners.add(o[0]);
+  }
+  const set = new Set(members);
+  const top = c.churn ? scene.topHotspots(5, i => set.has(i)).map(h => ({ index: h.index, path: c.buildings[h.index].path, label: `${h.commits} × ${ui.fmt(h.loc)}` })) : [];
+  return { name: x.name, path: x.path, files: members.length, loc, complexity, commits, owners: owners.size, top };
+}
+
+function selectDistrict(d: number, fly: boolean) {
+  if (!city) return;
+  selected = -1;
+  scene.setSelected(-1);
+  selectedDistrict = d;
+  scene.setSelectedDistrict(d);
+  ui.showDistrict(districtInfo(d), infoHandlers);
+  if (fly) scene.focusDistrict(d);
+  writeHash();
+}
+
+function closeInfo() {
+  selected = selectedDistrict = -1;
+  scene.setSelected(-1);
+  scene.setSelectedDistrict(-1);
+  ui.showBuilding(null, infoHandlers);
+  writeHash();
+}
+
+function refreshSelection() {
+  if (!city) return;
+  if (selected >= 0) {
+    if (scene.exists(selected)) ui.showBuilding(buildingInfo(selected), infoHandlers);
+    else closeInfo();
+  } else if (selectedDistrict >= 0) ui.showDistrict(districtInfo(selectedDistrict), infoHandlers);
+}
+
+// ---------------------------------------------------------------- deep links (#c=..&color=..&file=..)
+function writeHash() {
+  if (!city) return;
+  const p = new URLSearchParams();
+  if (scene.commit !== city.commits.length - 1) p.set('c', city.commits[scene.commit].hash.slice(0, 12));
+  if (scene.colorMode !== 'language') p.set('color', scene.colorMode);
+  if (selected >= 0) p.set('file', city.buildings[selected].path);
+  const h = p.toString();
+  history.replaceState(null, '', h ? '#' + h : location.pathname + location.search);
+}
+
+function applyHash() {
+  if (!city) return;
+  const p = new URLSearchParams(location.hash.slice(1));
+  const color = p.get('color') as ColorMode | null;
+  const opt = color && document.querySelector<HTMLOptionElement>(`#color option[value="${color}"]`);
+  if (opt && !opt.disabled) { scene.colorMode = color!; ui.setColorMode(color!); scene.refresh(true); }
+  const c = p.get('c');
+  if (c) { const i = city.commits.findIndex(k => k.hash.startsWith(c)); if (i >= 0) scene.setCommit(i); }
+}
+
+// ---------------------------------------------------------------- playback
+let playing = false, speed = 3, acc = 0, last = 0;
 
 function tick(now: number) {
   if (!playing) return;
@@ -148,65 +333,73 @@ function tick(now: number) {
   }
   if (playing) requestAnimationFrame(tick);
 }
-
 function startPlayback() {
   if (!city || scene.commitCount < 2) return;
   if (scene.commit >= scene.commitCount - 1) setCommit(0);
-  playing = true;
-  acc = 0;
-  last = performance.now();
+  playing = true; acc = 0; last = performance.now();
   ui.setPlaying(true);
   requestAnimationFrame(tick);
 }
-
 function stopPlayback() { playing = false; ui.setPlaying(false); }
 
-// ---------------------------------------------------------------- selection / hover
-let selected = -1;
+// ---------------------------------------------------------------- controls
+let searchHits: number[] = [];
+ui.bindControls({
+  onMetric: v => { scene.metric = v; scene.refresh(false); },
+  onScale: v => { scene.scale = v; scene.refresh(false); },
+  onMult: v => { scene.mult = v; scene.refresh(false); },
+  onColor: v => setColor(v),
+  onChurnWindow: v => { scene.churnWindow = v; scene.refresh(false); refreshInsights(); refreshSelection(); },
+  onSearch: q => {
+    if (!city) return;
+    searchHits = scene.search(q);
+    ui.showResults(searchHits.slice(0, 8).map(i => ({ index: i, path: city!.buildings[i].path })), searchHits.length, i => selectBuilding(i, true));
+  },
+  onSearchEnter: () => { if (searchHits.length) selectBuilding(searchHits[0], true); },
+  onSubmit: (s, r, c, ch) => void submit(s, r, c, ch),
+  onCancel: () => void api('/api/cancel', { method: 'POST' }).catch(() => undefined),
+  onScrub: i => { stopPlayback(); setCommit(i); },
+  onPlay: () => (playing ? stopPlayback() : startPlayback()),
+  onChanges: v => scene.setShowChanges(v),
+  onSpeed: v => { speed = v; },
+  onSetBaseline: () => { scene.baseline = scene.commit; scene.refresh(false); refreshLegend(); redrawChart(); },
+  onTheme: () => applyTheme(scene.theme.name === 'night' ? 'day' : 'night'),
+  onTab: t => { tab = t; store.set('tab', t); refreshInsights(); },
+  onCopyReport: () => {
+    if (!city || !insights) return;
+    const md = markdown(city, scene, insights, windowLabel() || 'all history');
+    navigator.clipboard?.writeText(md).then(() => ui.flashCopied('Copied'), () => ui.flashCopied('Clipboard blocked'));
+  },
+});
+tab = store.get<ui.Tab>('tab') ?? 'hotspots';
 
-function infoFor(i: number) {
-  const b = city!.buildings[i];
-  const v = scene.valuesAt(i);
-  return { name: b.name, path: b.path, lang: b.lang, district: city!.districts[b.district].path,
-    loc: v.loc, lines: v.lines, bytes: v.bytes, series: scene.series(i), commit: scene.commit,
-    churn: city!.churn ? { ...scene.churnAt(i), windowLabel: scene.churnWindow ? `last ${scene.churnWindow} samples` : 'all so far' } : undefined };
-}
-
-function refreshSelection() {
-  if (selected >= 0 && city) {
-    if (scene.valuesAt(selected).exists) ui.showInfo(infoFor(selected));
-    else { selected = -1; scene.setSelected(-1); ui.showInfo(null); }
-  }
-}
-
-bindControls();
-function bindControls() {
-  ui.bindControls({
-    onMetric: v => { scene.metric = v; scene.refresh(false); },
-    onScale: v => { scene.scale = v; scene.refresh(false); },
-    onMult: v => { scene.mult = v; scene.refresh(false); },
-    onColor: v => { scene.colorMode = v; scene.refresh(false); updateHotspots(); },
-    onChurnWindow: v => { scene.churnWindow = v; scene.refresh(false); updateHotspots(); refreshSelection(); },
-    onHotspot: i => { scene.focus(i); selected = i; scene.setSelected(i); ui.showInfo(infoFor(i)); },
-    onSearch: q => { scene.search(q); },
-    onSubmit: (s, r, c, ch) => void submit(s, r, c, ch),
-    onCancel: () => void api('/api/cancel', { method: 'POST' }).catch(() => undefined),
-    onScrub: i => { stopPlayback(); setCommit(i); },
-    onPlay: () => (playing ? stopPlayback() : startPlayback()),
-    onChanges: v => scene.setShowChanges(v),
-    onSpeed: v => { speed = v; },
-  });
-}
+// timeline chart: hover shows a marker, click seeks, shift-click sets the compare baseline
+const chart = document.getElementById('chart')!;
+chart.addEventListener('mousemove', e => { if (!city) return; chartHover = ui.chartIndex(e, city.commits.length); redrawChart(); });
+chart.addEventListener('mouseleave', () => { chartHover = null; redrawChart(); });
+chart.addEventListener('click', e => {
+  if (!city) return;
+  const i = ui.chartIndex(e, city.commits.length);
+  if (e.shiftKey) { scene.baseline = i; if (scene.colorMode !== 'compare') setColor('compare'); else scene.refresh(false); refreshLegend(); redrawChart(); return; }
+  stopPlayback();
+  setCommit(i);
+});
+addEventListener('resize', () => redrawChart());
 
 addEventListener('keydown', e => {
   const t = e.target as HTMLElement;
-  if (t.tagName === 'INPUT' && (t as HTMLInputElement).type !== 'range' && (t as HTMLInputElement).type !== 'checkbox') return;
-  if (t.tagName === 'SELECT') return;
+  const typing = (t.tagName === 'INPUT' && !['range', 'checkbox'].includes((t as HTMLInputElement).type)) || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA';
+  if (typing) return;
   if (e.code === 'Space') { e.preventDefault(); playing ? stopPlayback() : startPlayback(); }
-  else if (e.code === 'ArrowLeft' && city) { stopPlayback(); setCommit(scene.commit - 1); }
-  else if (e.code === 'ArrowRight' && city) { stopPlayback(); setCommit(scene.commit + 1); }
+  else if (e.key === 'ArrowLeft' && city) { stopPlayback(); setCommit(scene.commit - 1); }
+  else if (e.key === 'ArrowRight' && city) { stopPlayback(); setCommit(scene.commit + 1); }
+  else if (e.key === 'Escape') { closeInfo(); if (scene.authorFilter >= 0) setAuthorFilter(-1); }
+  else if (e.key === 'f' || e.key === 'F') { if (city) scene.frame(); }
+  else if (e.key === 't' || e.key === 'T') applyTheme(scene.theme.name === 'night' ? 'day' : 'night');
+  else if (e.key === '/') { e.preventDefault(); (document.getElementById('search') as HTMLInputElement).focus(); }
 });
 
+// ---------------------------------------------------------------- pointer
 const canvas = scene.renderer.domElement;
 let pending: { x: number; y: number } | null = null;
 canvas.addEventListener('pointermove', e => {
@@ -217,10 +410,20 @@ canvas.addEventListener('pointermove', e => {
   requestAnimationFrame(() => {
     const p = pending; pending = null;
     if (!p || !city) return;
-    const i = scene.pick(p.x, p.y);
-    scene.setHover(i);
-    ui.showTip(i >= 0 ? [city.buildings[i].path, `${city.buildings[i].lang} · ${ui.fmt(scene.valuesAt(i).loc)} LOC`] : null, p.x, p.y);
-    canvas.style.cursor = i >= 0 ? 'pointer' : 'grab';
+    const hit = scene.pick(p.x, p.y);
+    if (hit?.kind === 'building') {
+      const i = hit.index, b = city.buildings[i], v = scene.valuesAt(i);
+      scene.setHover(i);
+      const extra: string[] = [`${b.lang}`, `${ui.fmt(v.loc)} LOC`, `complexity ${ui.fmt(v.complexity)}`];
+      if (city.churn) extra.push(`${scene.churnAt(i).commits} commits`);
+      ui.showTip([b.path, extra.join(' · ')], p.x, p.y);
+      canvas.style.cursor = 'pointer';
+    } else {
+      scene.setHover(-1);
+      if (hit?.kind === 'district') ui.showTip([city.districts[hit.index].path + '/', 'directory · click for stats'], p.x, p.y);
+      else ui.showTip(null, 0, 0);
+      canvas.style.cursor = hit ? 'pointer' : 'grab';
+    }
   });
 });
 canvas.addEventListener('pointerleave', () => { scene.setHover(-1); ui.showTip(null, 0, 0); });
@@ -231,10 +434,17 @@ canvas.addEventListener('pointerup', e => {
   if (!down || !city) return;
   const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4;
   down = null;
-  if (moved) return; // it was an orbit drag
-  selected = scene.pick(e.clientX, e.clientY);
-  scene.setSelected(selected);
-  ui.showInfo(selected >= 0 ? infoFor(selected) : null);
+  if (moved || e.button !== 0) return; // orbit / pan drag
+  const hit = scene.pick(e.clientX, e.clientY);
+  if (hit?.kind === 'building') selectBuilding(hit.index, false);
+  else if (hit?.kind === 'district') selectDistrict(hit.index, false);
+  else closeInfo();
+});
+canvas.addEventListener('dblclick', e => {
+  if (!city) return;
+  const hit = scene.pick(e.clientX, e.clientY);
+  if (hit?.kind === 'building') selectBuilding(hit.index, true);
+  else if (hit?.kind === 'district') selectDistrict(hit.index, true);
 });
 
 // drag & drop a city.json
@@ -249,11 +459,11 @@ addEventListener('drop', e => {
 
 // ---------------------------------------------------------------- startup
 async function start() {
-  const saved = recall();
+  const saved = store.get<{ source: string; ref: string; commits: number; churn?: boolean }>('form');
   if (saved) ui.setForm(saved.source, saved.ref, saved.commits, saved.churn ?? true);
 
   const src = new URLSearchParams(location.search).get('src');
-  if (src) { // static mode: load a city.json from a URL
+  if (src) {
     try { await fetchCity(src); } catch (e) { ui.setMessage(`Could not load ${src}: ${(e as Error).message}`); }
     return;
   }
@@ -261,7 +471,6 @@ async function start() {
   try {
     st = await api<Status>('/api/status');
   } catch {
-    // no API (static hosting): fall back to a city.json next to the page
     fetchCity('city.json').catch(() => ui.setMessage('No city loaded.\n\nDrop a city.json onto this page.'));
     return;
   }

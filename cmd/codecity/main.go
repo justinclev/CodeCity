@@ -12,6 +12,7 @@ import (
 
 	"github.com/justinclev/codecity/internal/analyze"
 	"github.com/justinclev/codecity/internal/city"
+	"github.com/justinclev/codecity/internal/insights"
 	"github.com/justinclev/codecity/internal/server"
 )
 
@@ -22,6 +23,7 @@ const usage = `codecity - render a git repository as a 3D city
 Usage:
   codecity analyze <repo> [flags]   write city.json
   codecity serve   [repo] [flags]   serve the viewer; repo is optional, you can also pick one in the page
+  codecity report  <repo> [flags]   print a Markdown report: hotspots, coupling, knowledge risk
   codecity version
 
 <repo> is a local path or a git URL (https://, ssh://, git@host:path).
@@ -37,7 +39,8 @@ Flags:
   --max-commits <n>   history samples (default 100; 1 = snapshot only)
   --no-churn          skip change-frequency analysis (hotspots); allows a shallow clone for --max-commits 1
   --min-weight <n>    minimum footprint weight per file (default 8)
-  -o <file>           analyze: output file, "-" for stdout (default city.json)
+  -o <file>           analyze: output file, "-" for stdout (default city.json); report: default stdout
+  --top <n>           report: rows per section (default 15)
   --addr <host:port>  serve: listen address (default 127.0.0.1:8080)
   --web-dir <dir>     serve: use viewer files from a directory instead of the embedded build
   -q                  quiet
@@ -55,7 +58,7 @@ func main() {
 	}
 	cmd, args := os.Args[1], os.Args[2:]
 	switch cmd {
-	case "analyze", "serve":
+	case "analyze", "serve", "report":
 		if err := run(cmd, args); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
@@ -85,6 +88,7 @@ func run(cmd string, args []string) error {
 	addr := fs.String("addr", "127.0.0.1:8080", "")
 	webDir := fs.String("web-dir", "", "")
 	quiet := fs.Bool("q", false, "")
+	topN := fs.Int("top", 15, "")
 
 	// allow the repo argument before or after flags
 	var pos []string
@@ -99,7 +103,7 @@ func run(cmd string, args []string) error {
 			rest = rest[1:]
 		}
 	}
-	if len(pos) > 1 || (len(pos) == 0 && cmd == "analyze") {
+	if len(pos) > 1 || (len(pos) == 0 && cmd != "serve") {
 		return fmt.Errorf("expected exactly one <repo> argument")
 	}
 	logf := func(f string, a ...any) {
@@ -110,7 +114,7 @@ func run(cmd string, args []string) error {
 	base := analyze.Options{Ref: *ref, Excludes: excludes, IncludeVendored: *incV, IncludeGenerated: *incG,
 		MinWeight: *minW, MaxCommits: *maxC, NoChurn: *noChurn}
 
-	if cmd == "analyze" {
+	if cmd == "analyze" || cmd == "report" {
 		o := base
 		o.Source = pos[0]
 		stage := ""
@@ -124,6 +128,14 @@ func run(cmd string, args []string) error {
 			return err
 		}
 		logf("%s @ %s: %d commits, %d files, %d LOC (skipped %v)", c.Repo.Name, c.Repo.Commit[:8], len(c.Commits), c.Stats.Files, c.Stats.LOC, c.Stats.Skipped)
+		if cmd == "report" {
+			md := insights.Compute(c, *topN).Markdown()
+			if *out == "city.json" || *out == "-" { // default for report is stdout
+				_, err := fmt.Print(md)
+				return err
+			}
+			return os.WriteFile(*out, []byte(md), 0o644)
+		}
 		return writeCity(c, *out)
 	}
 

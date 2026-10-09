@@ -30,3 +30,12 @@ export function districtColor(depth: number): THREE.Color {
   const l = Math.max(0.07, 0.17 - depth * 0.018);
   return new THREE.Color().setHSL(0.62, 0.35, l);
 }
+
+const AUTHOR_PALETTE = ['#ff6b6b', '#4dabf7', '#ffd43b', '#69db7c', '#da77f2', '#ff922b', '#38d9a9', '#f783ac', '#a9e34b', '#74c0fc', '#e599f7', '#ffa94d'];
+
+/** Distinct colors for the top authors; everyone else shares a neutral grey. */
+export function authorColor(index: number): THREE.Color {
+  return new THREE.Color(index < AUTHOR_PALETTE.length ? AUTHOR_PALETTE[index] : '#7d8597');
+}
+
+export const AUTHOR_COLORS = AUTHOR_PALETTE.length;

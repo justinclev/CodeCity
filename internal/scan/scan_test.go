@@ -63,3 +63,10 @@ func TestContentSkip(t *testing.T) {
 		t.Error("plain")
 	}
 }
+
+func TestComplexity(t *testing.T) {
+	src := "func a() {\n\tif x {\n\t\ty()\n\t}\n\n        z()\n}\n"
+	if m := Measure([]byte(src)); m.Complexity != 1+2+1+2 {
+		t.Errorf("complexity = %d", m.Complexity)
+	}
+}

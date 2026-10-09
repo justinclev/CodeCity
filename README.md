@@ -9,12 +9,19 @@ make build
 ./bin/codecity serve https://github.com/expressjs/express --max-commits 60
 ./bin/codecity serve . --ref v1.2.0 --exclude 'docs/' --exclude '*.snap'
 ./bin/codecity analyze . -o city.json                    # just the data
+./bin/codecity report https://github.com/expressjs/express > report.md   # Markdown findings for CI / PRs
 ```
 
 Open http://127.0.0.1:8080. Type a local path or git URL in the panel (plus optional ref and number of history samples) and press Analyze; progress is shown and can be cancelled.
 
 - **History:** the first-parent history up to the ref is sampled (default 100 commits). Use the timeline to scrub or play (space, arrow keys); buildings grow, shrink, appear and vanish. The layout never moves: footprints are fixed by each file's peak size. Green/amber tint = added/changed in that commit.
-- **Churn & hotspots:** from `git log`. Color by *churn* (changes in the chosen window) or *hotspot* (changes × LOC, code files only). The panel lists the top hotspots; click one to jump to it.
+- **Hotspots:** change frequency × indentation complexity, the files where refactoring pays off most.
+- **Change coupling:** files that keep changing in the same commits. Select a file to see glowing arcs to its partners.
+- **Knowledge risk & owners:** owner (most commits) per file, author count, owners who have gone inactive. Click a person to light up their files.
+- **Code age, complexity, compare:** color by time since last change, by complexity, or by growth since a baseline commit (shift-click the timeline).
+- **Insights panel:** Hotspots / Coupling / Risk / Complex / Areas / People, all clickable, plus *Copy report as Markdown*.
+- **Inspector:** metrics, history sparkline, ownership, coupled files, GitHub / VS Code links. Click a directory for its stats. Deep links: the URL hash keeps the commit, color mode and selected file.
+- Day/night themes (T), search with jump (/ then Enter), F for overview, Esc to clear.
 - Orbit with the mouse, hover for details, click a building (with a LOC sparkline), search to dim non-matches, change height metric / scale / color. You can also drop a `city.json` onto the page.
 
 Requirements: Go 1.24+, git, Node 20+ (to build the viewer).

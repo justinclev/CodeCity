@@ -20,8 +20,9 @@ const DefaultMaxBytes = 2 << 20
 
 // Metrics for one file.
 type Metrics struct {
-	Lines int
-	LOC   int
+	Lines      int
+	LOC        int
+	Complexity int // indentation complexity: sum of logical indent levels of non-blank lines
 }
 
 var vendorDirs = map[string]bool{"node_modules": true, "vendor": true, "third_party": true, "bower_components": true, ".git": true}
@@ -123,7 +124,10 @@ func isGenerated(head []byte) bool {
 	return strings.Contains(s, "code generated") && strings.Contains(s, "do not edit")
 }
 
-// Measure counts total and non-blank lines.
+// Measure counts total and non-blank lines and the indentation complexity
+// (Tornhill, "Your Code as a Crime Scene"): every non-blank line contributes its
+// logical indentation depth, where a tab or four spaces is one level. It is a
+// language-agnostic proxy that tracks nesting and correlates with McCabe complexity.
 func Measure(b []byte) Metrics {
 	var m Metrics
 	for len(b) > 0 {
@@ -135,9 +139,23 @@ func Measure(b []byte) Metrics {
 			b = nil
 		}
 		m.Lines++
-		if len(bytes.TrimSpace(line)) > 0 {
-			m.LOC++
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
 		}
+		m.LOC++
+		tabs, spaces := 0, 0
+	indent:
+		for _, c := range line {
+			switch c {
+			case '\t':
+				tabs++
+			case ' ':
+				spaces++
+			default:
+				break indent
+			}
+		}
+		m.Complexity += tabs + spaces/4
 	}
 	return m
 }

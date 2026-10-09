@@ -1,14 +1,15 @@
 // Package city defines the city.json schema consumed by the viewer.
 package city
 
-const Version = 2
+const Version = 3
 
 type City struct {
 	Version   int        `json:"version"`
 	Repo      Repo       `json:"repo"`
-	Stats     Stats      `json:"stats"`   // for the newest commit
-	Commits   []Commit   `json:"commits"` // oldest first; at least one
-	HasChurn  bool       `json:"churn"`   // Building.Churn is populated
+	Stats     Stats      `json:"stats"`             // for the newest commit
+	Commits   []Commit   `json:"commits"`           // oldest first; at least one
+	HasChurn  bool       `json:"churn"`             // Building.Churn and Building.Own are populated
+	Authors   []Author   `json:"authors,omitempty"` // owners of at least one file, most commits first
 	Bounds    Bounds     `json:"bounds"`
 	Districts []District `json:"districts"`
 	Buildings []Building `json:"buildings"`
@@ -18,6 +19,7 @@ type Repo struct {
 	Name       string `json:"name"`
 	Source     string `json:"source"`
 	Remote     string `json:"remote,omitempty"`
+	Path       string `json:"path,omitempty"` // absolute work tree of a local repo (for editor links)
 	Ref        string `json:"ref"`
 	Commit     string `json:"commit"`
 	AnalyzedAt string `json:"analyzedAt"`
@@ -31,12 +33,20 @@ type Commit struct {
 	Subject string `json:"subject"`
 }
 
-// Point is one change in a file's size history: [commit index, loc, lines, bytes].
+// Point is one change in a file's size history: [commit index, loc, lines, bytes, complexity].
 // loc == Absent means the file does not exist from that commit on (until the next point).
-type Point [4]int
+type Point [5]int
 
 // Absent marks a file that does not exist at a commit.
 const Absent = -1
+
+// Author is a contributor (git mailmap name).
+type Author struct {
+	Name    string `json:"name"`
+	Commits int    `json:"commits"` // non-merge commits up to the newest sample
+	Files   int    `json:"files"`   // files they own (most commits to the file)
+	Last    int64  `json:"last"`    // unix time of their newest commit
+}
 
 type LangStat struct {
 	Files int `json:"files"`
@@ -85,7 +95,14 @@ type Building struct {
 	W        float64 `json:"w"`
 	D        float64 `json:"d"`
 	H        []Point `json:"h"`
-	// Churn is sparse: [commit index i, commits, lines changed] for changes landing in
-	// (sample i-1, sample i]; everything up to the first sample is attributed to index 0.
-	Churn [][3]int `json:"ch,omitempty"`
+	// Churn is sparse: [commit index i, commits, lines changed, newest commit unix time]
+	// for changes landing in (sample i-1, sample i]; everything up to the first sample
+	// is attributed to index 0.
+	Churn [][4]int64 `json:"ch,omitempty"`
+	// Own is [author index, owner's commits to this file, distinct authors] over all
+	// history up to the newest sample; nil when the file has no recorded changes.
+	Own *[3]int `json:"own,omitempty"`
+	// Coupling lists files that change in the same commits:
+	// [building index, shared commits, degree %] where degree = shared / mean(revisions).
+	Coupling [][3]int `json:"cpl,omitempty"`
 }

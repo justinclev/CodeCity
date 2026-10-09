@@ -113,6 +113,18 @@ func Open(ctx context.Context, source, ref string, shallow bool) (*Repo, error) 
 	return &Repo{Dir: abs, Source: source}, nil
 }
 
+// LocalPath returns the absolute work tree of a local (non-cloned) repo, or "".
+func (r *Repo) LocalPath(ctx context.Context) string {
+	if r.cleanup != nil {
+		return ""
+	}
+	out, err := run(ctx, r.Dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // Close removes any temporary clone.
 func (r *Repo) Close() {
 	if r.cleanup != nil {
@@ -305,14 +317,30 @@ func (b *BlobReader) Close() {
 // ChurnStat is how often and how much a file changed in a commit range.
 type ChurnStat struct {
 	Commits int
-	Lines   int // added + deleted
+	Lines   int            // added + deleted
+	Last    int64          // newest commit time (unix seconds) touching the file
+	Authors map[string]int // commits per author (mailmap-aware name)
+}
+
+// AuthorStat is an author's activity within a range.
+type AuthorStat struct {
+	Commits int
+	Last    int64 // newest commit time (unix seconds)
+}
+
+// ChurnResult is the per-file churn of a range, per-author activity, and the
+// file sets of each commit (for change coupling).
+type ChurnResult struct {
+	Files      map[string]*ChurnStat
+	Authors    map[string]*AuthorStat
+	CommitSets [][]string
 }
 
 // Churn aggregates per-file changes of non-merge commits reachable from `to`
 // but not from `from` (from == "" means all history up to `to`). Renames are
 // reported as delete + add so paths stay consistent with the tree listing.
-func (r *Repo) Churn(ctx context.Context, from, to string) (map[string]ChurnStat, error) {
-	args := []string{"log", "--no-merges", "--numstat", "--no-renames", "-z", "--format=%x01%H", "--end-of-options"}
+func (r *Repo) Churn(ctx context.Context, from, to string) (*ChurnResult, error) {
+	args := []string{"log", "--no-merges", "--numstat", "--no-renames", "-z", "--format=%x01%H%x02%aN%x02%ct", "--end-of-options"}
 	if from != "" {
 		args = append(args, from+".."+to)
 	} else {
@@ -322,10 +350,36 @@ func (r *Repo) Churn(ctx context.Context, from, to string) (map[string]ChurnStat
 	if err != nil {
 		return nil, err
 	}
-	m := map[string]ChurnStat{}
+	res := &ChurnResult{Files: map[string]*ChurnStat{}, Authors: map[string]*AuthorStat{}}
+	author := ""
+	var ts int64
+	var set []string
+	flush := func() {
+		if len(set) > 0 {
+			res.CommitSets = append(res.CommitSets, set)
+		}
+		set = nil
+	}
 	for _, tok := range strings.Split(out, "\x00") {
 		tok = strings.TrimPrefix(tok, "\n")
-		if tok == "" || tok[0] == 1 { // empty or a commit header
+		if tok == "" {
+			continue
+		}
+		if tok[0] == 1 { // commit header: \x01<hash>\x02<author>\x02<unix time>
+			flush()
+			h := strings.Split(tok[1:], "\x02")
+			author, ts = "", 0
+			if len(h) == 3 {
+				author = h[1]
+				ts, _ = strconv.ParseInt(strings.TrimSpace(h[2]), 10, 64)
+			}
+			a := res.Authors[author]
+			if a == nil {
+				a = &AuthorStat{}
+				res.Authors[author] = a
+			}
+			a.Commits++
+			a.Last = max(a.Last, ts)
 			continue
 		}
 		f := strings.SplitN(tok, "\t", 3)
@@ -334,12 +388,19 @@ func (r *Repo) Churn(ctx context.Context, from, to string) (map[string]ChurnStat
 		}
 		a, _ := strconv.Atoi(f[0]) // "-" for binary → 0
 		d, _ := strconv.Atoi(f[1])
-		s := m[f[2]]
+		s := res.Files[f[2]]
+		if s == nil {
+			s = &ChurnStat{Authors: map[string]int{}}
+			res.Files[f[2]] = s
+		}
 		s.Commits++
 		s.Lines += a + d
-		m[f[2]] = s
+		s.Last = max(s.Last, ts)
+		s.Authors[author]++
+		set = append(set, f[2])
 	}
-	return m, nil
+	flush()
+	return res, nil
 }
 
 // IsShallow reports whether the repository lacks full history.
