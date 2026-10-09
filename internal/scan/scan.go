@@ -126,17 +126,18 @@ func isGenerated(head []byte) bool {
 // Measure counts total and non-blank lines.
 func Measure(b []byte) Metrics {
 	var m Metrics
-	if len(b) == 0 {
-		return m
-	}
-	for _, line := range bytes.Split(b, []byte("\n")) {
+	for len(b) > 0 {
+		i := bytes.IndexByte(b, '\n')
+		line := b
+		if i >= 0 {
+			line, b = b[:i], b[i+1:]
+		} else {
+			b = nil
+		}
 		m.Lines++
 		if len(bytes.TrimSpace(line)) > 0 {
 			m.LOC++
 		}
-	}
-	if b[len(b)-1] == '\n' { // trailing newline does not start a new line
-		m.Lines--
 	}
 	return m
 }

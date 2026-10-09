@@ -1,10 +1,14 @@
 package analyze
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+
+	"github.com/justinclev/codecity/internal/city"
+	"github.com/justinclev/codecity/internal/gitx"
 )
 
 func gitIn(t *testing.T, dir string, args ...string) {
@@ -47,7 +51,7 @@ func fixture(t *testing.T) string {
 }
 
 func TestRunLocal(t *testing.T) {
-	c, err := Run(Options{Source: fixture(t)})
+	c, err := Run(context.Background(), Options{Source: fixture(t)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,20 +63,20 @@ func TestRunLocal(t *testing.T) {
 			t.Errorf("skipped[%s] = %d, want %d (%v)", r, c.Stats.Skipped[r], n, c.Stats.Skipped)
 		}
 	}
-	var main *int
-	for i, b := range c.Buildings {
-		if b.Path == "main.go" {
-			main = &c.Buildings[i].LOC
-		}
-		if b.Path == "untracked.go" {
+	mainLOC := -99
+	for _, b := range c.Buildings {
+		switch b.Path {
+		case "main.go":
+			mainLOC = b.H[len(b.H)-1][1]
+		case "untracked.go":
 			t.Error("untracked file included")
 		}
 		if b.W <= 0 || b.D <= 0 {
 			t.Errorf("%s has empty footprint", b.Path)
 		}
 	}
-	if main == nil || *main != 2 {
-		t.Errorf("main.go should be measured from HEAD (2 LOC), got %v", main)
+	if mainLOC != 2 {
+		t.Errorf("main.go should be measured from HEAD (2 LOC), got %d", mainLOC)
 	}
 	var collapsed bool
 	for _, d := range c.Districts {
@@ -90,7 +94,7 @@ func TestRunLocal(t *testing.T) {
 
 func TestRunFileURL(t *testing.T) {
 	dir := fixture(t)
-	c, err := Run(Options{Source: "file://" + dir, Ref: "main"})
+	c, err := Run(context.Background(), Options{Source: "file://" + dir, Ref: "main"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,13 +104,112 @@ func TestRunFileURL(t *testing.T) {
 }
 
 func TestBadInputs(t *testing.T) {
-	if _, err := Run(Options{Source: t.TempDir()}); err == nil {
+	if _, err := Run(context.Background(), Options{Source: t.TempDir()}, nil); err == nil {
 		t.Error("non-repo should fail")
 	}
-	if _, err := Run(Options{Source: fixture(t), Ref: "--upload-pack=x"}); err == nil {
+	if _, err := Run(context.Background(), Options{Source: fixture(t), Ref: "--upload-pack=x"}, nil); err == nil {
 		t.Error("option-like ref should fail")
 	}
-	if _, err := Run(Options{Source: fixture(t), Ref: "nope"}); err == nil {
+	if _, err := Run(context.Background(), Options{Source: fixture(t), Ref: "nope"}, nil); err == nil {
 		t.Error("unknown ref should fail")
+	}
+}
+
+func commit(t *testing.T, dir, msg string) {
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-q", "-m", msg)
+}
+
+func TestHistory(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "a.go", "package a\n")
+	commit(t, dir, "c0")
+	write(t, dir, "a.go", "package a\n\nvar x = 1\nvar y = 2\n")
+	write(t, dir, "pkg/b.go", "package b\n")
+	commit(t, dir, "c1")
+	gitIn(t, dir, "rm", "-q", "a.go")
+	commit(t, dir, "c2")
+	write(t, dir, "pkg/b.go", "package b\n// same size changes\n")
+	commit(t, dir, "c3")
+
+	c, err := Run(context.Background(), Options{Source: dir, MaxCommits: 100}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Commits) != 4 || c.Commits[0].Subject != "c0" || c.Commits[3].Subject != "c3" {
+		t.Fatalf("commits = %+v", c.Commits)
+	}
+	by := map[string]city.Building{}
+	for _, b := range c.Buildings {
+		by[b.Path] = b
+	}
+	a := by["a.go"]
+	if len(a.H) != 3 || a.H[0] != (city.Point{0, 1, 1, 10}) || a.H[1] != (city.Point{1, 3, 4, 31}) ||
+		a.H[2][0] != 2 || a.H[2][1] != city.Absent {
+		t.Errorf("a.go history = %v", a.H)
+	}
+	if b := by["pkg/b.go"]; len(b.H) != 2 || b.H[0][0] != 1 || b.H[1][0] != 3 {
+		t.Errorf("b.go history = %v", b.H)
+	}
+	if !c.HasChurn {
+		t.Fatal("churn should be on by default")
+	}
+	if len(a.Churn) != 3 || a.Churn[0] != [3]int{0, 1, 1} || a.Churn[1] != [3]int{1, 1, 3} || a.Churn[2][0] != 2 {
+		t.Errorf("a.go churn = %v", a.Churn)
+	}
+	if b := by["pkg/b.go"]; len(b.Churn) != 2 || b.Churn[0] != [3]int{1, 1, 1} || b.Churn[1] != [3]int{3, 1, 1} {
+		t.Errorf("b.go churn = %v", b.Churn)
+	}
+	// the footprint of a deleted file is still laid out, sized by its peak LOC
+	if a.W <= 0 || a.D <= 0 {
+		t.Error("deleted file has no footprint")
+	}
+	if c.Stats.Files != 1 {
+		t.Errorf("stats describe the newest commit: files = %d", c.Stats.Files)
+	}
+	// sampling down keeps first and last
+	c2, err := Run(context.Background(), Options{Source: dir, MaxCommits: 2}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c2.Commits) != 2 || c2.Commits[0].Subject != "c0" || c2.Commits[1].Subject != "c3" {
+		t.Errorf("sampled = %+v", c2.Commits)
+	}
+	// layout is identical regardless of sampling only if the same files exist; single-commit run works too
+	c1, err := Run(context.Background(), Options{Source: dir, MaxCommits: 1}, nil)
+	if err != nil || len(c1.Commits) != 1 || c1.Commits[0].Subject != "c3" {
+		t.Fatalf("single: %v %+v", err, c1)
+	}
+	for _, b := range c1.Buildings {
+		if b.Path == "pkg/b.go" && (len(b.Churn) != 1 || b.Churn[0][1] != 2) {
+			t.Errorf("single-snapshot churn covers all history: %v", b.Churn)
+		}
+	}
+	c0, err := Run(context.Background(), Options{Source: dir, MaxCommits: 3, NoChurn: true}, nil)
+	if err != nil || c0.HasChurn {
+		t.Errorf("no-churn: %v", err)
+	}
+}
+
+func TestCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Run(ctx, Options{Source: fixture(t)}, nil); err == nil {
+		t.Error("cancelled context should fail")
+	}
+}
+
+func TestSample(t *testing.T) {
+	var all []gitx.Commit
+	for i := 0; i < 10; i++ {
+		all = append(all, gitx.Commit{Hash: string(rune('a' + i))})
+	}
+	got := Sample(all, 4)
+	if len(got) != 4 || got[0].Hash != "a" || got[3].Hash != "j" {
+		t.Errorf("%+v", got)
+	}
+	if len(Sample(all, 100)) != 10 || len(Sample(all, 1)) != 1 || Sample(all, 1)[0].Hash != "j" {
+		t.Error("bounds")
 	}
 }

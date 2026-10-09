@@ -10,6 +10,19 @@
 
   <div id="hud">
     <div id="title">Code City <span id="repo"></span></div>
+    <form id="repoform">
+      <input id="source" type="text" placeholder="repo path or git URL" autocomplete="off" spellcheck="false" required />
+      <div class="row">
+        <input id="ref" type="text" placeholder="ref (HEAD)" autocomplete="off" spellcheck="false" />
+        <input id="commits" type="number" min="1" max="1000" value="100" title="history samples (1 = snapshot only)" />
+      </div>
+      <label class="chk" title="analyze change frequency from git log (needs a full clone)"><input id="churn" type="checkbox" checked /> churn &amp; hotspots</label>
+      <div class="row">
+        <button id="go" type="submit">Analyze</button>
+        <button id="cancel" type="button" hidden>Cancel</button>
+      </div>
+      <div id="jobstatus"></div>
+    </form>
     <div id="stats"></div>
     <label>Height
       <select id="metric">
@@ -33,10 +46,31 @@
         <option value="language">language</option>
         <option value="size">size</option>
         <option value="depth">depth</option>
+        <option value="churn">churn</option>
+        <option value="hotspot">hotspot</option>
       </select>
     </label>
+    <label id="cwinrow">Churn over
+      <select id="cwin">
+        <option value="0">all time</option>
+        <option value="5">last 5 samples</option>
+        <option value="10">last 10 samples</option>
+        <option value="25">last 25 samples</option>
+      </select>
+    </label>
+    <div id="hotspots" hidden></div>
     <input id="search" type="search" placeholder="search files…" autocomplete="off" />
     <div id="legend"></div>
+  </div>
+
+  <div id="timeline" hidden>
+    <button id="play" type="button" title="play / pause (space)">▶</button>
+    <input id="scrub" type="range" min="0" max="0" step="1" value="0" />
+    <select id="speed" title="commits per second">
+      <option value="1">1/s</option><option value="3" selected>3/s</option><option value="8">8/s</option><option value="20">20/s</option>
+    </select>
+    <label class="chk"><input id="changes" type="checkbox" checked /> changes</label>
+    <div id="when"></div>
   </div>
 
   <div id="tip" hidden></div>
