@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Code City</title>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div id="hud">
+    <div id="title">Code City <span id="repo"></span></div>
+    <div id="stats"></div>
+    <label>Height
+      <select id="metric">
+        <option value="loc">lines of code</option>
+        <option value="lines">total lines</option>
+        <option value="bytes">bytes</option>
+      </select>
+    </label>
+    <label>Scale
+      <select id="scale">
+        <option value="sqrt">sqrt</option>
+        <option value="linear">linear</option>
+        <option value="log">log</option>
+      </select>
+    </label>
+    <label>Height ×
+      <input id="mult" type="range" min="0.2" max="3" step="0.05" value="1" />
+    </label>
+    <label>Color
+      <select id="color">
+        <option value="language">language</option>
+        <option value="size">size</option>
+        <option value="depth">depth</option>
+      </select>
+    </label>
+    <input id="search" type="search" placeholder="search files…" autocomplete="off" />
+    <div id="legend"></div>
+  </div>
+
+  <div id="tip" hidden></div>
+  <div id="info" hidden></div>
+  <div id="msg"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

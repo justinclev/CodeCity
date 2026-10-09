@@ -1,0 +1,22 @@
+:root { color-scheme: dark; --bg: #0b0f1a; --panel: rgba(16, 22, 38, 0.82); --fg: #dbe4ff; --dim: #8a97b8; --accent: #6ea8ff; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, sans-serif; overflow: hidden; }
+canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+#hud { position: fixed; top: 12px; left: 12px; width: 240px; padding: 12px; background: var(--panel); border: 1px solid #263150; border-radius: 10px; backdrop-filter: blur(6px); display: grid; gap: 8px; max-height: calc(100% - 24px); overflow: auto; }
+#title { font-weight: 600; font-size: 15px; }
+#repo { color: var(--accent); font-weight: 500; }
+#stats { color: var(--dim); font-size: 12px; }
+label { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 6px; color: var(--dim); }
+select, input[type=search] { background: #0e1424; color: var(--fg); border: 1px solid #2a3556; border-radius: 6px; padding: 4px 6px; font: inherit; width: 100%; }
+input[type=range] { width: 100%; }
+#legend { display: grid; gap: 3px; margin-top: 4px; }
+.lg { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--dim); }
+.lg i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; flex: none; }
+.lg span:last-child { margin-left: auto; font-variant-numeric: tabular-nums; }
+#tip { position: fixed; pointer-events: none; padding: 6px 8px; background: rgba(8, 11, 20, 0.92); border: 1px solid #2a3556; border-radius: 6px; font-size: 12px; max-width: 320px; z-index: 5; }
+#tip b, #info b { color: #fff; }
+#info { position: fixed; right: 12px; top: 12px; width: 280px; padding: 12px; background: var(--panel); border: 1px solid #263150; border-radius: 10px; word-break: break-all; }
+#info .k { color: var(--dim); }
+#msg { position: fixed; inset: 0; display: grid; place-items: center; text-align: center; color: var(--dim); pointer-events: none; padding: 24px; white-space: pre-line; }
+#msg:empty { display: none; }
+body.drag #msg::after { content: 'Drop city.json'; position: fixed; inset: 12px; border: 2px dashed var(--accent); border-radius: 12px; display: grid; place-items: center; color: var(--accent); font-size: 20px; }
