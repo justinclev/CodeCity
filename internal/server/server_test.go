@@ -13,11 +13,13 @@ import (
 	"github.com/justinclev/codecity/internal/city"
 )
 
-func repo(t *testing.T) string {
+func repo(t *testing.T) string { return repoWith(t, "package a\n") }
+
+func repoWith(t *testing.T, content string) string {
 	dir := t.TempDir()
 	for _, a := range [][]string{{"init", "-q", "-b", "main"}, {"add", "-A"}, {"commit", "-q", "-m", "x"}} {
 		if a[0] == "add" {
-			os.WriteFile(dir+"/a.go", []byte("package a\n"), 0o644)
+			os.WriteFile(dir+"/a.go", []byte(content), 0o644)
 		}
 		c := exec.Command("git", a...)
 		c.Dir = dir
@@ -123,5 +125,47 @@ func TestFileAPI(t *testing.T) {
 		if w := do(h, "GET", "/api/file?"+q, "", "127.0.0.1:8080", ""); w.Code != 400 {
 			t.Errorf("%s: %d", q, w.Code)
 		}
+	}
+}
+
+func TestMultiRepoFileAPI(t *testing.T) {
+	s := New("127.0.0.1:8080", t.TempDir())
+	h := s.Handler()
+	a, b := repo(t), repoWith(t, "package b\n") // distinct content → distinct commit hashes
+	body, _ := json.Marshal(Request{Sources: []string{a, b + " main"}, MaxCommits: 3})
+	if w := do(h, "POST", "/api/analyze", string(body), "127.0.0.1:8080", ""); w.Code != 202 {
+		t.Fatalf("analyze: %d %s", w.Code, w.Body)
+	}
+	for i := 0; i < 200 && s.Current().State == "running"; i++ {
+		time.Sleep(50 * time.Millisecond)
+	}
+	defer s.Close()
+	if j := s.Current(); j.State != "done" {
+		t.Fatalf("job: %+v", j)
+	}
+	c := s.city
+	if len(c.Repos) != 2 {
+		t.Fatalf("repos = %+v", c.Repos)
+	}
+	for k, r := range c.Repos {
+		var hash string
+		for _, cm := range c.Commits {
+			if cm.Repo == k {
+				hash = cm.Hash
+			}
+		}
+		w := do(h, "GET", "/api/file?path="+r.Name+"/a.go&commit="+hash[:10], "", "127.0.0.1:8080", "")
+		if w.Code != 200 {
+			t.Errorf("repo %d file: %d %s", k, w.Code, w.Body)
+		}
+		// a commit of the other repository must be rejected
+		other := c.Repos[1-k].Name
+		if w := do(h, "GET", "/api/file?path="+other+"/a.go&commit="+hash[:10], "", "127.0.0.1:8080", ""); w.Code != 400 {
+			t.Errorf("cross-repo commit accepted: %d", w.Code)
+		}
+	}
+	bad, _ := json.Marshal(Request{Sources: []string{"x y z"}})
+	if w := do(h, "POST", "/api/analyze", string(bad), "127.0.0.1:8080", ""); w.Code != 400 {
+		t.Errorf("bad line: %d", w.Code)
 	}
 }

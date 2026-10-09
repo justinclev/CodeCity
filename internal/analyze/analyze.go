@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/justinclev/codecity/internal/city"
+	"github.com/justinclev/codecity/internal/deps"
 	"github.com/justinclev/codecity/internal/gitx"
 	"github.com/justinclev/codecity/internal/layout"
 	"github.com/justinclev/codecity/internal/scan"
@@ -100,6 +101,7 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 	defer br.Close()
 
 	cache := map[string]blobInfo{}
+	var tipOid map[string]string // path → blob at the newest commit
 	hist := map[string]*fileHist{}
 	skipped := map[string]int{}
 	var order []string
@@ -114,6 +116,9 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 			return nil, nil, err
 		}
 		isLast := ci == len(commits)-1
+		if isLast {
+			tipOid = map[string]string{}
+		}
 		seen := map[string]bool{}
 		for _, e := range entries {
 			if r := scan.PathSkip(e.Path, e.Mode, e.Size, so); r != "" {
@@ -144,6 +149,9 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 				continue
 			}
 			seen[e.Path] = true
+			if isLast {
+				tipOid[e.Path] = e.Oid
+			}
 			pt := city.Point{ci, bi.m.LOC, bi.m.Lines, int(e.Size), bi.m.Complexity}
 			h := hist[e.Path]
 			if h == nil {
@@ -178,6 +186,16 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 		files = append(files, hist[p])
 	}
 	c = build(files, o.MinWeight)
+	progress("reading dependencies", 0, 0)
+	if c.Facts, err = collectFacts(ctx, br, c, tipOid, repo.Remote(ctx)); err != nil {
+		return nil, nil, err
+	}
+	if cd != nil {
+		c.Facts.Authors = map[string]int{}
+		for a, st := range cd.authors {
+			c.Facts.Authors[a] = st.Commits
+		}
+	}
 	if cd != nil {
 		c.HasChurn = true
 		assignOwners(c, hist, cd.authors)
@@ -185,11 +203,52 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 	}
 	c.Stats.Skipped = skipped
 	for _, k := range commits {
-		c.Commits = append(c.Commits, city.Commit(k))
+		c.Commits = append(c.Commits, city.Commit{Hash: k.Hash, Date: k.Date, Author: k.Author, Subject: k.Subject})
 	}
 	c.Repo = city.Repo{Name: repo.Name(), Source: o.Source, Remote: repo.Remote(ctx), Path: repo.LocalPath(ctx), Ref: label, Commit: tip,
 		AnalyzedAt: time.Now().UTC().Format(time.RFC3339)}
 	return c, repo, nil
+}
+
+// collectFacts reads manifests and import statements at the newest commit.
+func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid map[string]string, remote string) (*city.Facts, error) {
+	f := &city.Facts{Remote: deps.NormalizeURL(remote), Imports: map[int][]string{}}
+	var paths []string
+	for i, b := range c.Buildings {
+		oid, ok := tipOid[b.Path]
+		if !ok {
+			continue
+		}
+		paths = append(paths, b.Path)
+		manifest := deps.IsManifest(b.Path)
+		code := b.Lang == "Go" || b.Lang == "JavaScript" || b.Lang == "TypeScript" || b.Lang == "Python" || b.Lang == "Rust" || b.Lang == "Vue" || b.Lang == "Svelte"
+		if !manifest && !code {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		content, err := br.Read(oid, scan.DefaultMaxBytes)
+		if err != nil {
+			return nil, err
+		}
+		if manifest {
+			ids, ds := deps.Manifest(b.Path, content)
+			f.Identities = append(f.Identities, ids...)
+			f.Deps = append(f.Deps, ds...)
+		}
+		if code {
+			if specs := deps.Imports(b.Lang, content); len(specs) > 0 {
+				sort.Strings(specs)
+				f.Imports[i] = specs
+			}
+		}
+	}
+	f.Identities = append(f.Identities, deps.PythonModules(paths)...)
+	if f.Remote != "" {
+		f.Identities = append(f.Identities, deps.Identity{Kind: deps.Git, Name: f.Remote})
+	}
+	return f, nil
 }
 
 // record appends pt to h if it differs from the previous state.

@@ -24,7 +24,7 @@
     <details id="repobox" open>
       <summary>Repository</summary>
       <form id="repoform">
-        <input id="source" type="text" placeholder="local path or git URL" autocomplete="off" spellcheck="false" required />
+        <textarea id="source" rows="2" placeholder="local path or git URL&#10;one repo per line (optional ref after a space)" autocomplete="off" spellcheck="false" required></textarea>
         <div class="row">
           <input id="ref" type="text" placeholder="ref (HEAD)" autocomplete="off" spellcheck="false" />
           <input id="commits" type="number" min="1" max="1000" value="100" title="history samples (1 = snapshot only)" />
@@ -63,6 +63,11 @@
           <option value="25">last 25 samples</option>
         </select>
       </label>
+      <div id="connrow" class="row connrow" hidden>
+        <span>Links</span>
+        <label class="chk" title="dependencies declared in manifests or imported in code"><input id="showdeps" type="checkbox" checked /> dependencies</label>
+        <label class="chk" title="contributors who committed to both repositories"><input id="showpeople" type="checkbox" /> shared people</label>
+      </div>
       <div id="baserow" class="row baserow" hidden>
         <span id="basedate"></span>
         <button id="setbase" type="button" title="use the current commit as the baseline (or shift-click the timeline)">set to current</button>
@@ -105,6 +110,7 @@
         <button data-tab="complex">Complex</button>
         <button data-tab="areas">Areas</button>
         <button data-tab="authors">People</button>
+        <button data-tab="links" hidden>Links</button>
       </div>
       <div id="tabhelp" class="help"></div>
       <div id="tabbody"></div>

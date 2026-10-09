@@ -18,6 +18,7 @@ import (
 	"github.com/justinclev/codecity/internal/outline"
 	"github.com/justinclev/codecity/internal/scan"
 	"github.com/justinclev/codecity/internal/server"
+	"github.com/justinclev/codecity/internal/workspace"
 )
 
 const version = "0.2.0"
@@ -25,9 +26,12 @@ const version = "0.2.0"
 const usage = `codecity - render a git repository as a 3D city
 
 Usage:
-  codecity analyze <repo> [flags]   write city.json
-  codecity serve   [repo] [flags]   serve the viewer; repo is optional, you can also pick one in the page
-  codecity report  <repo> [flags]   print a Markdown report: hotspots, coupling, knowledge risk
+  codecity analyze <repo>... [flags]  write city.json
+  codecity serve   [repo]... [flags]  serve the viewer; repos are optional, you can also enter them in the page
+  codecity report  <repo>... [flags]  print a Markdown report: hotspots, coupling, knowledge risk
+
+Several repos become several cities on one map, connected where one depends on
+another (manifests, imports) or where they share contributors.
   codecity outline <file>           show the pieces (types, functions, …) found in a source file
   codecity version
 
@@ -125,8 +129,8 @@ func run(cmd string, args []string) error {
 			rest = rest[1:]
 		}
 	}
-	if len(pos) > 1 || (len(pos) == 0 && cmd != "serve") {
-		return fmt.Errorf("expected exactly one <repo> argument")
+	if len(pos) == 0 && cmd != "serve" {
+		return fmt.Errorf("expected at least one <repo> argument")
 	}
 	logf := func(f string, a ...any) {
 		if !*quiet {
@@ -137,19 +141,29 @@ func run(cmd string, args []string) error {
 		MinWeight: *minW, MaxCommits: *maxC, NoChurn: *noChurn}
 
 	if cmd == "analyze" || cmd == "report" {
-		o := base
-		o.Source = pos[0]
-		stage := ""
-		c, err := analyze.Run(context.Background(), o, func(st string, done, total int) {
-			if st != stage {
-				stage = st
-				logf("%s ...", st)
+		var cities []*city.City
+		for _, src := range pos {
+			o := base
+			o.Source = src
+			stage := ""
+			c, err := analyze.Run(context.Background(), o, func(st string, done, total int) {
+				if st != stage {
+					stage = st
+					logf("%s: %s ...", src, st)
+				}
+			})
+			if err != nil {
+				return fmt.Errorf("%s: %w", src, err)
 			}
-		})
-		if err != nil {
-			return err
+			logf("%s @ %s: %d commits, %d files, %d LOC (skipped %v)", c.Repo.Name, c.Repo.Commit[:8], len(c.Commits), c.Stats.Files, c.Stats.LOC, c.Stats.Skipped)
+			cities = append(cities, c)
 		}
-		logf("%s @ %s: %d commits, %d files, %d LOC (skipped %v)", c.Repo.Name, c.Repo.Commit[:8], len(c.Commits), c.Stats.Files, c.Stats.LOC, c.Stats.Skipped)
+		c := workspace.Build(cities)
+		for _, l := range c.Links {
+			if l.Kind == "dependency" {
+				logf("link: %s depends on %s (%s)", c.Repos[l.From].Name, c.Repos[l.To].Name, strings.Join(l.Evidence, "; "))
+			}
+		}
 		if cmd == "report" {
 			md := insights.Compute(c, *topN).Markdown()
 			if *out == "city.json" || *out == "-" { // default for report is stdout
@@ -179,11 +193,11 @@ func run(cmd string, args []string) error {
 		os.Exit(0)
 	}()
 	logf("serving on http://%s  (ctrl-c to stop)", ln.Addr())
-	if len(pos) == 1 {
-		if _, err := srv.Start(server.Request{Source: pos[0], Ref: *ref, MaxCommits: *maxC, NoChurn: *noChurn}); err != nil {
+	if len(pos) > 0 {
+		if _, err := srv.Start(server.Request{Sources: pos, Ref: *ref, MaxCommits: *maxC, NoChurn: *noChurn}); err != nil {
 			return err
 		}
-		logf("analyzing %s in the background ...", pos[0])
+		logf("analyzing %s in the background ...", strings.Join(pos, ", "))
 	}
 	return http.Serve(ln, srv.Handler())
 }

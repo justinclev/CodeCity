@@ -54,7 +54,7 @@ export function setTheme(name: 'night' | 'day' | 'hacker') {
 }
 
 export function showRepo(c: City) {
-  $('repo').textContent = `${c.repo.name} · ${c.repo.ref}`;
+  $('repo').textContent = c.repo.ref ? `${c.repo.name} · ${c.repo.ref}` : c.repo.name;
   $('repo').title = c.repo.remote || c.repo.path || c.repo.source;
   document.title = `${c.repo.name} · Code City`;
   $('insights').hidden = false;
@@ -302,6 +302,52 @@ function piecesSection(st: PiecesState, h: InfoHandlers): HTMLElement {
   return wrap;
 }
 
+export interface LinkInfo {
+  from: string; to: string; kind: 'dependency' | 'people';
+  evidence: string[];
+  files: { index: number; path: string; target: string }[];
+  people: string[]; peopleCount: number;
+}
+
+export function showLink(d: LinkInfo | null, h: InfoHandlers) {
+  const box = $('info');
+  if (!d) { box.hidden = true; return; }
+  const title = d.kind === 'people' ? `${d.from} ↔ ${d.to}` : `${d.from} → ${d.to}`;
+  box.replaceChildren(infoHead(title, h));
+  const head = el('div', 'linkhead');
+  head.append(el('span', 'kindtag' + (d.kind === 'people' ? ' people' : ''), d.kind === 'people' ? 'shared people' : 'dependency'));
+  head.append(el('span', '', d.kind === 'people' ? `${fmt(d.peopleCount)} contributors work on both` : `${d.from} depends on ${d.to}`));
+  box.append(head);
+  if (d.evidence.length) {
+    box.append(el('h4', '', 'Evidence'));
+    const ul = el('ul', 'ev');
+    for (const e of d.evidence) ul.append(el('li', '', e));
+    box.append(ul);
+  }
+  if (d.files.length) {
+    box.append(el('h4', '', `Importing files (${fmt(d.files.length)})`));
+    const list = el('div', 'list');
+    for (const f of d.files.slice(0, 200)) {
+      const b = el('button');
+      b.title = `${f.path}\n→ ${f.target}`;
+      b.append(el('span', 'path', '\u200E' + f.path), el('span', 'num', '→ ' + f.target.split('/').slice(-1)[0]));
+      b.onclick = () => h.onPick(f.index);
+      list.append(b);
+    }
+    box.append(list);
+  }
+  if (d.people.length) {
+    box.append(el('h4', '', 'Shared contributors'));
+    const ul = el('ul', 'ev');
+    for (const p of d.people) ul.append(el('li', '', p));
+    if (d.peopleCount > d.people.length) ul.append(el('li', '', `+${fmt(d.peopleCount - d.people.length)} more`));
+    box.append(ul);
+  }
+  box.hidden = false;
+}
+
+export function setConnRow(visible: boolean) { $('connrow').hidden = !visible; }
+
 export function showDistrict(d: DistrictInfo | null, h: InfoHandlers) {
   const box = $('info');
   if (!d) { box.hidden = true; return; }
@@ -367,7 +413,7 @@ export function showResults(rows: { index: number; path: string }[], total: numb
 
 // ------------------------------------------------------------------ insights
 
-export type Tab = 'hotspots' | 'coupling' | 'risk' | 'complex' | 'areas' | 'authors';
+export type Tab = 'hotspots' | 'coupling' | 'risk' | 'complex' | 'areas' | 'authors' | 'links';
 const HELP: Record<Tab, string> = {
   hotspots: 'Change frequency × complexity: where refactoring pays off most.',
   coupling: 'Files that keep changing in the same commits. Fine for code + test; elsewhere often a hidden dependency.',
@@ -375,9 +421,11 @@ const HELP: Record<Tab, string> = {
   complex: 'Indentation complexity: total nesting depth, a language-neutral proxy for cyclomatic complexity.',
   areas: 'Top-level directories ranked by hotspot load.',
   authors: 'Owners = most commits to a file. Click someone to show only their files.',
+  links: 'Connections between repositories, each with the evidence behind it. Click one to inspect it.',
 };
 
 export interface InsightHandlers {
+  onLink(i: number): void;
   onPick(i: number): void;
   onPair(a: number, b: number): void;
   onArea(d: number): void;
@@ -453,11 +501,31 @@ export function showInsights(ins: Insights | null, tab: Tab, hasChurn: boolean, 
       });
       break;
   }
-  if (!list.children.length) body.append(el('div', 'empty', 'Nothing to show at this commit.'));
+  if (tab === 'links') {
+    for (const l of linkRows) {
+      const b = el('button', 'pair');
+      b.title = l.evidence.join('\n');
+      b.append(el('span', 'path', l.title), el('span', 'num', l.kind === 'people' ? 'people' : 'depends'),
+        el('span', 'path', '↳ ' + l.summary), el('span', 'num', ''));
+      b.querySelectorAll('.path').forEach(p => p.setAttribute('style', 'direction:ltr'));
+      b.onclick = () => h.onLink(l.index);
+      list.append(b);
+    }
+    if (!linkRows.length) body.append(el('div', 'empty', 'These repositories have no connections: no shared dependencies, imports or people.'));
+  }
+  if (!list.children.length && tab !== 'links') body.append(el('div', 'empty', 'Nothing to show at this commit.'));
   else body.append(list);
 }
 
 let pathOf: (i: number) => string = i => String(i);
+
+export interface LinkRow { index: number; kind: string; title: string; summary: string; evidence: string[] }
+let linkRows: LinkRow[] = [];
+/** Rows for the Links tab; hides the tab when there are none and no multi-repo world. */
+export function setLinkRows(rows: LinkRow[], multi: boolean) {
+  linkRows = rows;
+  document.querySelector<HTMLButtonElement>('.tabs button[data-tab="links"]')!.hidden = !multi;
+}
 export function setPathResolver(f: (i: number) => string) { pathOf = f; }
 
 // ------------------------------------------------------------------ timeline
@@ -542,6 +610,17 @@ export interface Controls {
   onHacker(): void;
   onTab(t: Tab): void;
   onCopyReport(): void;
+  onLinksToggle(): void;
+}
+
+export function linkToggles() {
+  return { deps: $<HTMLInputElement>('showdeps').checked, people: $<HTMLInputElement>('showpeople').checked };
+}
+
+function autosize() {
+  const t = $<HTMLTextAreaElement>('source');
+  const n = Math.min(8, Math.max(1, t.value.split('\n').length));
+  t.rows = n;
 }
 
 export function bindControls(h: Controls) {
@@ -553,9 +632,14 @@ export function bindControls(h: Controls) {
   sel('cwin').onchange = () => h.onChurnWindow(parseInt(sel('cwin').value, 10));
   $<HTMLInputElement>('search').oninput = e => h.onSearch((e.target as HTMLInputElement).value);
   $<HTMLInputElement>('search').onkeydown = e => { if (e.key === 'Enter') h.onSearchEnter(); if (e.key === 'Escape') (e.target as HTMLInputElement).blur(); };
+  const src = $<HTMLTextAreaElement>('source');
+  src.oninput = autosize;
+  src.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $<HTMLFormElement>('repoform').requestSubmit(); };
+  $('showdeps').onchange = () => h.onLinksToggle();
+  $('showpeople').onchange = () => h.onLinksToggle();
   $('repoform').onsubmit = e => {
     e.preventDefault();
-    h.onSubmit($<HTMLInputElement>('source').value.trim(), $<HTMLInputElement>('ref').value.trim(),
+    h.onSubmit(src.value.trim(), $<HTMLInputElement>('ref').value.trim(),
       Math.max(1, parseInt($<HTMLInputElement>('commits').value, 10) || 1), $<HTMLInputElement>('churn').checked);
   };
   $('cancel').onclick = () => h.onCancel();
@@ -586,7 +670,8 @@ export function setBaselineRow(visible: boolean, label: string) {
 }
 
 export function setForm(source: string, ref: string, commits: number, churn = true) {
-  $<HTMLInputElement>('source').value = source;
+  $<HTMLTextAreaElement>('source').value = source;
+  autosize();
   $<HTMLInputElement>('ref').value = ref;
   $<HTMLInputElement>('commits').value = String(commits);
   $<HTMLInputElement>('churn').checked = churn;

@@ -4,6 +4,9 @@ export interface City {
   commits: Commit[];
   churn: boolean;
   authors?: Author[];
+  /** Multi-repo worlds: each repo is a top-level district (district 0 is the world root). */
+  repos?: RepoInfo[];
+  links?: Link[];
   stats: {
     files: number; dirs: number; loc: number; lines: number; bytes: number;
     languages: Record<string, { files: number; loc: number }>;
@@ -14,7 +17,10 @@ export interface City {
   buildings: Building[];
 }
 
-export interface Commit { hash: string; date: string; author: string; subject: string }
+export interface Commit { hash: string; date: string; author: string; subject: string; repo?: number }
+export interface RepoInfo { name: string; source: string; remote?: string; path?: string; ref: string; commit: string; district: number; churn: boolean }
+/** dependency: from depends on to (evidence, importing files → imported directory); people: shared contributors. */
+export interface Link { from: number; to: number; kind: 'dependency' | 'people'; evidence?: string[]; files?: [number, number][]; people?: string[]; peopleCount?: number }
 export interface Author { name: string; commits: number; files: number; last: number }
 
 export interface District {
@@ -33,10 +39,11 @@ export interface Building {
   own?: [number, number, number];
   /** Change coupling: [building index, shared commits, degree %]. */
   cpl?: [number, number, number][];
+  repo?: number;
 }
 
 export type Metric = 'loc' | 'lines' | 'bytes' | 'complexity';
 export type ScaleMode = 'sqrt' | 'linear' | 'log';
 export type ColorMode = 'language' | 'hotspot' | 'churn' | 'complexity' | 'age' | 'owner' | 'knowledge' | 'compare' | 'depth';
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;

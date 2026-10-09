@@ -1,15 +1,24 @@
 // Package city defines the city.json schema consumed by the viewer.
 package city
 
-const Version = 3
+import "github.com/justinclev/codecity/internal/deps"
+
+const Version = 4
 
 type City struct {
-	Version   int        `json:"version"`
-	Repo      Repo       `json:"repo"`
-	Stats     Stats      `json:"stats"`             // for the newest commit
-	Commits   []Commit   `json:"commits"`           // oldest first; at least one
-	HasChurn  bool       `json:"churn"`             // Building.Churn and Building.Own are populated
-	Authors   []Author   `json:"authors,omitempty"` // owners of at least one file, most commits first
+	// Facts is what the repo provides and uses, for linking repositories; not sent to the viewer.
+	Facts *Facts `json:"-"`
+
+	Version  int      `json:"version"`
+	Repo     Repo     `json:"repo"`
+	Stats    Stats    `json:"stats"`             // for the newest commit
+	Commits  []Commit `json:"commits"`           // oldest first; at least one
+	HasChurn bool     `json:"churn"`             // Building.Churn and Building.Own are populated
+	Authors  []Author `json:"authors,omitempty"` // owners of at least one file, most commits first
+	// Multi-repository worlds: each repo is a top-level district (child of the
+	// world root, district 0) and Links connect repos by evidence.
+	Repos     []RepoInfo `json:"repos,omitempty"`
+	Links     []Link     `json:"links,omitempty"`
 	Bounds    Bounds     `json:"bounds"`
 	Districts []District `json:"districts"`
 	Buildings []Building `json:"buildings"`
@@ -31,6 +40,33 @@ type Commit struct {
 	Date    string `json:"date"`
 	Author  string `json:"author"`
 	Subject string `json:"subject"`
+	Repo    int    `json:"repo,omitempty"` // multi-repo: which repository this commit belongs to
+}
+
+// RepoInfo describes one repository of a multi-repo world.
+type RepoInfo struct {
+	Name     string `json:"name"`
+	Source   string `json:"source"`
+	Remote   string `json:"remote,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Ref      string `json:"ref"`
+	Commit   string `json:"commit"`
+	District int    `json:"district"` // its root district
+	HasChurn bool   `json:"churn"`
+}
+
+// Link connects two repositories. Kind "dependency" points From the dependent
+// repo To the repo it depends on; "people" is undirected (shared contributors).
+type Link struct {
+	From     int      `json:"from"`
+	To       int      `json:"to"`
+	Kind     string   `json:"kind"`
+	Evidence []string `json:"evidence,omitempty"` // human-readable reasons
+	// Files: [importing building, imported district] pairs (dependency links).
+	Files [][2]int `json:"files,omitempty"`
+	// People: shared contributors (people links), most active first.
+	People      []string `json:"people,omitempty"`
+	PeopleCount int      `json:"peopleCount,omitempty"`
 }
 
 // Point is one change in a file's size history: [commit index, loc, lines, bytes, complexity].
@@ -95,6 +131,7 @@ type Building struct {
 	W        float64 `json:"w"`
 	D        float64 `json:"d"`
 	H        []Point `json:"h"`
+	Repo     int     `json:"repo,omitempty"` // multi-repo: index into Repos
 	// Churn is sparse: [commit index i, commits, lines changed, newest commit unix time]
 	// for changes landing in (sample i-1, sample i]; everything up to the first sample
 	// is attributed to index 0.
@@ -105,4 +142,13 @@ type Building struct {
 	// Coupling lists files that change in the same commits:
 	// [building index, shared commits, degree %] where degree = shared / mean(revisions).
 	Coupling [][3]int `json:"cpl,omitempty"`
+}
+
+// Facts are extracted at the newest commit for cross-repository linking.
+type Facts struct {
+	Remote     string // normalized "host/owner/repo", "" if unknown
+	Identities []deps.Identity
+	Deps       []deps.Dep
+	Imports    map[int][]string // building index → import specs (see deps.Imports)
+	Authors    map[string]int   // every contributor (case-merged) → non-merge commits
 }

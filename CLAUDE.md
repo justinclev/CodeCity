@@ -8,11 +8,13 @@ Go CLI does the analysis and emits `city.json`; a Vite + three.js viewer renders
 - `internal/gitx` – shells out to `git` (all calls take a `context`); reads blobs from objects at a commit (`ls-tree`, `cat-file --batch`), never the working tree; also first-parent `Log` and per-range `Churn` (`log --numstat --no-renames -z`)
 - `internal/scan` – file filtering (vendored, lock, minified, binary, generated, large) + LOC + language
 - `internal/layout` – squarified treemap (deterministic: ties broken by name)
-- `internal/city` – `city.json` schema (version 3); `web/src/types.ts` must mirror it (`SCHEMA_VERSION`)
+- `internal/city` – `city.json` schema (version 4); `City.Facts` (json:"-") carries per-repo linking facts server-side; `web/src/types.ts` must mirror it (`SCHEMA_VERSION`)
 - `internal/analyze` – glue: repo → sampled commits → per-file size/complexity history + churn → one layout over every file ever seen → `City`; `churn.go` adds owners (case-insensitive author merge) and change coupling
+- `internal/deps` – what a repo provides (Go module, npm/crate/Python names, git remote, Python packages) and uses (manifest deps: go.mod, package.json, Cargo.toml, pyproject/requirements/setup.py, .gitmodules; code imports for Go/JS/TS/Python/Rust)
+- `internal/workspace` – multi-repo worlds: links repos by evidence (dependency = manifest match and/or imports, with importing-file → imported-directory pairs; people = shared contributors, bots ignored), arranges cities in rows (connected ones adjacent), merges into one City (world root district 0 at depth -1, repo roots are its children, paths prefixed with the repo name, timelines merged by date, authors merged case-insensitively)
 - `internal/outline` – heuristic per-language outline (types, functions, methods, gaps as imports/scope) used for a file's "pieces"; `codecity outline <file>` prints it
 - `internal/insights` – findings at the newest commit (hotspots, coupling, knowledge risk, complexity, areas) + Markdown; used by `codecity report`
-- `internal/server` – HTTP server + job API (`/api/status`, `POST /api/analyze`, `POST /api/cancel`, `/api/city`, `GET /api/file?path=&commit=` → content + pieces). Keeps the analyzed repo open (temp clones are removed on the next analysis or ctrl-c); file reads are limited to paths and commits of the loaded city. Loopback-only Host/Origin guard; local paths only accepted when bound to loopback
+- `internal/server` – HTTP server + job API (`/api/status`, `POST /api/analyze`, `POST /api/cancel`, `/api/city`, `GET /api/file?path=&commit=` → content + pieces). `POST /api/analyze` takes `sources` ("source [ref]" per entry, ≤12) and builds a workspace; file reads map merged paths back to (repo, path) and only accept that repo's commits. Keeps the analyzed repo open (temp clones are removed on the next analysis or ctrl-c); file reads are limited to paths and commits of the loaded city. Loopback-only Host/Origin guard; local paths only accepted when bound to loopback
 - `internal/web` – `//go:embed all:dist` of the built viewer
 - `web/` – viewer (plain three.js, TypeScript, no framework): `scene.ts` (rendering, picking, camera), `material.ts` (window/hacker/glow shader + circuit floor), `theme.ts` (night/day/hacker + procedural glyph/circuit/code textures), `code.ts` (source viewer), `insights.ts` (mirrors `internal/insights` for the current commit), `ui.ts` (DOM), `main.ts` (wiring, jobs, deep links)
 
@@ -39,10 +41,13 @@ Go CLI does the analysis and emits `city.json`; a Vite + three.js viewer renders
 - Exploded view: floors = top-level pieces with containers replaced by their members (`floorsOf` in main.ts); floor height ∝ LOC, color ∝ complexity density.
 - Hacker mode is a theme (`THEMES.hacker`, `uHacker` in shaders): text atlas built from repo names, circuit traces in world space, selected building wears its real source (`setSkin`). Keep color modes meaningful in it (text is tinted by the mode color).
 
+- Multi-repo: a city exists only from its first sampled commit on the merged timeline. Connection arcs use a flow shader (pulses travel from the dependent repo to its dependency); selecting a file also draws its cross-repo import arcs. Only evidence-backed links are drawn; unrelated repos stay unconnected.
+
 ## Roadmap
 1. (done) static city from HEAD
 2. (done) history: sampled first-parent commits, time scrubber/playback, repo picker in the page
 3. (done) churn + hotspot coloring from `git log`
 4. (done) complexity, coupling, ownership/knowledge risk, code age, compare mode, insights panel, `report` command
 5. (done) pieces: outline, exploded floors, code viewer; hacker mode
-6. tree-sitter metrics/outlines; rename tracking; performance on very large repos (parallel blob reads, cached analyses)
+6. (done) multiple repositories as connected cities
+7. Java/C#/Kotlin dependency matching (Maven/Gradle/NuGet); tree-sitter metrics/outlines; rename tracking; performance on very large repos (parallel blob reads, cached analyses)

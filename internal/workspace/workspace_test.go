@@ -1,0 +1,133 @@
+package workspace
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/justinclev/codecity/internal/analyze"
+	"github.com/justinclev/codecity/internal/city"
+)
+
+func mkrepo(t *testing.T, author string, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME="+author, "GIT_AUTHOR_EMAIL=a@a", "GIT_COMMITTER_NAME=c", "GIT_COMMITTER_EMAIL=c@c")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	for p, c := range files {
+		os.MkdirAll(filepath.Join(dir, filepath.Dir(p)), 0o755)
+		os.WriteFile(filepath.Join(dir, p), []byte(c), 0o644)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "init")
+	return dir
+}
+
+func analyzeAll(t *testing.T, dirs ...string) []*city.City {
+	var cs []*city.City
+	for _, d := range dirs {
+		c, err := analyze.Run(context.Background(), analyze.Options{Source: d, MaxCommits: 5}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cs = append(cs, c)
+	}
+	return cs
+}
+
+func TestBuildLinksAndMerge(t *testing.T) {
+	lib := mkrepo(t, "Ann", map[string]string{
+		"go.mod":           "module example.com/acme/lib\n\ngo 1.22\n",
+		"pkg/util/util.go": "package util\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n",
+		"pkg/other/x.go":   "package other\n",
+		"README.md":        "# lib\n",
+	})
+	app := mkrepo(t, "ann", map[string]string{ // same person, different capitalization
+		"go.mod":     "module example.com/acme/app\n\nrequire example.com/acme/lib v1.0.0\n",
+		"main.go":    "package main\n\nimport (\n\t\"fmt\"\n\t\"example.com/acme/lib/pkg/util\"\n)\n\nfunc main() { fmt.Println(util.Add(1, 2)) }\n",
+		"cmd/x/x.go": "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println() }\n",
+	})
+	tool := mkrepo(t, "Bob", map[string]string{
+		"pyproject.toml":   "[project]\nname = \"tool\"\ndependencies = [\"requests\"]\n",
+		"tool/__init__.py": "import requests\n",
+	})
+	cs := analyzeAll(t, lib, app, tool)
+	w := Build(cs)
+
+	if len(w.Repos) != 3 || w.Districts[0].Depth != -1 {
+		t.Fatalf("repos = %+v", w.Repos)
+	}
+	var dep, people []city.Link
+	for _, l := range w.Links {
+		switch l.Kind {
+		case "dependency":
+			dep = append(dep, l)
+		case "people":
+			people = append(people, l)
+		}
+	}
+	if len(dep) != 1 || dep[0].From != 1 || dep[0].To != 0 {
+		t.Fatalf("dependency links = %+v", dep)
+	}
+	ev := strings.Join(dep[0].Evidence, "; ")
+	if !strings.Contains(ev, "go.mod declares Go module example.com/acme/lib") || !strings.Contains(ev, "1 file import it") {
+		t.Errorf("evidence = %s", ev)
+	}
+	if len(dep[0].Files) != 1 {
+		t.Fatalf("files = %v", dep[0].Files)
+	}
+	from, to := w.Buildings[dep[0].Files[0][0]], w.Districts[dep[0].Files[0][1]]
+	if from.Path != w.Repos[1].Name+"/main.go" || to.Path != w.Repos[0].Name+"/pkg/util" {
+		t.Errorf("file link %s -> %s", from.Path, to.Path)
+	}
+	if len(people) != 1 || people[0].PeopleCount != 1 || people[0].From != 0 || people[0].To != 1 {
+		t.Errorf("people links = %+v", people)
+	}
+
+	// merged structure
+	seen := map[string]bool{}
+	for _, b := range w.Buildings {
+		if seen[b.Path] {
+			t.Errorf("duplicate path %s", b.Path)
+		}
+		seen[b.Path] = true
+		root := w.Districts[w.Repos[b.Repo].District]
+		if b.X < root.X || b.Z < root.Z || b.X+b.W > root.X+root.W+1e-6 || b.Z+b.D > root.Z+root.D+1e-6 {
+			t.Errorf("%s outside its city", b.Path)
+		}
+		for _, p := range b.H {
+			if p[0] < 0 || p[0] >= len(w.Commits) || w.Commits[p[0]].Repo != b.Repo {
+				t.Errorf("%s history point %v maps to wrong commit", b.Path, p)
+			}
+		}
+	}
+	// cities do not overlap
+	for i := range w.Repos {
+		for j := i + 1; j < len(w.Repos); j++ {
+			a, b := w.Districts[w.Repos[i].District], w.Districts[w.Repos[j].District]
+			if a.X < b.X+b.W && b.X < a.X+a.W && a.Z < b.Z+b.D && b.Z < a.Z+a.D {
+				t.Errorf("cities %d and %d overlap", i, j)
+			}
+		}
+	}
+	if len(w.Commits) != 3 || w.Stats.Files != cs[0].Stats.Files+cs[1].Stats.Files+cs[2].Stats.Files {
+		t.Errorf("commits=%d files=%d", len(w.Commits), w.Stats.Files)
+	}
+	if len(w.Authors) != 2 { // Ann + ann merged, Bob
+		t.Errorf("authors = %+v", w.Authors)
+	}
+	// single repo: unchanged
+	if Build(cs[:1]) != cs[0] {
+		t.Error("single repo should pass through")
+	}
+}

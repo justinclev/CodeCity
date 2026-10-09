@@ -25,7 +25,30 @@ export const RISK = ['no history', '3+ authors', '2 authors', 'single author', '
 export const RISK_COLORS = ['#596277', '#51cf66', '#ffd43b', '#ff922b', '#ff4d4f'];
 export const INACTIVE_DAYS = 180;
 
-export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | null;
+export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | { kind: 'link'; index: number } | null;
+
+/** A connection between two cities to draw (index into city.links). */
+export interface LinkView { index: number; from: number; to: number; kind: 'dependency' | 'people'; strength: number; label: string }
+
+interface LinkMesh { view: LinkView; mesh: THREE.Mesh; pick: THREE.Mesh; mat: THREE.ShaderMaterial; label?: THREE.Sprite }
+
+/** Tube material with light pulses flowing from the start (uv.x = 0) to the end. */
+function flowMaterial(a: THREE.Color, b: THREE.Color, count: number, speed: number, additive: boolean): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uA: { value: a }, uB: { value: b }, uCount: { value: count }, uSpeed: { value: speed }, uHi: { value: 0 } },
+    vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform float uTime; uniform vec3 uA; uniform vec3 uB; uniform float uCount; uniform float uSpeed; uniform float uHi; varying vec2 vUv;
+      void main() {
+        float f = fract(vUv.x * uCount - uTime * uSpeed);
+        float pulse = smoothstep(0.0, 0.08, f) * (1.0 - smoothstep(0.08, 0.35, f));
+        vec3 c = mix(uA, uB, vUv.x);
+        float a = 0.32 + 0.68 * pulse + 0.35 * uHi;
+        gl_FragColor = vec4(c * (0.75 + 1.6 * pulse + 0.8 * uHi), clamp(a, 0.0, 1.0));
+      }`,
+    transparent: true, depthWrite: false, toneMapped: false,
+    blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+  });
+}
 
 /** One floor of an exploded building (a piece of the file). */
 export interface Floor { name: string; kind: string; loc: number; complexity: number; piece: number }
@@ -72,6 +95,9 @@ export class CityScene {
   private commitTs: number[] = [];
   private arcs = new THREE.Group();
   private exploded: Exploded | null = null;
+  private linkGroup = new THREE.Group();
+  private linkMeshes: LinkMesh[] = [];
+  private linkHi = -1;
   private cumCommits!: Int32Array; // cumulative churn up to and including each commit
   private cumLines!: Int32Array;
   private buildingMesh?: THREE.InstancedMesh;
@@ -98,6 +124,7 @@ export class CityScene {
   private raycaster = new THREE.Raycaster();
   private tmp = new THREE.Object3D();
   private last = performance.now();
+  private flowTime = 0;
   private fly: { p0: THREE.Vector3; t0: THREE.Vector3; p1: THREE.Vector3; t1: THREE.Vector3; start: number; dur: number } | null = null;
 
   commit = 0;
@@ -129,7 +156,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -167,6 +194,14 @@ export class CityScene {
     }
     if (this.moving) this.step(dt);
     if (this.exploded) this.animateExplode(dt);
+    if (this.linkMeshes.length || this.arcs.children.length) {
+      this.flowTime += dt;
+      for (const l of this.linkMeshes) l.mat.uniforms.uTime.value = this.flowTime;
+      for (const o of this.arcs.children) {
+        const m = (o as THREE.Mesh).material as THREE.ShaderMaterial;
+        if (m.uniforms?.uTime) m.uniforms.uTime.value = this.flowTime;
+      }
+    }
     if (this.pulse > 0) {
       this.pulse = Math.max(0, this.pulse - dt / 1.6);
       for (const i of this.changed) this.paint(i);
@@ -235,7 +270,10 @@ export class CityScene {
       m.opacity = t.outlineOpacity;
     }
     if (this.districtMesh) this.paintDistricts();
-    if (this.city) { this.makeLabels(); this.refresh(false); this.collapse(true); }
+    if (this.city) {
+      this.makeLabels(); this.refresh(false); this.collapse(true);
+      this.setLinks(this.linkMeshes.map(l => l.view));
+    }
   }
 
   private size() { return Math.max(this.city.bounds.w, this.city.bounds.d); }
@@ -248,6 +286,7 @@ export class CityScene {
     this.commit = this.C - 1;
     this.collapse(true);
     this.setSkin(-1, '');
+    this.setLinks([]);
     this.glyphTex?.dispose();
     this.glyphTex = undefined;
     this.hovered = this.selected = this.selectedDistrict = -1;
@@ -292,8 +331,10 @@ export class CityScene {
     this.districtMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), dm.material, city.districts.length);
     this.districtMesh.receiveShadow = true;
     city.districts.forEach((dist, i) => {
-      const top = this.districtTop(dist.depth);
-      this.tmp.position.set(dist.x + dist.w / 2, top / 2, dist.z + dist.d / 2);
+      // the world plot of a multi-repo map (depth -1) is a thin slab: a zero scale would give NaN normals,
+      // and bloom spreads NaN pixels over the whole frame
+      const top = dist.depth < 0 ? 0.01 : this.districtTop(dist.depth);
+      this.tmp.position.set(dist.x + dist.w / 2, dist.depth < 0 ? -1 : top / 2, dist.z + dist.d / 2); // world plot sits under the ground
       this.tmp.scale.set(dist.w, top, dist.d);
       this.tmp.updateMatrix();
       this.districtMesh!.setMatrixAt(i, this.tmp.matrix);
@@ -660,19 +701,19 @@ export class CityScene {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
-    if (this.exploded) {
-      const f = this.raycaster.intersectObject(this.exploded.mesh, false)[0];
-      if (f?.instanceId !== undefined) return { kind: 'floor', index: f.instanceId };
-    }
-    const hits = this.raycaster.intersectObjects([this.buildingMesh, this.districtMesh], false);
-    for (const hit of hits) {
+    const objects: THREE.Object3D[] = [this.buildingMesh, this.districtMesh, ...this.linkMeshes.map(l => l.pick)];
+    if (this.exploded) objects.unshift(this.exploded.mesh);
+    for (const hit of this.raycaster.intersectObjects(objects, false)) { // nearest first
+      if (this.exploded && hit.object === this.exploded.mesh && hit.instanceId !== undefined) return { kind: 'floor', index: hit.instanceId };
+      const lm = this.linkMeshes.find(l => l.pick === hit.object);
+      if (lm) return { kind: 'link', index: lm.view.index };
       const id = hit.instanceId ?? -1;
       if (id < 0) continue;
       if (hit.object === this.buildingMesh) {
         if (this.exists(id) && !this.dimmed[id]) return { kind: 'building', index: id };
         continue;
       }
-      return id === 0 ? null : { kind: 'district', index: id }; // the root plot is not interesting
+      if (hit.object === this.districtMesh) return id === 0 ? null : { kind: 'district', index: id }; // district 0 is the root / world plot
     }
     return null;
   }
@@ -732,6 +773,7 @@ export class CityScene {
       this.arcs.add(tube);
       this.paint(j);
     }
+    this.importArcs(i);
   }
 
   setSelectedDistrict(d: number) {
@@ -793,6 +835,114 @@ export class CityScene {
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
     if (dir.y < 0.5) { dir.y = 0.5; dir.normalize(); }
     this.flyTo(t.clone().addScaledVector(dir, dist), t);
+  }
+
+  // ------------------------------------------------------------------ connections between cities
+
+  private districtCenter(d: number, lift = 0): THREE.Vector3 {
+    const x = this.city.districts[d];
+    return new THREE.Vector3(x.x + x.w / 2, this.districtTop(Math.max(0, x.depth)) + lift, x.z + x.d / 2);
+  }
+
+  private linkColors(kind: 'dependency' | 'people'): [THREE.Color, THREE.Color] {
+    const t = this.theme.name;
+    if (kind === 'people') return t === 'day' ? [new THREE.Color('#e8590c'), new THREE.Color('#f08c00')] : [new THREE.Color('#ffb547'), new THREE.Color('#ff7ad9')];
+    if (t === 'hacker') return [new THREE.Color('#d23cff'), new THREE.Color('#36e0ff')];
+    if (t === 'day') return [new THREE.Color('#1c7ed6'), new THREE.Color('#7048e8')];
+    return [new THREE.Color('#4dd4ff'), new THREE.Color('#b18cff')];
+  }
+
+  /** Draw arcs between cities (dependency: flowing from dependent to dependency). */
+  setLinks(views: LinkView[]) {
+    for (const l of this.linkMeshes) {
+      this.linkGroup.remove(l.mesh, l.pick);
+      l.mesh.geometry.dispose(); l.pick.geometry.dispose(); l.mat.dispose();
+      if (l.label) { this.linkGroup.remove(l.label); l.label.material.map?.dispose(); l.label.material.dispose(); }
+    }
+    this.linkMeshes = [];
+    if (!this.city?.repos) return;
+    const s = this.size();
+    const additive = this.theme.name !== 'day';
+    const pickMat = new THREE.MeshBasicMaterial({ visible: false });
+    for (const v of views) {
+      const from = this.districtCenter(this.city.repos[v.from].district, 0.05);
+      const to = this.districtCenter(this.city.repos[v.to].district, 0.05);
+      const dist = from.distanceTo(to);
+      const mid = from.clone().add(to).multiplyScalar(0.5);
+      // clear the tallest towers so arcs stay visible (towers are taller in hacker mode)
+      const tallest = s * 0.16 * this.mult * this.theme.heightBoost;
+      mid.y += dist * (v.kind === 'dependency' ? 0.38 : 0.2) + tallest * (v.kind === 'dependency' ? 1.5 : 1.1) + s * 0.02;
+      const curve = new THREE.QuadraticBezierCurve3(from, mid, to);
+      const radius = s * (v.kind === 'dependency' ? 0.0025 + 0.0035 * Math.min(1, v.strength) : 0.0018) * (this.theme.hacker ? 1.6 : 1);
+      const [ca, cb] = this.linkColors(v.kind);
+      const mat = flowMaterial(ca, cb, Math.max(3, Math.round(dist / (s * 0.08))), v.kind === 'dependency' ? 0.35 : 0.12, additive);
+      const mesh = new THREE.Mesh(new THREE.TubeGeometry(curve, 96, radius, 8), mat);
+      mesh.renderOrder = 6;
+      const pick = new THREE.Mesh(new THREE.TubeGeometry(curve, 32, Math.max(radius * 4, s * 0.012), 6), pickMat);
+      this.linkGroup.add(mesh, pick);
+      const lm: LinkMesh = { view: v, mesh, pick, mat };
+      if (v.label) {
+        lm.label = this.textSprite(v.label, Math.max(0.8, s * 0.016));
+        lm.label.position.copy(curve.getPoint(0.5)).add(new THREE.Vector3(0, Math.max(0.8, s * 0.016) * 0.9, 0));
+        this.linkGroup.add(lm.label);
+      }
+      this.linkMeshes.push(lm);
+    }
+    this.highlightLink(this.linkHi);
+  }
+
+  highlightLink(index: number) {
+    this.linkHi = index;
+    for (const l of this.linkMeshes) {
+      const on = l.view.index === index;
+      l.mat.uniforms.uHi.value = on ? 1 : 0;
+      if (l.label) l.label.material.opacity = index < 0 || on ? 1 : 0.4;
+    }
+  }
+
+  private textSprite(text: string, height: number): THREE.Sprite {
+    const cv = document.createElement('canvas');
+    const ctx = cv.getContext('2d')!;
+    const font = this.theme.hacker ? '600 34px "JetBrains Mono", ui-monospace, monospace' : '600 36px Inter, system-ui, sans-serif';
+    ctx.font = font;
+    const tw = Math.ceil(ctx.measureText(text).width) + 36;
+    cv.width = tw; cv.height = 60;
+    ctx.font = font;
+    ctx.fillStyle = this.theme.labelBg;
+    ctx.beginPath(); ctx.roundRect(1, 1, tw - 2, 58, 29); ctx.fill();
+    ctx.fillStyle = this.theme.labelFg;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, 18, 32);
+    const tex = new THREE.CanvasTexture(cv);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true, fog: false }));
+    sp.scale.set((height * tw) / 60, height, 1);
+    sp.renderOrder = 12;
+    return sp;
+  }
+
+  /** Arcs from building i to the directories it imports in other cities. */
+  private importArcs(i: number) {
+    const links = this.city.links ?? [];
+    if (!links.length) return;
+    const s = this.size();
+    const b = this.city.buildings[i];
+    const from = new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + Math.max(this.target[i], MIN_H), b.z + b.d / 2);
+    const [ca, cb] = this.linkColors('dependency');
+    for (const l of links) {
+      if (l.kind !== 'dependency') continue;
+      for (const [bi, d] of l.files ?? []) {
+        if (bi !== i) continue;
+        const to = this.districtCenter(d, 0.05);
+        const dist = from.distanceTo(to);
+        const mid = from.clone().add(to).multiplyScalar(0.5);
+        mid.y = Math.max(from.y, to.y) + dist * 0.3 + s * 0.01;
+        const mat = flowMaterial(ca.clone().lerp(new THREE.Color('#ffffff'), 0.3), cb, Math.max(4, Math.round(dist / (s * 0.04))), 0.6, this.theme.name !== 'day');
+        const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(from, mid, to), 64, s * 0.0018, 6), mat);
+        tube.renderOrder = 7;
+        this.arcs.add(tube);
+      }
+    }
   }
 
   // ------------------------------------------------------------------ hacker mode
@@ -1015,6 +1165,7 @@ export class CityScene {
     for (const o of this.labels.children) {
       const sp = o as THREE.Sprite;
       const d = sp.position.distanceTo(this.camera.position);
+      if (sp.userData.repo) { sp.visible = true; continue; }
       sp.material.opacity = Math.min(1, Math.max(0, (d - s * 0.3) / (s * 0.3)));
       sp.visible = sp.material.opacity > 0.02;
     }
@@ -1032,8 +1183,19 @@ export class CityScene {
   private makeLabels() {
     this.disposeLabels();
     const { districts, bounds } = this.city;
+    const multi = !!this.city.repos?.length;
+    if (multi) {
+      for (const r of this.city.repos!) {
+        const d = districts[r.district];
+        const h = Math.max(1.2, Math.min(d.w, d.d) * 0.07, this.size() * 0.02);
+        const sp = this.textSprite(this.theme.hacker ? r.name.toUpperCase() : r.name, h);
+        sp.position.set(d.x + d.w / 2, h * 0.7, d.z + d.d + h * 1.2); // on the ground just in front of the city
+        sp.userData.repo = true;
+        this.labels.add(sp);
+      }
+    }
     const cand = districts
-      .filter(d => d.depth >= 1 && d.depth <= 2 && d.w * d.d > bounds.w * bounds.d * 0.004)
+      .filter(d => d.depth >= 1 && d.depth <= (multi ? 1 : 2) && d.w * d.d > bounds.w * bounds.d * (multi ? 0.0015 : 0.004))
       .sort((a, b) => b.w * b.d - a.w * a.d)
       .slice(0, 40);
     for (const d of cand) {

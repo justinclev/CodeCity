@@ -70,7 +70,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); background: linea
 button.icon { width: 32px; height: 32px; padding: 0; font-size: 15px; flex: none; }
 button.link { background: none; border: 0; padding: 0; color: var(--accent); }
 
-input[type=text], input[type=number], input[type=search], select { background: var(--input); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; width: 100%; min-width: 0; outline: none; }
+input[type=text], input[type=number], input[type=search], select, textarea { background: var(--input); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; width: 100%; min-width: 0; outline: none; }
 input:focus, select:focus { border-color: var(--accent); }
 input[type=range] { width: 100%; accent-color: var(--accent); }
 input[type=checkbox] { accent-color: var(--accent); }
@@ -231,3 +231,13 @@ body.hacker .stat b, body.hacker .metrics b { text-shadow: 0 0 10px rgba(54, 224
 body.hacker .ln.hl { background: rgba(210, 60, 255, 0.12); box-shadow: inset 3px 0 0 #d23cff; }
 body.hacker .tk { color: #d23cff; } body.hacker .ts { color: #7dffb0; } body.hacker .tc { color: #2d7d92; } body.hacker .tn { color: #ffd23c; } body.hacker .tf { color: #36e0ff; } body.hacker .tt { color: #ff7ad9; }
 body.hacker::after { content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 10; background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.16) 0 1px, transparent 1px 3px); mix-blend-mode: multiply; }
+
+#source { resize: vertical; min-height: 34px; font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+.connrow { gap: 10px; color: var(--dim); font-size: 12px; flex-wrap: wrap; }
+.connrow > span { width: 58px; }
+.ev { margin: 4px 0 0; padding-left: 16px; font-size: 12px; color: var(--fg); }
+.ev li { margin: 2px 0; word-break: break-word; }
+.linkhead { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 650; margin: 4px 0 8px; }
+.linkhead .arrow { color: var(--accent); }
+.kindtag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 6px; background: rgba(122, 162, 255, 0.16); color: var(--accent); }
+.kindtag.people { background: rgba(255, 181, 71, 0.16); color: var(--warn); }

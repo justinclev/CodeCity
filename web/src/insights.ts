@@ -95,6 +95,18 @@ export function markdown(city: City, scene: CityScene, ins: Insights, windowLabe
   out.push(`# Code City: ${city.repo.name}`, '');
   out.push(`\`${city.repo.ref}\` @ \`${k.hash.slice(0, 8)}\` · ${k.date.slice(0, 10)} · ${fmt(t.files)} files · ${fmt(t.loc)} LOC`, '');
   if (!city.churn) out.push('_Churn not analyzed: hotspots, coupling and ownership are unavailable._', '');
+  if (city.repos?.length) {
+    const name = (k: number) => city.repos![k].name;
+    out.push('## Repositories', '', city.repos.map(r => `- \`${r.name}\` (${r.remote || r.source})`).join('\n'), '');
+    const links = city.links ?? [];
+    out.push('## Connections', '');
+    if (!links.length) out.push('_No connections: no shared dependencies, imports or contributors._');
+    for (const l of links) {
+      const head = l.kind === 'dependency' ? `**${name(l.from)} → ${name(l.to)}** (dependency)` : `**${name(l.from)} ↔ ${name(l.to)}** (shared people)`;
+      out.push(`- ${head}: ${(l.evidence ?? []).join('; ')}${l.people?.length ? ` (${l.people.join(', ')})` : ''}`);
+    }
+    out.push('');
+  }
   if (ins.hotspots.length) {
     out.push(`## Hotspots (changes ${windowLabel} × complexity)`, '', '| # | File | Commits | Complexity | Owner |', '|---|---|---:|---:|---|');
     ins.hotspots.forEach((h, i) => out.push(`| ${i + 1} | ${P(h.index)} | ${h.a} | ${fmt(h.b)} | ${h.note ?? ''} |`));

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
@@ -21,14 +22,59 @@ import (
 	"github.com/justinclev/codecity/internal/outline"
 	"github.com/justinclev/codecity/internal/scan"
 	"github.com/justinclev/codecity/internal/web"
+	"github.com/justinclev/codecity/internal/workspace"
 )
 
 // Request is the body of POST /api/analyze.
 type Request struct {
-	Source     string `json:"source"`
-	Ref        string `json:"ref"`
-	MaxCommits int    `json:"maxCommits"`
-	NoChurn    bool   `json:"noChurn"`
+	// Sources lists repositories, one "source [ref]" per entry; Source is the single-repo shorthand.
+	Sources    []string `json:"sources,omitempty"`
+	Source     string   `json:"source,omitempty"`
+	Ref        string   `json:"ref"` // default ref for entries without one
+	MaxCommits int      `json:"maxCommits"`
+	NoChurn    bool     `json:"noChurn"`
+}
+
+// MaxRepos caps how many repositories one analysis may combine.
+const MaxRepos = 12
+
+type target struct{ source, ref string }
+
+// targets parses and validates the requested repositories.
+func (s *Server) targets(req *Request) ([]target, error) {
+	lines := req.Sources
+	if len(lines) == 0 && strings.TrimSpace(req.Source) != "" {
+		lines = []string{req.Source}
+	}
+	var out []target
+	seen := map[string]bool{}
+	for _, ln := range lines {
+		f := strings.Fields(ln)
+		if len(f) == 0 || strings.HasPrefix(f[0], "#") {
+			continue
+		}
+		t := target{source: f[0], ref: req.Ref}
+		if len(f) > 1 {
+			t.ref = f[1]
+		}
+		if len(f) > 2 || strings.HasPrefix(t.ref, "-") {
+			return nil, errBad(fmt.Sprintf("invalid line %q (expected: source [ref])", ln))
+		}
+		if !s.allowLocal && (!gitx.IsURL(t.source) || strings.HasPrefix(t.source, "file://")) {
+			return nil, errForbidden("this server only analyzes remote git URLs (it is not bound to a loopback address)")
+		}
+		if key := t.source + " " + t.ref; !seen[key] {
+			seen[key] = true
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return nil, errBad("source is required")
+	}
+	if len(out) > MaxRepos {
+		return nil, errBad(fmt.Sprintf("at most %d repositories at once", MaxRepos))
+	}
+	return out, nil
 }
 
 // Job is the externally visible state of an analysis.
@@ -56,8 +102,8 @@ type Server struct {
 	mu     sync.Mutex
 	body   []byte
 	city   *city.City
-	repo   *gitx.Repo        // kept open for /api/file
-	paths  map[string]string // path → language, for the loaded city
+	repos  []*gitx.Repo       // kept open for /api/file, indexed like city.Repos
+	paths  map[string]fileRef // building path → repo + path inside it
 	job    *Job
 	cancel context.CancelFunc
 	nextID int
@@ -85,20 +131,18 @@ func New(addr, webDir string) *Server {
 func (s *Server) Start(req Request) (int, error) {
 	req.Source = strings.TrimSpace(req.Source)
 	req.Ref = strings.TrimSpace(req.Ref)
-	if req.Source == "" {
-		return 0, errBad("source is required")
-	}
 	if strings.HasPrefix(req.Ref, "-") {
 		return 0, errBad("invalid ref")
+	}
+	targets, err := s.targets(&req)
+	if err != nil {
+		return 0, err
 	}
 	if req.MaxCommits < 1 {
 		req.MaxCommits = 1
 	}
 	if req.MaxCommits > MaxCommitsLimit {
 		req.MaxCommits = MaxCommitsLimit
-	}
-	if !s.allowLocal && (!gitx.IsURL(req.Source) || strings.HasPrefix(req.Source, "file://")) {
-		return 0, errForbidden("this server only analyzes remote git URLs (it is not bound to a loopback address)")
 	}
 
 	s.mu.Lock()
@@ -107,28 +151,66 @@ func (s *Server) Start(req Request) (int, error) {
 		return 0, errConflict("an analysis is already running")
 	}
 	s.nextID++
-	j := &Job{ID: s.nextID, State: "running", Stage: "starting", Source: req.Source, Req: req}
+	var names []string
+	for _, t := range targets {
+		names = append(names, t.source)
+	}
+	j := &Job{ID: s.nextID, State: "running", Stage: "starting", Source: strings.Join(names, ", "), Req: req}
 	s.job = j
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 
-	opts := s.Base
-	opts.Source, opts.Ref, opts.MaxCommits, opts.NoChurn = req.Source, req.Ref, req.MaxCommits, req.NoChurn || s.Base.NoChurn
 	go func() {
 		defer cancel()
-		c, repo, err := analyze.RunRepo(ctx, opts, func(stage string, done, total int) {
-			s.mu.Lock()
-			if s.job == j {
-				j.Stage, j.Done, j.Total = stage, done, total
+		var cities []*city.City
+		var repos []*gitx.Repo
+		var err error
+		for k, t := range targets {
+			opts := s.Base
+			opts.Source, opts.Ref, opts.MaxCommits, opts.NoChurn = t.source, t.ref, req.MaxCommits, req.NoChurn || s.Base.NoChurn
+			prefix := ""
+			if len(targets) > 1 {
+				prefix = fmt.Sprintf("[%d/%d] %s: ", k+1, len(targets), shortName(t.source))
 			}
+			var c *city.City
+			var repo *gitx.Repo
+			c, repo, err = analyze.RunRepo(ctx, opts, func(stage string, done, total int) {
+				s.mu.Lock()
+				if s.job == j {
+					j.Stage, j.Done, j.Total = prefix+stage, done, total
+				}
+				s.mu.Unlock()
+			})
+			if err != nil {
+				if len(targets) > 1 {
+					err = fmt.Errorf("%s: %w", t.source, err)
+				}
+				break
+			}
+			cities = append(cities, c)
+			repos = append(repos, repo)
+		}
+		var world *city.City
+		if err == nil {
+			s.mu.Lock()
+			j.Stage, j.Done, j.Total = "linking repositories", 0, 0
 			s.mu.Unlock()
-		})
-		s.finish(j, c, repo, err, ctx)
+			world = workspace.Build(cities)
+		}
+		s.finish(j, world, repos, err, ctx)
 	}()
 	return j.ID, nil
 }
 
-func (s *Server) finish(j *Job, c *city.City, repo *gitx.Repo, err error, ctx context.Context) {
+func shortName(src string) string {
+	src = strings.TrimSuffix(strings.TrimRight(src, "/"), ".git")
+	if i := strings.LastIndexAny(src, "/:"); i >= 0 {
+		return src[i+1:]
+	}
+	return src
+}
+
+func (s *Server) finish(j *Job, c *city.City, repos []*gitx.Repo, err error, ctx context.Context) {
 	var body []byte
 	if err == nil {
 		body, err = json.Marshal(c)
@@ -143,18 +225,31 @@ func (s *Server) finish(j *Job, c *city.City, repo *gitx.Repo, err error, ctx co
 	default:
 		j.State = "done"
 		s.body, s.city = body, c
-		s.paths = make(map[string]string, len(c.Buildings))
+		s.paths = make(map[string]fileRef, len(c.Buildings))
 		for _, b := range c.Buildings {
-			s.paths[b.Path] = b.Lang
+			orig := b.Path
+			if len(c.Repos) > 0 {
+				orig = strings.TrimPrefix(b.Path, c.Repos[b.Repo].Name+"/")
+			}
+			s.paths[b.Path] = fileRef{repo: b.Repo, path: orig, lang: b.Lang}
 		}
-		if old := s.repo; old != nil { // let in-flight file reads finish before removing a temp clone
-			time.AfterFunc(30*time.Second, old.Close)
+		if old := s.repos; len(old) > 0 { // let in-flight file reads finish before removing temp clones
+			time.AfterFunc(30*time.Second, func() {
+				for _, r := range old {
+					r.Close()
+				}
+			})
 		}
-		s.repo, repo = repo, nil
+		s.repos, repos = repos, nil
 	}
-	if repo != nil {
-		repo.Close()
+	for _, r := range repos {
+		r.Close()
 	}
+}
+
+type fileRef struct {
+	repo       int
+	path, lang string
 }
 
 // Close releases the open repository (removing a temporary clone).
@@ -164,10 +259,10 @@ func (s *Server) Close() {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	if s.repo != nil {
-		s.repo.Close()
-		s.repo = nil
+	for _, r := range s.repos {
+		r.Close()
 	}
+	s.repos = nil
 }
 
 // FileResponse is the body of GET /api/file.
@@ -186,21 +281,23 @@ const maxFileBytes = 1 << 20
 // File returns the content and outline of a file of the loaded city at one of its commits.
 func (s *Server) File(ctx context.Context, path, commit string) (*FileResponse, error) {
 	s.mu.Lock()
-	c, repo, paths := s.city, s.repo, s.paths
+	c, repos, paths := s.city, s.repos, s.paths
 	s.mu.Unlock()
-	if c == nil || repo == nil {
+	if c == nil || len(repos) == 0 {
 		return nil, &httpErr{http.StatusNotFound, "no repository loaded"}
 	}
-	lang, ok := paths[path]
+	ref, ok := paths[path]
 	if !ok {
 		return nil, errBad("unknown path")
 	}
+	lang := ref.lang
+	// the commit must be one of this repository's analyzed commits
 	hash := ""
-	if i, err := strconv.Atoi(commit); err == nil && i >= 0 && i < len(c.Commits) {
+	if i, err := strconv.Atoi(commit); err == nil && i >= 0 && i < len(c.Commits) && c.Commits[i].Repo == ref.repo {
 		hash = c.Commits[i].Hash
-	} else {
+	} else if len(commit) >= 4 {
 		for _, k := range c.Commits {
-			if commit != "" && strings.HasPrefix(k.Hash, commit) {
+			if k.Repo == ref.repo && strings.HasPrefix(k.Hash, commit) {
 				hash = k.Hash
 				break
 			}
@@ -209,7 +306,7 @@ func (s *Server) File(ctx context.Context, path, commit string) (*FileResponse, 
 	if hash == "" {
 		return nil, errBad("unknown commit")
 	}
-	b, err := repo.ReadFile(ctx, hash, path, maxFileBytes+1)
+	b, err := repos[ref.repo].ReadFile(ctx, hash, ref.path, maxFileBytes+1)
 	if err != nil {
 		return nil, &httpErr{http.StatusNotFound, "file not present at that commit"}
 	}

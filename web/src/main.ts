@@ -1,5 +1,5 @@
 import './style.css';
-import { CityScene, type Floor } from './scene';
+import { CityScene, type Floor, type LinkView } from './scene';
 import { showCode, type FileData } from './code';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
@@ -13,7 +13,69 @@ let tab: ui.Tab = 'hotspots';
 let insights: Insights | null = null;
 let selected = -1;
 let selectedDistrict = -1;
+let selectedLink = -1;
 let apiAvailable = false;
+
+// ---------------------------------------------------------------- multi-repo helpers
+const repoOf = (i: number) => city!.buildings[i].repo ?? 0;
+const repoName = (k: number) => city!.repos?.[k]?.name ?? city!.repo.name;
+/** The building's path inside its own repository. */
+function innerPath(i: number) {
+  const b = city!.buildings[i];
+  return city!.repos ? b.path.slice(repoName(repoOf(i)).length + 1) : b.path;
+}
+/** Newest analyzed commit of repo k at or before merged commit c (single repo: c itself). */
+function repoCommitAt(k: number, c: number): string | null {
+  for (let x = c; x >= 0; x--) if ((city!.commits[x].repo ?? 0) === k) return city!.commits[x].hash;
+  return null;
+}
+
+function linkViews(): LinkView[] {
+  if (!city?.links?.length) return [];
+  const t = ui.linkToggles();
+  const out: LinkView[] = [];
+  city.links.forEach((l, index) => {
+    if (l.kind === 'dependency' && !t.deps) return;
+    if (l.kind === 'people' && !t.people) return;
+    const files = l.files?.length ?? 0;
+    out.push({ index, from: l.from, to: l.to, kind: l.kind,
+      strength: l.kind === 'dependency' ? Math.min(1, Math.log1p(files + 1) / Math.log(60)) : 0,
+      label: l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${l.peopleCount ?? 0} shared` });
+  });
+  return out;
+}
+
+function linkRows(): ui.LinkRow[] {
+  return (city?.links ?? []).map((l, index) => ({
+    index, kind: l.kind,
+    title: l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${repoName(l.from)} ↔ ${repoName(l.to)}`,
+    summary: l.kind === 'dependency' ? (l.evidence ?? []).slice(0, 2).join('; ') : `${l.peopleCount ?? 0} shared contributors`,
+    evidence: l.evidence ?? [],
+  })).sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'dependency' ? -1 : 1));
+}
+
+function selectLink(index: number) {
+  if (!city?.links?.[index]) return;
+  const l = city.links[index];
+  if (scene.explodedBuilding >= 0) scene.collapse();
+  if (codeOpen) closeCode();
+  selected = selectedDistrict = -1;
+  scene.setSelected(-1);
+  scene.setSelectedDistrict(-1);
+  selectedLink = index;
+  scene.highlightLink(index);
+  // make sure the link is drawn even if its kind is toggled off
+  const t = ui.linkToggles();
+  if ((l.kind === 'people' && !t.people) || (l.kind === 'dependency' && !t.deps)) {
+    (document.getElementById(l.kind === 'people' ? 'showpeople' : 'showdeps') as HTMLInputElement).checked = true;
+    scene.setLinks(linkViews());
+  }
+  ui.showLink({
+    from: repoName(l.from), to: repoName(l.to), kind: l.kind, evidence: l.evidence ?? [],
+    files: (l.files ?? []).map(([b, d]) => ({ index: b, path: city!.buildings[b].path, target: city!.districts[d].path })),
+    people: l.people ?? [], peopleCount: l.peopleCount ?? 0,
+  }, infoHandlers);
+}
 
 // ---------------------------------------------------------------- file pieces (needs the server)
 const fileCache = new Map<string, Promise<FileData>>();
@@ -23,7 +85,7 @@ let activePiece = -1;
 let floors: Floor[] = [];
 let codeOpen = false;
 
-function fetchFile(path: string, commit: number): Promise<FileData> {
+function fetchFile(path: string, commit: string): Promise<FileData> {
   const key = `${path}@${commit}`;
   let p = fileCache.get(key);
   if (!p) {
@@ -54,8 +116,10 @@ async function loadPieces(i: number) {
   file = null; fileError = ''; activePiece = -1; floors = [];
   scene.setSkin(-1, '');
   if (!apiAvailable) { fileError = 'Pieces and source need the server (codecity serve).'; return; }
+  const hash = repoCommitAt(repoOf(i), commit);
+  if (!hash) { fileError = 'This file does not exist at this commit.'; return; }
   try {
-    const f = await fetchFile(path, commit);
+    const f = await fetchFile(path, hash);
     if (selected !== i || scene.commit !== commit) return; // selection moved on
     file = f;
     floors = floorsOf(f);
@@ -159,6 +223,10 @@ function show(c: City) {
   totals = scene.allTotals();
   ui.showRepo(c);
   ui.setupTimeline(c);
+  selectedLink = -1;
+  ui.setConnRow(!!c.repos?.length && !!c.links?.length);
+  ui.setLinkRows(linkRows(), !!c.repos?.length);
+  scene.setLinks(linkViews());
   (document.getElementById('repobox') as HTMLDetailsElement).open = false;
   applyHash();
   onCommitChanged();
@@ -186,7 +254,7 @@ async function loadFile(f: File) {
 }
 
 // ---------------------------------------------------------------- analysis jobs
-interface JobInfo { id: number; state: string; stage: string; done: number; total: number; error?: string; source: string; request: { source: string; ref: string; maxCommits: number; noChurn?: boolean } }
+interface JobInfo { id: number; state: string; stage: string; done: number; total: number; error?: string; source: string; request: { source?: string; sources?: string[]; ref: string; maxCommits: number; noChurn?: boolean } }
 interface Status { hasCity: boolean; allowLocal: boolean; maxCommitsLimit: number; job?: JobInfo }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -228,11 +296,12 @@ async function watchJob() {
 
 async function submit(source: string, ref: string, commits: number, churn: boolean) {
   store.set('form', { source, ref, commits, churn });
+  const sources = source.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   ui.setJobStatus('starting…');
   ui.setProgress({ done: 0, total: 0 });
   try {
     await api('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source, ref, maxCommits: commits, noChurn: !churn }) });
+      body: JSON.stringify({ sources, ref, maxCommits: commits, noChurn: !churn }) });
     void watchJob();
   } catch (e) {
     ui.setProgress(null);
@@ -261,6 +330,7 @@ function refreshInsights() {
   if (!city) return;
   insights = compute(city, scene, 15);
   ui.showInsights(insights, tab, city.churn, scene.authorFilter, scene.timeOf(), {
+    onLink: i => selectLink(i),
     onPick: i => selectBuilding(i, true),
     onPair: (a, b) => { selectBuilding(a, true); void b; },
     onArea: d => selectDistrict(d, true),
@@ -315,8 +385,13 @@ function setAuthorFilter(a: number) {
 // ---------------------------------------------------------------- selection
 function links(path: string): { label: string; href: string }[] {
   const out: { label: string; href: string }[] = [];
-  const hash = city!.commits[scene.commit].hash;
-  const remote = city!.repo.remote ?? '';
+  const i = city!.buildings.findIndex(b => b.path === path);
+  const k = i >= 0 ? repoOf(i) : 0;
+  const repo = city!.repos?.[k];
+  const hash = repoCommitAt(k, scene.commit) ?? city!.commits[scene.commit].hash;
+  const remote = (repo ? repo.remote : city!.repo.remote) ?? '';
+  const localPath = repo ? repo.path : city!.repo.path;
+  if (i >= 0) path = innerPath(i);
   const gh = remote.match(/github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
   const gl = remote.match(/gitlab\.com[/:](.+?)(?:\.git)?\/?$/);
   const enc = path.split('/').map(encodeURIComponent).join('/');
@@ -326,7 +401,7 @@ function links(path: string): { label: string; href: string }[] {
   } else if (gl) {
     out.push({ label: 'GitLab ↗', href: `https://gitlab.com/${gl[1]}/-/blob/${hash}/${enc}` });
   }
-  if (city!.repo.path) out.push({ label: 'Open in VS Code', href: `vscode://file${encodeURI(city!.repo.path.replace(/\\/g, '/'))}/${enc}` });
+  if (localPath) out.push({ label: 'Open in VS Code', href: `vscode://file${encodeURI(localPath.replace(/\\/g, '/'))}/${enc}` });
   return out;
 }
 
@@ -361,6 +436,7 @@ function buildingInfo(i: number): ui.BuildingInfo {
 
 function selectBuilding(i: number, fly: boolean) {
   if (!city || i < 0 || !scene.exists(i)) return;
+  if (selectedLink >= 0) { selectedLink = -1; scene.highlightLink(-1); }
   if (i !== selected) {
     if (scene.explodedBuilding >= 0) scene.collapse();
     if (codeOpen) closeCode();
@@ -397,6 +473,7 @@ function districtInfo(d: number): ui.DistrictInfo {
 
 function selectDistrict(d: number, fly: boolean) {
   if (!city) return;
+  if (selectedLink >= 0) { selectedLink = -1; scene.highlightLink(-1); }
   if (scene.explodedBuilding >= 0) scene.collapse();
   if (codeOpen) closeCode();
   selected = -1;
@@ -409,6 +486,8 @@ function selectDistrict(d: number, fly: boolean) {
 }
 
 function closeInfo() {
+  selectedLink = -1;
+  scene.highlightLink(-1);
   if (scene.explodedBuilding >= 0) scene.collapse();
   if (codeOpen) closeCode();
   file = null;
@@ -497,6 +576,7 @@ ui.bindControls({
   onTheme: () => toggleDayNight(),
   onHacker: () => toggleHacker(),
   onTab: t => { tab = t; store.set('tab', t); refreshInsights(); },
+  onLinksToggle: () => { scene.setLinks(linkViews()); },
   onCopyReport: () => {
     if (!city || !insights) return;
     const md = markdown(city, scene, insights, windowLabel() || 'all history');
@@ -551,7 +631,13 @@ canvas.addEventListener('pointermove', e => {
     const p = pending; pending = null;
     if (!p || !city) return;
     const hit = scene.pick(p.x, p.y);
-    if (hit?.kind === 'floor') {
+    if (hit?.kind === 'link') {
+      const l = city.links![hit.index];
+      scene.setHover(-1);
+      ui.showTip([l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${repoName(l.from)} ↔ ${repoName(l.to)}`,
+        (l.evidence ?? []).slice(0, 2).join(' · ') + ' · click for details'], p.x, p.y);
+      canvas.style.cursor = 'pointer';
+    } else if (hit?.kind === 'floor') {
       const f = scene.floorAt(hit.index)!;
       scene.setHover(-1);
       ui.showTip([f.name, `${f.kind} · ${ui.fmt(f.loc)} LOC · complexity ${ui.fmt(f.complexity)} · click for code`], p.x, p.y);
@@ -581,7 +667,8 @@ canvas.addEventListener('pointerup', e => {
   down = null;
   if (moved || e.button !== 0) return; // orbit / pan drag
   const hit = scene.pick(e.clientX, e.clientY);
-  if (hit?.kind === 'floor') openPiece(scene.floorAt(hit.index)!.piece);
+  if (hit?.kind === 'link') selectLink(hit.index);
+  else if (hit?.kind === 'floor') openPiece(scene.floorAt(hit.index)!.piece);
   else if (hit?.kind === 'building') selectBuilding(hit.index, false);
   else if (hit?.kind === 'district') selectDistrict(hit.index, false);
   else closeInfo();
@@ -621,7 +708,10 @@ async function start() {
     fetchCity('city.json').catch(() => ui.setMessage('No city loaded.\n\nDrop a city.json onto this page.'));
     return;
   }
-  if (st.job?.request && !saved) ui.setForm(st.job.request.source, st.job.request.ref, st.job.request.maxCommits, !st.job.request.noChurn);
+  if (st.job?.request && !saved) {
+    const r = st.job.request;
+    ui.setForm((r.sources?.length ? r.sources : [r.source ?? '']).join('\n'), r.ref, r.maxCommits, !r.noChurn);
+  }
   if (st.job?.state === 'running') { void watchJob(); return; }
   if (st.hasCity) {
     try { await fetchCity('/api/city'); return; } catch (e) { ui.setJobStatus((e as Error).message, true); }

@@ -8,6 +8,7 @@ make build
 ./bin/codecity serve .                                   # or start with a local repo
 ./bin/codecity serve https://github.com/expressjs/express --max-commits 60
 ./bin/codecity serve . --ref v1.2.0 --exclude 'docs/' --exclude '*.snap'
+./bin/codecity serve https://github.com/expressjs/express https://github.com/expressjs/body-parser https://github.com/pillarjs/router
 ./bin/codecity analyze . -o city.json                    # just the data
 ./bin/codecity report https://github.com/expressjs/express > report.md   # Markdown findings for CI / PRs
 ./bin/codecity outline internal/server/server.go          # the pieces found in one file
@@ -16,6 +17,7 @@ make build
 Open http://127.0.0.1:8080. Type a local path or git URL in the panel (plus optional ref and number of history samples) and press Analyze; progress is shown and can be cancelled.
 
 - **History:** the first-parent history up to the ref is sampled (default 100 commits). Use the timeline to scrub or play (space, arrow keys); buildings grow, shrink, appear and vanish. The layout never moves: footprints are fixed by each file's peak size. Green/amber tint = added/changed in that commit.
+- **Several repositories:** enter one per line (optional ref after a space) or pass several on the command line. Each repo becomes its own city on one map. Cities are connected only when there is evidence: a declared dependency (go.mod, package.json, Cargo.toml, pyproject/requirements/setup.py, submodules, git URLs) and/or code that imports the other repo (Go, JS/TS, Python, Rust). Light flows along each arc from the dependent repo to its dependency; click an arc for the evidence and the importing files, or select a file to see arcs to the exact directories it imports. *Shared people* (contributors in both repos) is an optional second link type. The timeline merges all repos by date.
 - **Hotspots:** change frequency × indentation complexity, the files where refactoring pays off most.
 - **Change coupling:** files that keep changing in the same commits. Select a file to see glowing arcs to its partners.
 - **Knowledge risk & owners:** owner (most commits) per file, author count, owners who have gone inactive. Click a person to light up their files.
