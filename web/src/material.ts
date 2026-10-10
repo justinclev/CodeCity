@@ -70,7 +70,7 @@ float h13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fr
     float m = max(max(c.r, c.g), max(c.b, 1e-3));
     float alive = smoothstep(0.03, 0.2, m);          // dimmed (search/filter) buildings go dark
     vec3 tint = mix(vec3(0.3, 0.85, 1.0), c / m, 0.45);
-    diffuseColor.rgb = c * 0.05 + vec3(0.004, 0.008, 0.02);
+    diffuseColor.rgb = c * 0.03 + vec3(0.002, 0.004, 0.012); // black glass
     // scrolling data text on the sides
     float speed = (fract(vSeed * 0.618) < 0.5 ? 0.0 : 0.012 + 0.02 * fract(vSeed * 0.37));
     vec2 uv = vec2(wc.x + vSeed * 3.17 + faceSeed * 5.3, wc.y) / uGlyphScale;
@@ -78,16 +78,30 @@ float h13(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fr
     float t = texture2D(uGlyphs, uv).r;
     float row = floor(uv.y * 64.0);
     t *= 0.45 + 0.55 * step(0.25, h13(vec3(row, vSeed, faceSeed)));
-    t *= side * smoothstep(0.0, uCell * 0.6, vSize.y - wc.y) ;
-    totalEmissiveRadiance += tint * t * 2.2 * alive;
-    totalEmissiveRadiance += vec3(0.0, 0.025, 0.06) * side * alive; // faint blue glass body
+    t *= side * smoothstep(0.0, uCell * 0.6, vSize.y - wc.y);
+    // text lives in recessed panels between light bands, not across the whole face
+    float storey = uCell * 2.6;
+    float fy = fract(wc.y / storey);
+    float panel = smoothstep(0.12, 0.18, fy) * (1.0 - smoothstep(0.82, 0.88, fy));
+    float colW = uCell * 3.2;
+    float fx = fract((wc.x + halfW) / colW);
+    panel *= smoothstep(0.06, 0.12, fx) * (1.0 - smoothstep(0.88, 0.94, fx));
+    totalEmissiveRadiance += tint * t * 0.95 * panel * alive;
+    // light band at every storey
+    float band = 1.0 - smoothstep(0.0, 0.012, abs(fy - 0.0)) + (1.0 - smoothstep(0.0, 0.012, abs(fy - 1.0)));
+    totalEmissiveRadiance += tint * band * side * 0.35 * step(storey, vSize.y) * alive;
+    totalEmissiveRadiance += vec3(0.0, 0.015, 0.04) * side * alive; // faint blue in the glass
     // glowing edges
-    float ew = max(uCell * 0.06, 0.02);
+    float ew = max(uCell * 0.045, 0.02);
     float d;
     if (side > 0.5) d = min(halfW - abs(wc.x), min(wc.y, vSize.y - wc.y));
     else d = min(vSize.x * 0.5 - abs(vLocal.x), vSize.z * 0.5 - abs(vLocal.z));
     float edge = 1.0 - smoothstep(0.0, ew, d);
-    totalEmissiveRadiance += mix(vec3(0.35, 0.9, 1.0), tint, 0.35) * edge * 1.2 * alive;
+    totalEmissiveRadiance += mix(vec3(0.35, 0.9, 1.0), tint, 0.3) * edge * 2.4 * alive; // crisp light outlines
+    // scan line sweeping up each tower at its own pace
+    float scanY = fract(uTime * (0.08 + 0.06 * fract(vSeed * 0.731)) + fract(vSeed * 0.377)) * vSize.y;
+    float scan = exp(-abs(wc.y - scanY) / max(uCell * 0.25, 0.05));
+    totalEmissiveRadiance += tint * scan * side * 0.9 * alive;
     totalEmissiveRadiance += tint * vGlow * 0.8;
   } else {
     vec2 cell = wc / uCell;
@@ -145,8 +159,19 @@ if (uHacker > 0.5) {
   float up = ${topOnly ? 'step(0.5, vObjN.y)' : '1.0'};
   vec3 tr = texture2D(uCircuit, vWorldP.xz / uTile).rgb;
   float pulse = 0.75 + 0.25 * sin(uTime * 1.3 + (vWorldP.x + vWorldP.z) / uTile * 6.2831);
-  float fade = 1.0 - smoothstep(uRadius * 0.6, uRadius * 1.5, distance(vWorldP.xz, uCenter)); // traces die out beyond the city
-  totalEmissiveRadiance += tr * up * 0.85 * pulse * fade;
+  float dist = distance(vWorldP.xz, uCenter);
+  float fade = 1.0 - smoothstep(uRadius * 0.6, uRadius * 1.5, dist); // traces die out beyond the city
+  totalEmissiveRadiance += tr * up * 0.45 * pulse * fade;
+  // neon grid: fine lines every cell, brighter every 5th, anti-aliased, fading into the distance
+  vec2 g = vWorldP.xz / (uTile * 0.125);
+  vec2 gw = fwidth(g);
+  vec2 l1 = 1.0 - smoothstep(vec2(0.0), gw * 1.5, abs(fract(g - 0.5) - 0.5));
+  vec2 g5 = g / 5.0;
+  vec2 gw5 = fwidth(g5);
+  vec2 l5 = 1.0 - smoothstep(vec2(0.0), gw5 * 2.0, abs(fract(g5 - 0.5) - 0.5));
+  float grid = max(max(l1.x, l1.y) * 0.18, max(l5.x, l5.y) * 0.6);
+  float far = 1.0 - smoothstep(uRadius * 1.2, uRadius * 4.0, dist);
+  totalEmissiveRadiance += vec3(0.1, 0.7, 1.0) * grid * up * far * 0.55;
 }`);
   };
   material.customProgramCacheKey = () => `codecity-circuit-${topOnly ? 1 : 0}`;

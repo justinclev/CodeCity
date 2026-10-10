@@ -10,17 +10,17 @@ const KEYWORDS = new Set(('break case catch class const continue default def def
   'using readonly abstract implements module require end begin then local unless until elsif rescue ensure goto sizeof template typename ' +
   'virtual inline volatile extern unsigned signed int float double char bool boolean string long short byte void').split(' '));
 
-function commentToken(lang: string): string {
+export function commentToken(lang: string): string {
   if (['Python', 'Ruby', 'Shell', 'YAML', 'TOML', 'Elixir', 'R', 'Makefile', 'Docker', 'Config', 'Julia', 'Terraform', 'PowerShell'].includes(lang)) return '#';
   if (['Lua', 'SQL', 'Haskell'].includes(lang)) return '--';
   if (['Markdown', 'Text', 'JSON'].includes(lang)) return '';
   return '//';
 }
 
-type Tok = [cls: string, text: string];
+export type Tok = [cls: string, text: string];
 
 /** Tokenize one line; `block` carries an open /* comment across lines. */
-function tokenize(line: string, lc: string, state: { block: boolean }): Tok[] {
+export function tokenize(line: string, lc: string, state: { block: boolean }): Tok[] {
   const out: Tok[] = [];
   let i = 0, plain = '';
   const flush = () => { if (plain) { out.push(['', plain]); plain = ''; } };

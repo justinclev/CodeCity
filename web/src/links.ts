@@ -85,16 +85,20 @@ export class TraceLayer {
         const len = a.distanceTo(b);
         if (len < 1e-6) continue;
         const dir = b.clone().sub(a).normalize();
-        const side = new THREE.Vector3().crossVectors(dir, up).normalize().multiplyScalar(t.width / 2);
-        if (side.lengthSq() < 1e-12) side.set(t.width / 2, 0, 0);
+        // horizontal runs are flat ribbons; vertical risers are two crossed quads so they read from any side
+        const sides = Math.abs(dir.y) > 0.9
+          ? [new THREE.Vector3(t.width / 2, 0, 0), new THREE.Vector3(0, 0, t.width / 2)]
+          : [new THREE.Vector3().crossVectors(dir, up).normalize().multiplyScalar(t.width / 2)];
         // extend each segment by half a width so corners join without gaps
         const a2 = a.clone().addScaledVector(dir, k === 0 ? 0 : -t.width / 2);
         const b2 = b.clone().addScaledVector(dir, k === t.points.length - 2 ? 0 : t.width / 2);
-        for (const [p, d, sv] of [[a2.clone().add(side), along, 0], [a2.clone().sub(side), along, 1], [b2.clone().add(side), along + len, 0], [b2.clone().sub(side), along + len, 1]] as [THREE.Vector3, number, number][]) {
-          pos.push(p.x, p.y, p.z); uv.push(0, sv); dist.push(d); speed.push(t.speed); color.push(t.color.r, t.color.g, t.color.b); seed.push(s);
+        for (const side of sides) {
+          for (const [p, d, sv] of [[a2.clone().add(side), along, 0], [a2.clone().sub(side), along, 1], [b2.clone().add(side), along + len, 0], [b2.clone().sub(side), along + len, 1]] as [THREE.Vector3, number, number][]) {
+            pos.push(p.x, p.y, p.z); uv.push(0, sv); dist.push(d); speed.push(t.speed); color.push(t.color.r, t.color.g, t.color.b); seed.push(s);
+          }
+          idx.push(v, v + 1, v + 2, v + 1, v + 3, v + 2);
+          v += 4;
         }
-        idx.push(v, v + 1, v + 2, v + 1, v + 3, v + 2);
-        v += 4;
         along += len;
       }
       for (let k = 0; k < t.points.length; k++) {
@@ -137,4 +141,15 @@ export function route(a: THREE.Vector3, b: THREE.Vector3, salt: number): THREE.V
   const A = new THREE.Vector3(a.x, y, a.z), B = new THREE.Vector3(b.x, y, b.z);
   const corner = salt % 2 === 0 ? new THREE.Vector3(B.x, y, A.z) : new THREE.Vector3(A.x, y, B.z);
   return [A, corner, B];
+}
+
+/**
+ * Raised "data bus" route: up from a's roof to a layer above the skyline, across
+ * (one orthogonal bend), and down onto b's roof.
+ */
+export function busRoute(a: THREE.Vector3, b: THREE.Vector3, layer: number, salt: number): THREE.Vector3[] {
+  const L = Math.max(layer, a.y, b.y);
+  const A = new THREE.Vector3(a.x, L, a.z), B = new THREE.Vector3(b.x, L, b.z);
+  const corner = salt % 2 === 0 ? new THREE.Vector3(B.x, L, A.z) : new THREE.Vector3(A.x, L, B.z);
+  return [a.clone(), A, corner, B, b.clone()];
 }

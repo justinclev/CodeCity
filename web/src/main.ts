@@ -1,6 +1,9 @@
 import './style.css';
 import { CityScene, type Floor, type LinkView } from './scene';
 import { showCode, type FileData } from './code';
+import { WalkMode, type Destination, type Sym } from './walk/walk';
+import type { InteriorFloor, InteriorSpec } from './walk/interior';
+import type { PanelRow } from './walk/codewall';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
 import { SCHEMA_VERSION, type City, type ColorMode } from './types';
@@ -738,3 +741,105 @@ async function start() {
     : 'Enter a git URL on the left, then press Analyze.');
 }
 void start();
+
+// ---------------------------------------------------------------- walk mode
+const MAX_FLOORS = 60;
+let pathIndex = new Map<string, number>();
+
+function interiorFloors(f: FileData): InteriorFloor[] {
+  const fl = floorsOf(f).map(x => {
+    const p = f.pieces[x.piece];
+    return { name: x.name, kind: x.kind, start: p.start, end: p.end, loc: x.loc, complexity: x.complexity, piece: x.piece };
+  }).filter(x => x.kind !== 'imports' || x.loc > 0);
+  if (!fl.length) {
+    const n = f.content.split('\n').length;
+    return [{ name: f.path.split('/').pop() ?? f.path, kind: 'file', start: 1, end: n, loc: n, complexity: 0, piece: 0 }];
+  }
+  return fl.slice(0, MAX_FLOORS);
+}
+
+const walk = new WalkMode(scene, {
+  async interiorSpec(i, go, symbols): Promise<InteriorSpec> {
+    if (!apiAvailable) throw new Error('walking into buildings needs the server (codecity serve)');
+    const c = city!;
+    const hash = repoCommitAt(repoOf(i), scene.commit);
+    if (!hash) throw new Error('file does not exist at this commit');
+    const f = await fetchFile(c.buildings[i].path, hash);
+    const floors = interiorFloors(f);
+    const lines = f.content.split('\n');
+    const b = c.buildings[i];
+    const v = scene.valuesAt(i);
+    const dest = (j: number, line?: number): Destination => ({ building: j, line, label: c.buildings[j].path + (line ? `:${line}` : '') });
+    const firstIn = (d: number) => scene.districtMembers(d)[0] ?? -1;
+    const lobby: PanelRow[] = [
+      { text: b.path, color: '#bff8ff', size: 30 },
+      { text: `${b.lang} · ${ui.fmt(v.loc)} LOC · complexity ${ui.fmt(v.complexity)} · ${floors.length} floors`, color: '#7fb8c8', size: 28 },
+    ];
+    const own = b.own ? c.authors?.[b.own[0]] : undefined;
+    if (own) lobby.push({ text: `owner: ${own.name}`, color: '#7fb8c8', size: 28 });
+    const imps = (b.imp ?? []).filter(j => scene.exists(j));
+    if (imps.length || b.impd?.length) {
+      lobby.push({ text: '' }, { text: 'IMPORTS  (click to teleport)', color: '#5ff0ff', size: 28 });
+      for (const j of imps.slice(0, 8)) lobby.push({ text: c.buildings[j].path, action: () => go(dest(j)), size: 28 });
+      for (const d of (b.impd ?? []).slice(0, 6)) { const j = firstIn(d); if (j >= 0) lobby.push({ text: c.districts[d].path + '/', action: () => go(dest(j)), size: 28 }); }
+    }
+    const by = scene.importersOf(i);
+    if (by.length) {
+      lobby.push({ text: '' }, { text: 'IMPORTED BY', color: '#ff8adf', size: 28 });
+      for (const k of by.slice(0, 8)) lobby.push({ text: c.buildings[k].path, action: () => go(dest(k)), size: 28 });
+    }
+    const directory: PanelRow[] = floors.map((fl, k) => ({
+      text: `L${k + 1}  ${fl.name}`, hint: `${fl.loc} LOC`, size: 30,
+      action: () => go({ building: i, line: fl.start, label: `${fl.name} — ${b.path}:${fl.start}` }),
+    }));
+    const references = (fl: InteriorFloor): PanelRow[] => {
+      if (!symbols) return [{ text: '(indexing definitions…)', size: 28 }];
+      const seen = new Set<string>();
+      const rows: PanelRow[] = [];
+      const re = /[A-Za-z_$][\w$]*/g;
+      for (const line of lines.slice(fl.start - 1, fl.end)) {
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(line)) && rows.length < 16) {
+          const name = m[0];
+          if (seen.has(name) || name.length < 3) continue;
+          seen.add(name);
+          const defs = (symbols.get(name) ?? []).filter((d: Sym) => !(d[2] === b.path && d[3] >= fl.start && d[3] <= fl.end));
+          if (!defs.length) continue;
+          const d = defs.find((x: Sym) => x[2] === b.path) ?? defs[0];
+          const j = pathIndex.get(d[2]) ?? -1;
+          if (j < 0) continue;
+          rows.push({ text: `${name}  →  ${d[2].split('/').slice(-2).join('/')}:${d[3]}`, size: 28,
+            action: () => go({ building: j, line: d[3], label: `${d[0]} — ${d[2]}:${d[3]}` }) });
+        }
+      }
+      return rows.length ? rows : [{ text: '(no definitions from elsewhere)', size: 28 }];
+    };
+    return { path: b.path, lang: b.lang, lines, floors, lobby, directory, references,
+      glyphs: scene.glyphTexture, circuit: scene.circuitTexture };
+  },
+  buildingByPath: p => pathIndex.get(p) ?? -1,
+  buildingName: i => city!.buildings[i].path,
+  importsOf: i => city!.buildings[i].imp ?? [],
+  symbols: async () => (await api<{ symbols: Sym[] }>('/api/symbols')).symbols ?? [],
+  onExit: () => { onCommitChanged(); },
+});
+
+function startWalk() {
+  if (!city) return;
+  if (!apiAvailable) { ui.setJobStatus('Walk mode needs the server (codecity serve).', true); return; }
+  stopPlayback();
+  closeInfo();
+  if (scene.commit !== city.commits.length - 1) setCommit(city.commits.length - 1);
+  if (scene.theme.name !== 'hacker') applyTheme('hacker');
+  pathIndex = new Map(city.buildings.map((b, i) => [b.path, i]));
+  walk.start();
+}
+document.getElementById('walk')!.addEventListener('click', () => startWalk());
+addEventListener('keydown', e => {
+  const t = e.target as HTMLElement;
+  if (walk.active || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
+  if (e.key === 'g' || e.key === 'G') startWalk();
+});
+
+// debug handle for automated checks (no behaviour change)
+(window as unknown as { __codecity: unknown }).__codecity = { scene, walk };

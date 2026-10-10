@@ -6,7 +6,8 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { authorColor, depthColor, heat, languageColor } from './colors';
 import { buildingMaterial, circuitMaterial, type BuildingUniforms, type CircuitUniforms } from './material';
-import { route, TraceLayer, type Trace } from './links';
+import { busRoute, TraceLayer, type Trace } from './links';
+import { HackerFx } from './fx';
 import { circuitTexture, codeTexture, glyphAtlas, skyTexture, THEMES, type Theme, type ThemeName } from './theme';
 import type { City, ColorMode, Metric, ScaleMode } from './types';
 
@@ -75,6 +76,11 @@ export class CityScene {
   readonly camera: THREE.PerspectiveCamera;
   readonly controls: OrbitControls;
   private composer: EffectComposer;
+  private renderPass: RenderPass;
+  /** Walk mode: called every frame with dt; when set, orbit controls are bypassed. */
+  onFrame: ((dt: number) => void) | null = null;
+  /** Scene actually rendered (the city, or a building interior in walk mode). */
+  private view: THREE.Scene = this.scene;
   private bloom: UnrealBloomPass;
   private hemi = new THREE.HemisphereLight();
   private sun = new THREE.DirectionalLight();
@@ -100,6 +106,7 @@ export class CityScene {
   private linkMeshes: LinkMesh[] = [];
   private linkHi = -1;
   readonly codeLinks = new TraceLayer(true);
+  private hackerFx = new HackerFx();
   codeLinkMode: 'off' | 'selection' | 'all' = 'selection';
   private importers: number[][] = []; // building → buildings that import it
   private dirImporters = new Map<number, number[]>(); // district → buildings that import it (Go packages)
@@ -161,7 +168,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.hackerFx.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -171,7 +178,8 @@ export class CityScene {
     this.scene.add(this.ground);
 
     this.composer = new EffectComposer(this.renderer);
-    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.renderPass = new RenderPass(this.scene, this.camera);
+    this.composer.addPass(this.renderPass);
     this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 1, 0.5, 0.6);
     this.composer.addPass(this.bloom);
     this.composer.addPass(new OutputPass());
@@ -187,6 +195,7 @@ export class CityScene {
     this.last = now;
     if (this.theme.hacker) {
       this.time += dt;
+      this.hackerFx.update(dt, this.time);
       for (const u of [this.uniforms, this.exploded?.uniforms, this.groundU, this.districtU]) if (u) u.uTime.value = this.time;
       this.updateSkin();
     }
@@ -199,6 +208,7 @@ export class CityScene {
     }
     if (this.moving) this.step(dt);
     if (this.exploded) this.animateExplode(dt);
+    if (this.onFrame) this.onFrame(dt);
     this.codeLinks.update(this.flowTime);
     if (this.linkMeshes.length || this.arcs.children.length || this.codeLinks.group.children.length) {
       this.flowTime += dt;
@@ -213,9 +223,9 @@ export class CityScene {
       for (const i of this.changed) this.paint(i);
     }
     this.fadeLabels();
-    this.controls.update();
+    if (!this.onFrame) this.controls.update();
     if (this.bloom.enabled) this.composer.render();
-    else this.renderer.render(this.scene, this.camera);
+    else this.renderer.render(this.view, this.camera);
   }
 
   private resize() {
@@ -227,6 +237,68 @@ export class CityScene {
   }
 
   get commitCount() { return this.C; }
+
+  // ------------------------------------------------------------------ walk-mode support
+
+  /** Render another scene (a building interior) instead of the city; null = the city. */
+  setView(sc: THREE.Scene | null) {
+    this.view = sc ?? this.scene;
+    this.renderPass.scene = this.view;
+    // interiors are close-up and full of emissive surfaces: a calmer bloom than the night skyline
+    const t = this.theme.bloom;
+    this.bloom.enabled = sc ? true : t.strength > 0;
+    this.bloom.strength = sc ? 0.45 : t.strength;
+    this.bloom.radius = sc ? 0.4 : t.radius;
+    this.bloom.threshold = sc ? 0.82 : t.threshold;
+    this.renderer.toneMappingExposure = sc ? 1.0 : this.theme.exposure;
+  }
+
+  get cityScene() { return this.scene; }
+  get worldSize() { return this.size(); }
+  get cell() { return this.uniforms?.uCell.value ?? 1; }
+  get loaded() { return !!this.city; }
+  get clock() { return this.flowTime; }
+
+  /** Axis-aligned boxes of the buildings present at the current commit, plus district plates. */
+  walkData() {
+    const boxes: { i: number; x0: number; x1: number; z0: number; z1: number; top: number }[] = [];
+    this.city.buildings.forEach((b, i) => {
+      if (!this.exists(i)) return;
+      boxes.push({ i, x0: b.x, x1: b.x + b.w, z0: b.z, z1: b.z + b.d, top: this.baseY[i] + Math.max(this.target[i], MIN_H) });
+    });
+    const plates = this.city.districts.filter(d => d.depth >= 0)
+      .map(d => ({ x0: d.x, x1: d.x + d.w, z0: d.z, z1: d.z + d.d, top: this.districtTop(d.depth) }));
+    return { boxes, plates };
+  }
+
+  /** Distance along a ray to the first building or plate (Infinity if none within far). */
+  rayDistance(origin: THREE.Vector3, dir: THREE.Vector3, far: number): number {
+    if (!this.buildingMesh || !this.districtMesh) return Infinity;
+    this.raycaster.set(origin, dir);
+    this.raycaster.far = far;
+    const hit = this.raycaster.intersectObjects([this.buildingMesh], false)[0];
+    this.raycaster.far = Infinity;
+    return hit ? hit.distance : Infinity;
+  }
+
+  /** Building under a ray (walk-mode aiming), or -1. */
+  rayBuilding(origin: THREE.Vector3, dir: THREE.Vector3, far: number): number {
+    if (!this.buildingMesh) return -1;
+    this.raycaster.set(origin, dir);
+    this.raycaster.far = far;
+    for (const h of this.raycaster.intersectObject(this.buildingMesh, false)) {
+      if (h.instanceId !== undefined && this.exists(h.instanceId)) { this.raycaster.far = Infinity; return h.instanceId; }
+    }
+    this.raycaster.far = Infinity;
+    return -1;
+  }
+
+  /** Stop any camera fly animation (walk mode drives the camera itself). */
+  stopFly() { this.fly = null; }
+  get glyphTexture() { return this.glyphTex ?? null; }
+  get circuitTexture() { return this.circuitTex ?? null; }
+  /** Roof height of building i at the current commit. */
+  roofOf(i: number) { return this.baseY[i] + Math.max(this.target[i], MIN_H); }
 
   // ------------------------------------------------------------------ theme
 
@@ -263,6 +335,13 @@ export class CityScene {
       u.uHacker.value = t.hacker;
       u.uCircuit.value = this.circuitTex ?? null;
     }
+    // hacker: glossy black surfaces (bright edges and grid do the talking)
+    const gm = this.ground.material as THREE.MeshStandardMaterial;
+    gm.roughness = t.hacker ? 0.18 : 1; gm.metalness = t.hacker ? 0.85 : 0;
+    if (this.buildingMesh) {
+      const bm = this.buildingMesh.material as THREE.MeshStandardMaterial;
+      bm.roughness = t.hacker ? 0.15 : 0.55; bm.metalness = t.hacker ? 0.9 : 0.15;
+    }
     if (this.skin) this.skin.mesh.visible = !!t.hacker;
     if (this.grid) {
       this.grid.visible = !t.hacker;
@@ -278,6 +357,7 @@ export class CityScene {
     if (this.districtMesh) this.paintDistricts();
     if (this.city) {
       this.makeLabels(); this.refresh(false); this.collapse(true);
+      this.buildFx();
       this.setLinks(this.linkMeshes.map(l => l.view));
     }
   }
@@ -437,15 +517,27 @@ export class CityScene {
   /** Files that import building i: directly, or through its package directory. */
   importersOf(i: number): number[] {
     const set = new Set(this.importers[i] ?? []);
-    for (const k of this.dirImporters.get(this.city.buildings[i].district) ?? []) if (k !== i) set.add(k);
+    // a Go package import reaches every file of the package, except its tests
+    if (!this.city.buildings[i].name.endsWith('_test.go')) {
+      for (const k of this.dirImporters.get(this.city.buildings[i].district) ?? []) if (k !== i) set.add(k);
+    }
     return [...set].filter(k => this.exists(k));
   }
 
   dependents(i: number) { return this.importersOf(i).length; }
 
+  /** Roof centre of building i (where code-link traces plug in). */
   buildingAnchor(i: number, lift = 0.03): THREE.Vector3 {
     const b = this.city.buildings[i];
-    return new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + lift, b.z + b.d / 2);
+    return new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + Math.max(this.target[i], MIN_H) + lift, b.z + b.d / 2);
+  }
+
+  /** Height of the data-bus layer: just above the current skyline. */
+  private busLayer(salt: number) {
+    let tallest = 0;
+    for (let i = 0; i < this.target.length; i++) tallest = Math.max(tallest, this.baseY[i] + this.target[i]);
+    const s = this.size();
+    return tallest * 1.06 + s * 0.012 + (salt % 7) * s * 0.0035;
   }
 
   districtAnchor(d: number, lift = 0.03): THREE.Vector3 { return this.districtCenter(d, lift); }
@@ -473,9 +565,9 @@ export class CityScene {
     if (this.codeLinkMode !== 'off' && sel >= 0 && this.exists(sel)) {
       const b = this.city.buildings[sel];
       const from = this.buildingAnchor(sel);
-      for (const j of b.imp ?? []) if (this.exists(j)) traces.push({ points: route(from, this.buildingAnchor(j), j), color: pal.out, width: w * 1.6, speed });
-      for (const d of b.impd ?? []) traces.push({ points: route(from, this.districtAnchor(d), d), color: pal.out, width: w * 1.6, speed });
-      for (const k of this.importersOf(sel)) traces.push({ points: route(this.buildingAnchor(k), from, k + 1), color: pal.in, width: w * 1.3, speed });
+      for (const j of b.imp ?? []) if (this.exists(j)) traces.push({ points: busRoute(from, this.buildingAnchor(j), this.busLayer(j), j), color: pal.out, width: w * 1.6, speed });
+      for (const d of b.impd ?? []) traces.push({ points: busRoute(from, this.districtAnchor(d), this.busLayer(d), d), color: pal.out, width: w * 1.6, speed });
+      for (const k of this.importersOf(sel)) traces.push({ points: busRoute(this.buildingAnchor(k), from, this.busLayer(k + 3), k + 1), color: pal.in, width: w * 1.3, speed });
     } else if (this.codeLinkMode === 'all') {
       traces.push(...this.cityTraces(pal.all, w, speed));
     }
@@ -494,7 +586,7 @@ export class CityScene {
         for (const j of b.imp ?? []) if (this.exists(j)) edges.push([i * 31 + j, from, this.buildingAnchor(j), 1]);
         for (const d of b.impd ?? []) edges.push([i * 31 + d, from, this.districtAnchor(d), 1]);
       });
-      return edges.map(([salt, a, b]) => ({ points: route(a, b, salt), color, width: w, speed }));
+      return edges.map(([salt, a, b]) => ({ points: busRoute(a, b, this.busLayer(salt), salt), color, width: w, speed }));
     }
     // bundle by directory: ancestors at a depth that keeps the number of groups readable
     const ds = this.city.districts;
@@ -516,7 +608,7 @@ export class CityScene {
     const out: Trace[] = [];
     for (const [k, n] of counts) {
       const [ga, gb] = k.split(':').map(Number);
-      out.push({ points: route(this.districtAnchor(ga, 0.04), this.districtAnchor(gb, 0.04), ga + gb), color, width: w * (1 + Math.log2(n)), speed });
+      out.push({ points: busRoute(this.districtAnchor(ga, 0.04), this.districtAnchor(gb, 0.04), this.busLayer(ga + gb), ga + gb), color, width: w * (1 + Math.log2(n)), speed });
     }
     return out;
   }
@@ -879,7 +971,9 @@ export class CityScene {
       mid.y = Math.max(from.y, to.y) + dist * 0.35 + s * 0.01;
       const curve = new THREE.QuadraticBezierCurve3(from, mid, to);
       const t = degree / 100;
-      const col = new THREE.Color().setHSL(0.52 - 0.5 * t, 1, 0.55).multiplyScalar(1 + 1.5 * this.theme.night);
+      const col = this.theme.hacker
+        ? new THREE.Color('#ffd23c').lerp(new THREE.Color('#ff7ad9'), t).multiplyScalar(0.45)
+        : new THREE.Color().setHSL(0.52 - 0.5 * t, 1, 0.55).multiplyScalar(1 + 0.6 * this.theme.night);
       const mat = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.45 + 0.5 * t, toneMapped: false, depthWrite: false });
       const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 48, s * (0.0008 + 0.0022 * t), 6), mat);
       tube.renderOrder = 5;
@@ -1059,6 +1153,17 @@ export class CityScene {
   }
 
   // ------------------------------------------------------------------ hacker mode
+
+  /** (Re)build hacker-mode atmosphere: tracers, particles, hotspot beacons. */
+  private buildFx() {
+    this.hackerFx.clear();
+    this.hackerFx.group.visible = !!this.theme.hacker;
+    if (!this.theme.hacker || !this.city) return;
+    let tallest = 0;
+    for (let i = 0; i < this.target.length; i++) tallest = Math.max(tallest, this.baseY[i] + this.target[i]);
+    const hot = this.city.churn ? this.topHotspots(5).map(h => this.buildingAnchor(h.index, 0)) : [];
+    this.hackerFx.build(this.city.bounds, tallest, hot);
+  }
 
   /** Words for the glyph atlas: the repo's own file and directory names. */
   private glyphWords(): string[] {
