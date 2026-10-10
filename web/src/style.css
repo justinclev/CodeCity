@@ -635,3 +635,11 @@ svg.hovering .fe:not(.hov):not(.hl):not(.sel) { stroke-opacity: 0.12; }
   .fl-crumbs { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .fn, .fe { transition: none; } .fl-spin { animation-duration: 3s; } }
+
+/* header: title and mode buttons on one line, the repository / branch switcher on its own line below */
+.brand { flex-wrap: wrap; row-gap: 6px; gap: 8px; }
+.brand .brandtext { display: contents; }
+.brand .name { display: none; } /* the logo carries the name; the line below says which repository and branch */
+.brand .logo { margin-right: auto; }
+.brand #repo { order: 10; flex-basis: 100%; }
+.brand button.walkbtn { padding: 0 7px; }
