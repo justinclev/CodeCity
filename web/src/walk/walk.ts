@@ -1171,10 +1171,10 @@ export class WalkMode {
     if (this.flying) this.toast('FLYING · Space up · Shift down · double-tap W fast · double-tap Space to drop', 4);
   }
 
-  /** Building boxes plus the floors of a taken-apart building (which replaces its own box). */
+  /** Building tiers (setbacks are terraces) plus the floors of a taken-apart building (which replace its tiers). */
   private *cityBoxes(): Generator<{ x0: number; x1: number; z0: number; z1: number; top: number; y0?: number }> {
     const ex = this.scene.explodedBuilding;
-    for (const b of this.obstacles?.boxes ?? []) if (b.i !== ex) yield b;
+    for (const b of this.obstacles?.solids ?? []) if (b.i !== ex) yield b;
     if (ex >= 0) yield* this.scene.explodedBoxes();
   }
 

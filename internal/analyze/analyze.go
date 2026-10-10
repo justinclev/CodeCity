@@ -12,6 +12,7 @@ import (
 
 	"github.com/justinclev/codecity/internal/city"
 	"github.com/justinclev/codecity/internal/deps"
+	"github.com/justinclev/codecity/internal/flow"
 	"github.com/justinclev/codecity/internal/gitx"
 	"github.com/justinclev/codecity/internal/layout"
 	"github.com/justinclev/codecity/internal/scan"
@@ -216,6 +217,8 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 	f := &city.Facts{Remote: deps.NormalizeURL(remote), Imports: map[int][]string{}}
 	var paths []string
 	local := map[int][]string{}
+	var flowFiles []flow.File
+	flowBytes := 0
 	for i, b := range c.Buildings {
 		oid, ok := tipOid[b.Path]
 		if !ok {
@@ -224,15 +227,20 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 		paths = append(paths, b.Path)
 		manifest := deps.IsManifest(b.Path)
 		code := importLangs[b.Lang]
-		if !manifest && !code {
-			continue
-		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		content, err := br.Read(oid, scan.DefaultMaxBytes)
 		if err != nil {
 			return nil, err
+		}
+		c.Buildings[i].Shape = shapeOf(b.Path, b.Lang, content)
+		if roleWanted(b.Path, b.Lang) && flowBytes+len(content) <= maxRoleBytes && len(flowFiles) < maxRoleFiles {
+			flowFiles = append(flowFiles, flow.File{Path: b.Path, Lang: b.Lang, Content: content})
+			flowBytes += len(content)
+		}
+		if !manifest && !code {
+			continue
 		}
 		if manifest {
 			ids, ds := deps.Manifest(b.Path, content)
@@ -253,6 +261,8 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 	if f.Remote != "" {
 		f.Identities = append(f.Identities, deps.Identity{Kind: deps.Git, Name: f.Remote})
 	}
+
+	assignRoles(c, flowFiles)
 
 	// resolve imports inside this repository
 	res := deps.NewResolver(paths, f.Identities)
@@ -290,6 +300,12 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 	}
 	return f, nil
 }
+
+// Limits for the flow analysis behind rooftop roles (same order as the server's flow view).
+const (
+	maxRoleFiles = 25000
+	maxRoleBytes = 96 << 20
+)
 
 var importLangs = map[string]bool{"Go": true, "JavaScript": true, "TypeScript": true, "Python": true, "Rust": true, "Vue": true, "Svelte": true}
 

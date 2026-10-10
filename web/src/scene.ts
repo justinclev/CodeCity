@@ -7,6 +7,8 @@ import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { authorColor, depthColor, heat, languageColor } from './colors';
 import { buildingMaterial, circuitMaterial, type BuildingUniforms, type CircuitUniforms } from './material';
 import { busRoute, TraceLayer, type Trace } from './links';
+import { buildSpecs, classicSpec, facadeCode, pathSeed, explain, type BuildingSpec, type Condition } from './architecture';
+import { RoofKit, type Works } from './roofs';
 import { HackerFx } from './fx';
 import { circuitTexture, codeTexture, glyphAtlas, skyTexture, THEMES, type Theme, type ThemeName } from './theme';
 import type { City, ColorMode, Metric, ScaleMode } from './types';
@@ -90,7 +92,7 @@ export class CityScene {
   private glyphTex?: THREE.Texture;
   private circuitTex?: THREE.Texture;
   private time = 0;
-  private skin: { building: number; mesh: THREE.Mesh; content: string } | null = null;
+  private skin: { building: number; mesh: THREE.Group; content: string } | null = null;
   private grid?: THREE.GridHelper;
   private outlines?: THREE.LineSegments;
   theme: Theme = THEMES.night;
@@ -112,7 +114,18 @@ export class CityScene {
   private dirImporters = new Map<number, number[]>(); // district → buildings that import it (Go packages)
   private cumCommits!: Int32Array; // cumulative churn up to and including each commit
   private cumLines!: Int32Array;
-  private buildingMesh?: THREE.InstancedMesh;
+  private buildingMesh?: THREE.InstancedMesh; // tier 0 of every building (instance = building index)
+  private tierMesh?: THREE.InstancedMesh; // tiers above the podium
+  private tierOwner = new Int32Array(0); // tier instance → building
+  private tierFirst = new Int32Array(0); // building → its first instance in tierMesh (-1: none)
+  private facade0 = new Float32Array(0); // aFacade per building (tier 0)
+  private facadeT = new Float32Array(0); // aFacade per upper tier
+  private tierGlow = new Float32Array(0);
+  private specs: BuildingSpec[] = [];
+  private classic = false;
+  private roofs = new RoofKit();
+  private conds: Condition[] = [];
+  private worksKey = '';
   private uniforms?: BuildingUniforms;
   private glow = new Float32Array(0);
   private glowAttr?: THREE.InstancedBufferAttribute;
@@ -168,7 +181,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.hackerFx.group);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.hackerFx.group, this.roofs.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -201,6 +214,7 @@ export class CityScene {
       this.time += dt;
       this.hackerFx.update(dt, this.time);
       for (const u of [this.uniforms, this.exploded?.uniforms, this.groundU, this.districtU]) if (u) u.uTime.value = this.time;
+      this.roofs.update(this.time);
       this.updateSkin();
     }
     if (this.fly) {
@@ -272,16 +286,26 @@ export class CityScene {
   get loaded() { return !!this.city; }
   get clock() { return this.flowTime; }
 
-  /** Axis-aligned boxes of the buildings present at the current commit, plus district plates. */
+  /**
+   * Buildings present at the current commit: footprints (boxes: one per building, up to its roof),
+   * the solid tiers you collide with and stand on (setbacks are terraces), and district plates.
+   */
   walkData() {
     const boxes: { i: number; x0: number; x1: number; z0: number; z1: number; top: number }[] = [];
+    const solids: { i: number; x0: number; x1: number; z0: number; z1: number; y0?: number; top: number }[] = [];
     this.city.buildings.forEach((b, i) => {
       if (!this.exists(i)) return;
-      boxes.push({ i, x0: b.x, x1: b.x + b.w, z0: b.z, z1: b.z + b.d, top: this.baseY[i] + Math.max(this.target[i], MIN_H) });
+      const h = Math.max(this.target[i], MIN_H), y = this.baseY[i];
+      boxes.push({ i, x0: b.x, x1: b.x + b.w, z0: b.z, z1: b.z + b.d, top: y + h });
+      const cx = b.x + b.w / 2, cz = b.z + b.d / 2;
+      this.specOf(i).tiers.forEach((t, k) => {
+        const hw = (b.w * t.s) / 2, hd = (b.d * t.s) / 2;
+        solids.push({ i, x0: cx - hw, x1: cx + hw, z0: cz - hd, z1: cz + hd, y0: k === 0 ? undefined : y + h * t.y0, top: y + h * t.y1 });
+      });
     });
     const plates = this.city.districts.filter(d => d.depth >= 0)
       .map(d => ({ x0: d.x, x1: d.x + d.w, z0: d.z, z1: d.z + d.d, top: this.districtTop(d.depth), depth: d.depth }));
-    return { boxes, plates };
+    return { boxes, solids, plates };
   }
 
   /** Boxes of the floors of the exploded building (walk-mode collision: you can stand on them). */
@@ -320,7 +344,7 @@ export class CityScene {
     if (!this.buildingMesh || !this.districtMesh) return Infinity;
     this.raycaster.set(origin, dir);
     this.raycaster.far = far;
-    const hit = this.raycaster.intersectObjects(this.exploded ? [this.buildingMesh, this.exploded.mesh] : [this.buildingMesh], false)[0];
+    const hit = this.raycaster.intersectObjects(this.solidMeshes(true), false)[0];
     this.raycaster.far = Infinity;
     return hit ? hit.distance : Infinity;
   }
@@ -330,10 +354,28 @@ export class CityScene {
     if (!this.buildingMesh) return -1;
     this.raycaster.set(origin, dir);
     this.raycaster.far = far;
-    for (const h of this.raycaster.intersectObject(this.buildingMesh, false)) {
-      if (h.instanceId !== undefined && this.exists(h.instanceId)) { this.raycaster.far = Infinity; return h.instanceId; }
+    for (const h of this.raycaster.intersectObjects(this.solidMeshes(false), false)) {
+      const i = this.ownerOf(h);
+      if (i >= 0 && this.exists(i)) { this.raycaster.far = Infinity; return i; }
     }
     this.raycaster.far = Infinity;
+    return -1;
+  }
+
+  /** Meshes making up the buildings (plus the floors of an exploded one). */
+  private solidMeshes(withExploded: boolean): THREE.Object3D[] {
+    const out: THREE.Object3D[] = [];
+    if (this.buildingMesh) out.push(this.buildingMesh);
+    if (this.tierMesh && this.tierMesh.count > 0) out.push(this.tierMesh);
+    if (withExploded && this.exploded) out.push(this.exploded.mesh);
+    return out;
+  }
+
+  /** Building of a ray hit on the podium or tier meshes, else -1. */
+  private ownerOf(h: THREE.Intersection): number {
+    if (h.instanceId === undefined) return -1;
+    if (h.object === this.buildingMesh) return h.instanceId;
+    if (h.object === this.tierMesh) return this.tierOwner[h.instanceId] ?? -1;
     return -1;
   }
 
@@ -343,6 +385,140 @@ export class CityScene {
   get circuitTexture() { return this.circuitTex ?? null; }
   /** Roof height of building i at the current commit. */
   roofOf(i: number) { return this.baseY[i] + Math.max(this.target[i], MIN_H); }
+
+  // ------------------------------------------------------------------ architecture
+
+  /** The building's spec (its shape), or a plain box in "Classic boxes" mode. */
+  specOf(i: number): BuildingSpec { return this.classic ? classicSpec(this.city.buildings[i]) : this.specs[i] ?? classicSpec(this.city.buildings[i]); }
+  /** Condition at the current commit (scaffolding, irregularity, age). */
+  conditionOf(i: number): Condition | undefined { return this.classic ? undefined : this.conds[i]; }
+  /** Plain-language reasons for building i's look. */
+  whyLooks(i: number): string[] { return this.classic ? [] : explain(this.city.buildings[i], this.specOf(i), this.conds[i]); }
+  get classicBoxes() { return this.classic; }
+
+  /** "Classic boxes": every building a plain box (no tiers, facades, roofs or condition). */
+  setClassic(on: boolean) {
+    if (on === this.classic) return;
+    this.classic = on;
+    if (!this.city) return;
+    const sel = this.skin ? { i: this.skin.building, c: this.skin.content } : null;
+    this.buildTiers();
+    this.refresh(true);
+    if (this.exploded) this.collapse(true);
+    if (sel) this.setSkin(sel.i, sel.c);
+  }
+
+  /** (Re)create the upper-tier instances and the roof kit for the current specs. */
+  private buildTiers() {
+    const n = this.city.buildings.length;
+    if (this.tierMesh) { this.scene.remove(this.tierMesh); this.tierMesh.geometry.dispose(); this.tierMesh.dispose(); }
+    this.tierFirst = new Int32Array(n).fill(-1);
+    const owner: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const t = this.specOf(i).tiers.length;
+      if (t > 1) { this.tierFirst[i] = owner.length; for (let k = 1; k < t; k++) owner.push(i); }
+    }
+    this.tierOwner = Int32Array.from(owner);
+    const m = owner.length;
+    this.facade0 = new Float32Array(n * 4);
+    this.facadeT = new Float32Array(Math.max(1, m) * 4);
+    this.tierGlow = new Float32Array(Math.max(1, m));
+    const geo = new THREE.BoxGeometry(1, 1, 1);
+    geo.setAttribute('aGlow', new THREE.InstancedBufferAttribute(this.tierGlow, 1));
+    geo.setAttribute('aFacade', new THREE.InstancedBufferAttribute(this.facadeT, 4));
+    this.buildingMesh!.geometry.setAttribute('aFacade', new THREE.InstancedBufferAttribute(this.facade0, 4));
+    this.tierMesh = new THREE.InstancedMesh(geo, this.buildingMesh!.material, Math.max(1, m));
+    this.tierMesh.count = m;
+    this.tierMesh.castShadow = this.tierMesh.receiveShadow = true;
+    this.tierMesh.frustumCulled = false;
+    this.scene.add(this.tierMesh);
+    for (let i = 0; i < n; i++) {
+      const sp = this.specOf(i), seed = pathSeed(this.city.buildings[i].path);
+      sp.tiers.forEach((t, k) => {
+        const arr = k === 0 ? this.facade0 : this.facadeT, o = (k === 0 ? i : this.tierFirst[i] + k - 1) * 4;
+        arr[o] = facadeCode(sp, t); arr[o + 3] = seed;
+      });
+    }
+    this.worksKey = '';
+    this.roofs.build(this.city.buildings.map((_, i) => this.specOf(i)), []);
+    this.moving = true;
+  }
+
+  /** Write the tiers and roof of building i for displayed height h. */
+  private placeBuilding(i: number, h: number, hide: boolean) {
+    const b = this.city.buildings[i], sp = this.specOf(i);
+    const cx = b.x + b.w / 2, cz = b.z + b.d / 2, y = this.baseY[i];
+    const tiers = sp.tiers;
+    for (let k = 0; k < tiers.length; k++) {
+      const t = tiers[k];
+      const ty0 = h * t.y0, ty1 = h * t.y1;
+      this.tmp.position.set(cx, hide ? y - 1 - ty1 : y + (ty0 + ty1) / 2, cz);
+      this.tmp.scale.set(b.w * t.s, Math.max(ty1 - ty0, 0.004), b.d * t.s);
+      this.tmp.updateMatrix();
+      if (k === 0) this.buildingMesh!.setMatrixAt(i, this.tmp.matrix);
+      else this.tierMesh!.setMatrixAt(this.tierFirst[i] + k - 1, this.tmp.matrix);
+    }
+    if (this.exploded?.building === i && hide) return; // the exploded stack carries the roof
+    const last = tiers[tiers.length - 1];
+    this.roofs.place(i, { cx, cz, top: y + h, tw: b.w * last.s, td: b.d * last.s, th: h * (last.y1 - last.y0), hide });
+  }
+
+  /** Per-commit condition: complexity → irregular windows, age → weathering, recent churn → scaffolding. */
+  private updateCondition() {
+    const n = this.city.buildings.length, C = this.C, c = this.commit;
+    const now = this.timeOf();
+    const dens = new Float32Array(n);
+    const all: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const loc = this.vals.loc[i * C + c];
+      if (loc <= 0 || !this.isCode(i)) continue;
+      dens[i] = this.vals.complexity[i * C + c] / loc;
+      all.push(dens[i]);
+    }
+    all.sort((a, b) => a - b);
+    const p50 = all[Math.floor(all.length * 0.5)] ?? 0, p95 = all[Math.floor(all.length * 0.95)] ?? 1;
+    // construction works: the files changed most in the latest stretch, if they were touched in the last month
+    const works: Works[] = [];
+    if (this.city.churn && !this.classic) {
+      const scored: [number, number][] = [];
+      for (let i = 0; i < n; i++) {
+        if (!this.exists(i)) continue;
+        const last = this.lastTs[i * C + c];
+        if (!last || now - last > 30 * 86400) continue;
+        const recent = this.cumCommits[i * C + c] - (c > 0 ? this.cumCommits[i * C + c - 1] : 0);
+        if (recent >= 2) scored.push([i, recent]);
+      }
+      scored.sort((a, b) => b[1] - a[1] || a[0] - b[0]);
+      let live = 0;
+      for (let i = 0; i < n; i++) if (this.exists(i)) live++;
+      const max = Math.max(3, Math.min(40, Math.round(live * 0.03)));
+      scored.slice(0, max).forEach(([i, k], r) => works.push({ building: i, crane: r < 4 && k >= 3 }));
+    }
+    this.conds = this.city.buildings.map((_, i) => {
+      const last = this.lastTs[i * C + c];
+      const w = works.find(x => x.building === i);
+      return {
+        scaffold: !!w, crane: !!w?.crane,
+        irregular: dens[i] > 0 && p95 > p50 ? Math.min(1, Math.max(0, (dens[i] - p50) / (p95 - p50))) : 0,
+        age: last > 0 ? Math.min(1, Math.max(0, (now - last) / (2 * 365 * 86400))) : 0,
+      };
+    });
+    for (let i = 0; i < n; i++) {
+      const cd = this.classic ? null : this.conds[i];
+      const set = (arr: Float32Array, o: number) => { arr[o + 1] = cd?.irregular ?? 0; arr[o + 2] = cd?.age ?? 0; };
+      set(this.facade0, i * 4);
+      const f = this.tierFirst[i];
+      if (f >= 0) for (let k = 1; k < this.specOf(i).tiers.length; k++) set(this.facadeT, (f + k - 1) * 4);
+    }
+    this.buildingMesh!.geometry.getAttribute('aFacade').needsUpdate = true;
+    this.tierMesh!.geometry.getAttribute('aFacade').needsUpdate = true;
+    const key = works.map(w => `${w.building}${w.crane ? 'c' : ''}`).join(',');
+    if (key !== this.worksKey) {
+      this.worksKey = key;
+      this.roofs.build(this.city.buildings.map((_, i) => this.specOf(i)), works);
+      this.moving = true;
+    }
+  }
 
   // ------------------------------------------------------------------ theme
 
@@ -387,6 +563,7 @@ export class CityScene {
       const bm = this.buildingMesh.material as THREE.MeshStandardMaterial;
       bm.roughness = t.hacker ? 0.15 : 0.55; bm.metalness = t.hacker ? 0.9 : 0.15;
     }
+    this.roofs.setHacker(!!t.hacker);
     if (this.skin) this.skin.mesh.visible = !!t.hacker;
     if (this.grid) {
       this.grid.visible = !t.hacker;
@@ -428,6 +605,7 @@ export class CityScene {
     for (const m of [this.buildingMesh, this.districtMesh]) {
       if (m) { this.scene.remove(m); m.geometry.dispose(); (m.material as THREE.Material).dispose(); m.dispose(); }
     }
+    if (this.tierMesh) { this.scene.remove(this.tierMesh); this.tierMesh.geometry.dispose(); this.tierMesh.dispose(); this.tierMesh = undefined; }
     this.expand();
     this.indexImports();
 
@@ -486,6 +664,7 @@ export class CityScene {
     const widths = city.buildings.map(b => Math.min(b.w, b.d)).sort((a, b) => a - b);
     uniforms.uCell.value = Math.max(0.15, (widths[Math.floor(widths.length / 2)] ?? 1) / 3.2);
     uniforms.uGlyphScale.value = uniforms.uCell.value * 4.5;
+    this.roofs.cell = uniforms.uCell.value;
     this.buildingMesh = new THREE.InstancedMesh(geo, material, n);
     this.buildingMesh.castShadow = true;
     this.buildingMesh.receiveShadow = true;
@@ -502,6 +681,9 @@ export class CityScene {
       this.delay[i] = 0.25 + dd * 1.1 + Math.random() * 0.15;
     });
     this.scene.add(this.buildingMesh);
+    // architecture: shapes come from the newest commit (the one just loaded)
+    this.specs = buildSpecs(city, i => (this.exists(i) ? this.importersOf(i).length : 0));
+    this.buildTiers();
 
     this.setTheme(this.theme.name); // fog, labels, colors, uniforms
     this.refresh(false);
@@ -571,10 +753,11 @@ export class CityScene {
 
   dependents(i: number) { return this.importersOf(i).length; }
 
-  /** Roof centre of building i (where code-link traces plug in). */
+  /** Roof centre of building i, on top of its rooftop equipment (where code-link traces plug in). */
   buildingAnchor(i: number, lift = 0.03): THREE.Vector3 {
     const b = this.city.buildings[i];
-    return new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + Math.max(this.target[i], MIN_H) + lift, b.z + b.d / 2);
+    const gear = this.classic ? 0 : this.roofs.heightAbove(i);
+    return new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + Math.max(this.target[i], MIN_H) + gear + lift, b.z + b.d / 2);
   }
 
   /** Height of the data-bus layer: just above the current skyline. */
@@ -836,6 +1019,7 @@ export class CityScene {
         if (this.change[i]) this.changed.push(i);
       }
     }
+    this.updateCondition();
     this.recolor();
     if (this.selected >= 0 || this.arcs.children.length) this.showCoupling(this.selected);
     this.refreshCodeLinks();
@@ -854,18 +1038,19 @@ export class CityScene {
       c += (t - c) * k;
       if (Math.abs(t - c) < 0.003) c = t; else any = true;
       this.cur[i] = c;
-      const b = this.city.buildings[i];
       const h = Math.max(c, 0.01);
       // absent buildings sink below the district surface so they neither show nor get picked
       const hide = c <= 0.02 || this.exploded?.building === i;
-      this.tmp.position.set(b.x + b.w / 2, hide ? this.baseY[i] - 1 : this.baseY[i] + h / 2, b.z + b.d / 2);
-      this.tmp.scale.set(b.w, h, b.d);
-      this.tmp.updateMatrix();
-      mesh.setMatrixAt(i, this.tmp.matrix);
+      this.placeBuilding(i, h, hide);
     }
     mesh.instanceMatrix.needsUpdate = true;
+    if (this.tierMesh) this.tierMesh.instanceMatrix.needsUpdate = true;
+    this.roofs.flush();
     this.moving = any;
-    if (!any) { mesh.computeBoundingSphere(); mesh.computeBoundingBox(); }
+    if (!any) {
+      mesh.computeBoundingSphere(); mesh.computeBoundingBox();
+      if (this.tierMesh && this.tierMesh.count) { this.tierMesh.computeBoundingSphere(); this.tierMesh.computeBoundingBox(); }
+    }
   }
 
   private colorFor(i: number): THREE.Color {
@@ -894,22 +1079,37 @@ export class CityScene {
 
   private recolor() {
     if (!this.buildingMesh) return;
-    for (let i = 0; i < this.baseColors.length; i++) {
-      this.buildingMesh.setColorAt(i, this.colorFor(i));
-      this.glow[i] = this.glowFor(i);
+    for (let i = 0; i < this.baseColors.length; i++) this.paintOne(i);
+    this.flushPaint();
+  }
+
+  /** Color and glow of building i, on every tier. */
+  private paintOne(i: number) {
+    const c = this.colorFor(i), g = this.glowFor(i);
+    this.buildingMesh!.setColorAt(i, c);
+    this.glow[i] = g;
+    const f = this.tierFirst[i];
+    if (f >= 0 && this.tierMesh) {
+      const n = this.specOf(i).tiers.length - 1;
+      for (let k = 0; k < n; k++) { this.tierMesh.setColorAt(f + k, c); this.tierGlow[f + k] = g; }
     }
-    if (this.buildingMesh.instanceColor) this.buildingMesh.instanceColor.needsUpdate = true;
+  }
+
+  private flushPaint() {
+    if (this.buildingMesh!.instanceColor) this.buildingMesh!.instanceColor.needsUpdate = true;
     this.glowAttr!.needsUpdate = true;
+    if (this.tierMesh) {
+      if (this.tierMesh.instanceColor) this.tierMesh.instanceColor.needsUpdate = true;
+      this.tierMesh.geometry.getAttribute('aGlow').needsUpdate = true;
+    }
   }
 
   setShowChanges(v: boolean) { this.showChanges = v; this.recolor(); }
 
   private paint(i: number) {
     if (i < 0 || !this.buildingMesh) return;
-    this.buildingMesh.setColorAt(i, this.colorFor(i));
-    this.glow[i] = this.glowFor(i);
-    this.buildingMesh.instanceColor!.needsUpdate = true;
-    this.glowAttr!.needsUpdate = true;
+    this.paintOne(i);
+    this.flushPaint();
   }
 
   private paintDistricts() {
@@ -950,7 +1150,7 @@ export class CityScene {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
-    const objects: THREE.Object3D[] = [this.buildingMesh, this.districtMesh, ...this.linkMeshes.map(l => l.pick)];
+    const objects: THREE.Object3D[] = [...this.solidMeshes(false), this.districtMesh, ...this.linkMeshes.map(l => l.pick)];
     if (this.exploded) objects.unshift(this.exploded.mesh);
     for (const hit of this.raycaster.intersectObjects(objects, false)) { // nearest first
       if (this.exploded && hit.object === this.exploded.mesh && hit.instanceId !== undefined) return { kind: 'floor', index: hit.instanceId };
@@ -958,8 +1158,9 @@ export class CityScene {
       if (lm) return { kind: 'link', index: lm.view.index };
       const id = hit.instanceId ?? -1;
       if (id < 0) continue;
-      if (hit.object === this.buildingMesh) {
-        if (this.exists(id) && !this.dimmed[id]) return { kind: 'building', index: id };
+      if (hit.object === this.buildingMesh || hit.object === this.tierMesh) {
+        const b = this.ownerOf(hit);
+        if (b >= 0 && this.exists(b) && !this.dimmed[b]) return { kind: 'building', index: b };
         continue;
       }
       if (hit.object === this.districtMesh) return id === 0 ? null : { kind: 'district', index: id }; // district 0 is the root / world plot
@@ -1225,8 +1426,13 @@ export class CityScene {
   setSkin(i: number, content: string) {
     if (this.skin) {
       this.scene.remove(this.skin.mesh);
-      this.skin.mesh.geometry.dispose();
-      for (const m of this.skin.mesh.material as THREE.MeshBasicMaterial[]) { m.map?.dispose(); m.dispose(); }
+      const maps = new Set<THREE.Texture>();
+      for (const o of this.skin.mesh.children) {
+        const m = o as THREE.Mesh;
+        m.geometry.dispose();
+        for (const mat of m.material as THREE.MeshBasicMaterial[]) { if (mat.map) maps.add(mat.map); mat.dispose(); }
+      }
+      maps.forEach(t => t.dispose());
       this.skin = null;
     }
     if (i < 0 || !content) return;
@@ -1234,13 +1440,23 @@ export class CityScene {
     const lines = content.split('\n').filter(l => l.trim());
     const h = Math.max(this.target[i], MIN_H);
     const tex = codeTexture(lines, h / Math.max(b.w, b.d));
-    const side = new THREE.MeshBasicMaterial({ map: tex, color: new THREE.Color(0.14, 0.55, 0.75), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
-    const none = new THREE.MeshBasicMaterial({ visible: false });
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), [side, side, none, none, side, side]);
-    mesh.renderOrder = 4;
-    mesh.visible = !!this.theme.hacker;
-    this.scene.add(mesh);
-    this.skin = { building: i, mesh, content };
+    const group = new THREE.Group();
+    // one sleeve per tier; the code runs on from tier to tier (texture v = height fraction)
+    for (const t of this.specOf(i).tiers) {
+      const map = tex.clone();
+      map.repeat.set(1, t.y1 - t.y0);
+      map.offset.set(0, t.y0);
+      map.needsUpdate = true;
+      const side = new THREE.MeshBasicMaterial({ map, color: new THREE.Color(0.14, 0.55, 0.75), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+      const none = new THREE.MeshBasicMaterial({ visible: false });
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), [side, side, none, none, side, side]);
+      mesh.renderOrder = 4;
+      group.add(mesh);
+    }
+    tex.dispose();
+    group.visible = !!this.theme.hacker;
+    this.scene.add(group);
+    this.skin = { building: i, mesh: group, content };
     this.updateSkin();
   }
 
@@ -1251,8 +1467,13 @@ export class CityScene {
     const b = this.city.buildings[i];
     const h = this.cur[i];
     k.mesh.visible = !!this.theme.hacker && h > 0.05 && this.exploded?.building !== i;
-    k.mesh.position.set(b.x + b.w / 2, this.baseY[i] + h / 2, b.z + b.d / 2);
-    k.mesh.scale.set(b.w * 1.004, h * 1.002, b.d * 1.004);
+    const tiers = this.specOf(i).tiers;
+    k.mesh.children.forEach((o, n) => {
+      const t = tiers[n];
+      if (!t) { o.visible = false; return; }
+      o.position.set(b.x + b.w / 2, this.baseY[i] + h * (t.y0 + t.y1) / 2, b.z + b.d / 2);
+      o.scale.set(b.w * t.s * 1.004 + 0.002, h * (t.y1 - t.y0) * 1.002, b.d * t.s * 1.004 + 0.002);
+    });
   }
 
   // ------------------------------------------------------------------ exploded view (pieces as floors)
@@ -1283,6 +1504,10 @@ export class CityScene {
     uniforms.uGlyphs.value = this.glyphTex ?? null;
     const geo = new THREE.BoxGeometry(1, 1, 1);
     geo.setAttribute('aGlow', new THREE.InstancedBufferAttribute(new Float32Array(floors.length), 1));
+    // the floors keep the building's facade (language) and condition
+    const fac = new Float32Array(floors.length * 4), sp = this.specOf(i), cd = this.conditionOf(i), seed = pathSeed(b.path);
+    for (let k = 0; k < floors.length; k++) fac.set([facadeCode(sp, { ...sp.tiers[sp.tiers.length - 1], facade: sp.facade }), cd?.irregular ?? 0, cd?.age ?? 0, seed], k * 4);
+    geo.setAttribute('aFacade', new THREE.InstancedBufferAttribute(fac, 4));
     const mesh = new THREE.InstancedMesh(geo, material, floors.length);
     mesh.castShadow = true;
     colors.forEach((c, k) => mesh.setColorAt(k, c));
@@ -1368,6 +1593,10 @@ export class CityScene {
       }
       y += h + gap;
     });
+    // the roof rides on top of the stack
+    const sp = this.specOf(i), last = sp.tiers[sp.tiers.length - 1];
+    this.roofs.place(i, { cx: b.x + b.w / 2, cz: b.z + b.d / 2, top: y - gap, tw: b.w * last.s, td: b.d * last.s, th: e.heights[e.heights.length - 1] ?? 1, hide: false });
+    this.roofs.flush();
     e.mesh.instanceMatrix.needsUpdate = true;
     e.mesh.computeBoundingSphere();
     e.mesh.computeBoundingBox();
