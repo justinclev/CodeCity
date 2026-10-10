@@ -119,6 +119,7 @@ export function showLegend(o: LegendOpts) {
     case 'churn': title('Churn'); gradient('rarely changed', 'changed often'); break;
     case 'complexity': title('Indentation complexity'); gradient('flat', 'deeply nested'); break;
     case 'age': title('Last change'); gradient('a year or more', 'just now'); break;
+    case 'dependents': title('Dependents'); gradient('imported by none', 'imported by many'); break;
     case 'depth': title('Directory depth'); break;
     case 'knowledge': {
       title('Knowledge risk');
@@ -169,6 +170,7 @@ export interface BuildingInfo {
   coupled: { index: number; path: string; shared: number; degree: number }[];
   links: { label: string; href: string }[];
   pieces: PiecesState;
+  deps: { imports: { index: number; path: string }[]; importDirs: { district: number; path: string }[]; importedBy: { index: number; path: string }[] };
 }
 
 export type PiecesState =
@@ -182,7 +184,7 @@ export interface DistrictInfo {
 }
 
 export interface InfoHandlers {
-  onClose(): void; onPick(i: number): void; onZoomDistrict(): void;
+  onClose(): void; onPick(i: number): void; onZoomDistrict(): void; onDistrict(d: number): void;
   onPiece(k: number): void; onExplode(): void; onCode(): void;
 }
 
@@ -250,6 +252,7 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     }
     box.append(list);
   }
+  box.append(depsSection(d.deps, h));
   box.append(piecesSection(d.pieces, h));
   if (d.links.length) {
     const links = el('div', 'links');
@@ -265,6 +268,30 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     box.append(links);
   }
   box.hidden = false;
+}
+
+function depsSection(d: BuildingInfo['deps'], h: InfoHandlers): HTMLElement {
+  const wrap = el('div', 'deps');
+  const list = (title: string, rows: { label: string; on: () => void; cls: string }[]) => {
+    if (!rows.length) return;
+    wrap.append(el('h4', '', `${title} (${rows.length})`));
+    const l = el('div', 'list');
+    for (const r of rows.slice(0, 40)) {
+      const b = el('button');
+      b.append(el('span', 'dot ' + r.cls), el('span', 'path', '\u200E' + r.label));
+      b.title = r.label;
+      b.onclick = r.on;
+      l.append(b);
+    }
+    if (rows.length > 40) l.append(el('div', 'help', `+${rows.length - 40} more`));
+    wrap.append(l);
+  };
+  list('Imports', [
+    ...d.imports.map(x => ({ label: x.path, on: () => h.onPick(x.index), cls: 'out' })),
+    ...d.importDirs.map(x => ({ label: x.path + '/', on: () => h.onDistrict(x.district), cls: 'out' })),
+  ]);
+  list('Imported by', d.importedBy.map(x => ({ label: x.path, on: () => h.onPick(x.index), cls: 'in' })));
+  return wrap;
 }
 
 function piecesSection(st: PiecesState, h: InfoHandlers): HTMLElement {
@@ -413,7 +440,7 @@ export function showResults(rows: { index: number; path: string }[], total: numb
 
 // ------------------------------------------------------------------ insights
 
-export type Tab = 'hotspots' | 'coupling' | 'risk' | 'complex' | 'areas' | 'authors' | 'links';
+export type Tab = 'hotspots' | 'coupling' | 'risk' | 'complex' | 'areas' | 'authors' | 'links' | 'deps';
 const HELP: Record<Tab, string> = {
   hotspots: 'Change frequency × complexity: where refactoring pays off most.',
   coupling: 'Files that keep changing in the same commits. Fine for code + test; elsewhere often a hidden dependency.',
@@ -421,6 +448,7 @@ const HELP: Record<Tab, string> = {
   complex: 'Indentation complexity: total nesting depth, a language-neutral proxy for cyclomatic complexity.',
   areas: 'Top-level directories ranked by hotspot load.',
   authors: 'Owners = most commits to a file. Click someone to show only their files.',
+  deps: 'Imports between files of the same repo: the most depended-on files (changing them ripples furthest), the biggest importers, and directories that import each other (cycles).',
   links: 'Connections between repositories, each with the evidence behind it. Click one to inspect it.',
 };
 
@@ -501,6 +529,27 @@ export function showInsights(ins: Insights | null, tab: Tab, hasChurn: boolean, 
       });
       break;
   }
+  if (tab === 'deps') {
+    const sec = (title: string, rows: { index: number; path: string; n: number }[], unit: string) => {
+      if (!rows.length) return;
+      list.append(el('h4', '', title));
+      rows.forEach((r, i) => fileRow(i + 1, r.index, r.path, `${fmt(r.n)} ${unit}`));
+    };
+    sec('Most depended on', ins.fanIn, 'dependents');
+    sec('Biggest importers', ins.fanOut, 'imports');
+    if (ins.cycles.length) {
+      list.append(el('h4', '', 'Directory cycles'));
+      for (const c of ins.cycles) {
+        const b = el('button', 'pair');
+        b.title = `${c.a}/ imports ${c.b}/ in ${c.ab} places, and ${c.b}/ imports ${c.a}/ in ${c.ba}`;
+        b.append(el('span', 'path', c.a + '/ ⇄ ' + c.b + '/'), el('span', 'num', `${c.ab}↔${c.ba}`));
+        b.querySelector('.path')!.setAttribute('style', 'direction:ltr');
+        b.onclick = () => h.onArea(c.da);
+        list.append(b);
+      }
+    }
+    if (!list.children.length) body.append(el('div', 'empty', 'No imports between files were found (supported: Go, JS/TS, Python, Rust).'));
+  }
   if (tab === 'links') {
     for (const l of linkRows) {
       const b = el('button', 'pair');
@@ -513,7 +562,7 @@ export function showInsights(ins: Insights | null, tab: Tab, hasChurn: boolean, 
     }
     if (!linkRows.length) body.append(el('div', 'empty', 'These repositories have no connections: no shared dependencies, imports or people.'));
   }
-  if (!list.children.length && tab !== 'links') body.append(el('div', 'empty', 'Nothing to show at this commit.'));
+  if (!list.children.length && tab !== 'links' && tab !== 'deps') body.append(el('div', 'empty', 'Nothing to show at this commit.'));
   else body.append(list);
 }
 
@@ -611,6 +660,7 @@ export interface Controls {
   onTab(t: Tab): void;
   onCopyReport(): void;
   onLinksToggle(): void;
+  onCodeLinks(mode: 'off' | 'selection' | 'all'): void;
 }
 
 export function linkToggles() {
@@ -636,6 +686,7 @@ export function bindControls(h: Controls) {
   src.oninput = autosize;
   src.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $<HTMLFormElement>('repoform').requestSubmit(); };
   $('showdeps').onchange = () => h.onLinksToggle();
+  $<HTMLSelectElement>('codelinks').onchange = e => h.onCodeLinks((e.target as HTMLSelectElement).value as 'off' | 'selection' | 'all');
   $('showpeople').onchange = () => h.onLinksToggle();
   $('repoform').onsubmit = e => {
     e.preventDefault();
@@ -682,3 +733,5 @@ export function flashCopied(text: string) {
   c.textContent = text;
   setTimeout(() => { if (c.textContent === text) c.textContent = ''; }, 2500);
 }
+
+export function setCodeLinksMode(m: 'off' | 'selection' | 'all') { $<HTMLSelectElement>('codelinks').value = m; }

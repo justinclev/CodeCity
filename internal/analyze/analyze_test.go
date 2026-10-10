@@ -273,3 +273,40 @@ func TestAuthorCaseMerge(t *testing.T) {
 		t.Errorf("authors = %+v own = %v", c.Authors, c.Buildings[0].Own)
 	}
 }
+
+func TestLocalImports(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "go.mod", "module example.com/app\n")
+	write(t, dir, "cmd/app/main.go", "package main\n\nimport (\n\t\"fmt\"\n\t\"example.com/app/internal/store\"\n)\n\nfunc main() { fmt.Println(store.X) }\n")
+	write(t, dir, "internal/store/store.go", "package store\n\nvar X = 1\n")
+	write(t, dir, "web/src/main.ts", "import { a } from './util';\nimport b from './ui/button';\n")
+	write(t, dir, "web/src/util.ts", "export const a = 1;\n")
+	write(t, dir, "web/src/ui/button.ts", "import { a } from '../util';\nexport default a;\n")
+	commit(t, dir, "init")
+	c, err := Run(context.Background(), Options{Source: dir}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx := map[string]int{}
+	for i, b := range c.Buildings {
+		idx[b.Path] = i
+	}
+	m := c.Buildings[idx["web/src/main.ts"]]
+	if len(m.Imp) != 2 || !contains(m.Imp, idx["web/src/util.ts"]) || !contains(m.Imp, idx["web/src/ui/button.ts"]) {
+		t.Errorf("main.ts imp = %v", m.Imp)
+	}
+	g := c.Buildings[idx["cmd/app/main.go"]]
+	if len(g.ImpD) != 1 || c.Districts[g.ImpD[0]].Path != "internal/store" {
+		t.Errorf("main.go impd = %v", g.ImpD)
+	}
+}
+
+func contains(xs []int, x int) bool {
+	for _, y := range xs {
+		if y == x {
+			return true
+		}
+	}
+	return false
+}

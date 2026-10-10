@@ -241,3 +241,7 @@ body.hacker::after { content: ''; position: fixed; inset: 0; pointer-events: non
 .linkhead .arrow { color: var(--accent); }
 .kindtag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 6px; background: rgba(122, 162, 255, 0.16); color: var(--accent); }
 .kindtag.people { background: rgba(255, 181, 71, 0.16); color: var(--warn); }
+
+.deps .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+.deps .dot.out { background: #36c5ff; box-shadow: 0 0 6px #36c5ff; }
+.deps .dot.in { background: #ff4fd0; box-shadow: 0 0 6px #ff4fd0; }

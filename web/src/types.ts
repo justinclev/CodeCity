@@ -40,10 +40,13 @@ export interface Building {
   /** Change coupling: [building index, shared commits, degree %]. */
   cpl?: [number, number, number][];
   repo?: number;
+  /** Same-repo files (building indices) and package directories (district indices) this file imports. */
+  imp?: number[];
+  impd?: number[];
 }
 
 export type Metric = 'loc' | 'lines' | 'bytes' | 'complexity';
 export type ScaleMode = 'sqrt' | 'linear' | 'log';
-export type ColorMode = 'language' | 'hotspot' | 'churn' | 'complexity' | 'age' | 'owner' | 'knowledge' | 'compare' | 'depth';
+export type ColorMode = 'language' | 'hotspot' | 'churn' | 'complexity' | 'age' | 'owner' | 'knowledge' | 'compare' | 'depth' | 'dependents';
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;

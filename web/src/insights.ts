@@ -15,6 +15,9 @@ export interface Insights {
   complex: FileRow[]; // a = complexity, b = loc
   areas: AreaRow[];
   authors: AuthorRow[];
+  fanIn: { index: number; path: string; n: number }[];
+  fanOut: { index: number; path: string; n: number }[];
+  cycles: { a: string; b: string; da: number; ab: number; ba: number }[];
 }
 
 const fmt = (n: number) => n.toLocaleString('en-US');
@@ -81,7 +84,35 @@ export function compute(city: City, scene: CityScene, limit = 15): Insights {
     active: newest - a.last <= INACTIVE_DAYS * 86400,
   })).filter(a => a.files > 0).sort((x, y) => y.files - x.files || y.commits - x.commits);
 
+  // imports between files
+  const fanIn = present.map(i => ({ index: i, path: city.buildings[i].path, n: scene.dependents(i) }))
+    .filter(r => r.n > 0).sort((a, b) => b.n - a.n).slice(0, limit);
+  const fanOut = present.map(i => ({ index: i, path: city.buildings[i].path,
+    n: (city.buildings[i].imp?.filter(j => scene.exists(j)).length ?? 0) + (city.buildings[i].impd?.length ?? 0) }))
+    .filter(r => r.n > 0).sort((a, b) => b.n - a.n).slice(0, limit);
+  // directory cycles between sibling-level directories (depth ≤ 2)
+  const ds = city.districts;
+  const groupOf = (d: number) => { let x = d; while (x > 0 && ds[x].depth > 2) x = ds[x].parent; return x; };
+  const pair = new Map<string, number>();
+  for (const i of present) {
+    const b = city.buildings[i];
+    const ga = groupOf(b.district);
+    const add = (gb: number) => { if (ga !== gb && ga > 0 && gb > 0) pair.set(`${ga}:${gb}`, (pair.get(`${ga}:${gb}`) ?? 0) + 1); };
+    for (const j of b.imp ?? []) if (scene.exists(j)) add(groupOf(city.buildings[j].district));
+    for (const d of b.impd ?? []) add(groupOf(d));
+  }
+  const cycles: Insights['cycles'] = [];
+  for (const [k, ab] of pair) {
+    const [ga, gb] = k.split(':').map(Number);
+    const ba = pair.get(`${gb}:${ga}`);
+    if (ba && ga < gb && !ds[ga].path.startsWith(ds[gb].path + '/') && !ds[gb].path.startsWith(ds[ga].path + '/')) {
+      cycles.push({ a: ds[ga].path, b: ds[gb].path, da: ga, ab, ba });
+    }
+  }
+  cycles.sort((x, y) => y.ab + y.ba - x.ab - x.ba);
+
   return {
+    fanIn, fanOut, cycles: cycles.slice(0, limit),
     hotspots, coupling: coupling.slice(0, limit), orphaned: risky(4), single: risky(3), complex, areas, authors,
   };
 }

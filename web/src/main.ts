@@ -191,7 +191,10 @@ let lastPlainTheme: ThemeName = 'night'; // where H returns to
 function applyTheme(name: ThemeName) {
   if (name !== 'hacker') lastPlainTheme = name;
   ui.setTheme(name);
+  scene.codeLinkMode = store.get<'off' | 'selection' | 'all'>('codelinks.' + name) ?? (name === 'hacker' ? 'all' : 'selection');
+  ui.setCodeLinksMode(scene.codeLinkMode);
   scene.setTheme(name);
+  scene.refreshCodeLinks();
   store.set('theme', name);
   store.set('plainTheme', lastPlainTheme);
   if (city) { redrawChart(); refreshSkin(); }
@@ -406,6 +409,7 @@ function links(path: string): { label: string; href: string }[] {
 }
 
 const infoHandlers: ui.InfoHandlers = {
+  onDistrict: d => selectDistrict(d, true),
   onPiece: k => openPiece(k),
   onExplode: () => toggleExplode(),
   onCode: () => openPiece(activePiece >= 0 ? activePiece : (floors[0]?.piece ?? 0)),
@@ -431,6 +435,11 @@ function buildingInfo(i: number): ui.BuildingInfo {
     coupled: (b.cpl ?? []).filter(([j]) => scene.exists(j)).map(([j, shared, degree]) => ({ index: j, path: c.buildings[j].path, shared, degree })),
     links: links(b.path),
     pieces: piecesState(),
+    deps: {
+      imports: (b.imp ?? []).filter(j => scene.exists(j)).map(j => ({ index: j, path: c.buildings[j].path })),
+      importDirs: (b.impd ?? []).map(d => ({ district: d, path: c.districts[d].path })),
+      importedBy: scene.importersOf(i).map(k => ({ index: k, path: c.buildings[k].path })),
+    },
   };
 }
 
@@ -577,6 +586,7 @@ ui.bindControls({
   onHacker: () => toggleHacker(),
   onTab: t => { tab = t; store.set('tab', t); refreshInsights(); },
   onLinksToggle: () => { scene.setLinks(linkViews()); },
+  onCodeLinks: m => { scene.codeLinkMode = m; store.set('codelinks.' + scene.theme.name, m); scene.refreshCodeLinks(); },
   onCopyReport: () => {
     if (!city || !insights) return;
     const md = markdown(city, scene, insights, windowLabel() || 'all history');
@@ -611,6 +621,13 @@ addEventListener('keydown', e => {
     else { closeInfo(); if (scene.authorFilter >= 0) setAuthorFilter(-1); }
   }
   else if (e.key === 'e' || e.key === 'E') toggleExplode();
+  else if (e.key === 'l' || e.key === 'L') {
+    const order = ['selection', 'all', 'off'] as const;
+    scene.codeLinkMode = order[(order.indexOf(scene.codeLinkMode) + 1) % 3];
+    ui.setCodeLinksMode(scene.codeLinkMode);
+    store.set('codelinks.' + scene.theme.name, scene.codeLinkMode);
+    scene.refreshCodeLinks();
+  }
   else if (e.key === '[') stepPiece(-1);
   else if (e.key === ']') stepPiece(1);
   else if (e.key === 'f' || e.key === 'F') { if (city) scene.frame(); }

@@ -251,6 +251,8 @@ func merge(cities []*city.City, names []string, links []city.Link, offsets [][2]
 				cp[i] = [3]int{e[0] + bBase[k], e[1], e[2]}
 			}
 			b.Coupling = cp
+			b.Imp = offset(b.Imp, bBase[k])
+			b.ImpD = offset(b.ImpD, dBase[k])
 			out.Buildings = append(out.Buildings, b)
 		}
 		out.Repos = append(out.Repos, city.RepoInfo{Name: name, Source: c.Repo.Source, Remote: c.Repo.Remote, Path: c.Repo.Path,
@@ -296,3 +298,14 @@ func joinPath(name, p string) string {
 }
 
 func r3(v float64) float64 { return math.Round(v*1000) / 1000 }
+
+func offset(xs []int, by int) []int {
+	if len(xs) == 0 {
+		return nil
+	}
+	out := make([]int, len(xs))
+	for i, x := range xs {
+		out[i] = x + by
+	}
+	return out
+}

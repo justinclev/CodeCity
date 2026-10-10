@@ -139,3 +139,56 @@ func TestImports(t *testing.T) {
 	check("Rust", "use serde::Serialize;\nuse std::fmt;\nuse crate::a;\npub use my_lib::thing;\nextern crate log;\n",
 		"cargo:log cargo:my_lib cargo:serde")
 }
+
+func TestResolve(t *testing.T) {
+	paths := []string{
+		"src/app.ts", "src/lib/util.ts", "src/lib/index.ts", "src/components/Button.tsx", "packages/core/src/index.ts", "packages/core/package.json",
+		"go.mod", "internal/server/server.go", "cmd/x/main.go",
+		"acme/__init__.py", "acme/sub/mod.py", "acme/sub/__init__.py", "acme/helpers.py",
+		"rs/src/lib.rs", "rs/src/net/mod.rs", "rs/src/net/tcp.rs", "rs/src/util.rs",
+	}
+	own := []Identity{{Kind: Go, Name: "example.com/app", Dir: ""}, {Kind: NPM, Name: "@acme/core", Dir: "packages/core"}}
+	r := NewResolver(paths, own)
+	cases := []struct{ file, lang, spec, want string }{
+		{"src/app.ts", "TypeScript", "./lib/util", "src/lib/util.ts"},
+		{"src/app.ts", "TypeScript", "./lib", "src/lib/index.ts"},
+		{"src/lib/util.ts", "TypeScript", "../components/Button", "src/components/Button.tsx"},
+		{"src/app.ts", "TypeScript", "@/lib/util", "src/lib/util.ts"},
+		{"src/app.ts", "TypeScript", "@acme/core", "packages/core/"},
+		{"src/app.ts", "TypeScript", "react", ""},
+		{"cmd/x/main.go", "Go", "example.com/app/internal/server", "internal/server/"},
+		{"cmd/x/main.go", "Go", "fmt", ""},
+		{"acme/sub/mod.py", "Python", "..helpers", "acme/helpers.py"},
+		{"acme/sub/mod.py", "Python", ".", "acme/sub/__init__.py"}, // the package itself
+		{"acme/helpers.py", "Python", "acme.sub.mod", "acme/sub/mod.py"},
+		{"acme/helpers.py", "Python", "acme.sub", "acme/sub/__init__.py"},
+		{"acme/helpers.py", "Python", "os.path", ""},
+		{"rs/src/lib.rs", "Rust", "mod:net", "rs/src/net/mod.rs"},
+		{"rs/src/net/mod.rs", "Rust", "mod:tcp", "rs/src/net/tcp.rs"},
+		{"rs/src/net/tcp.rs", "Rust", "crate::util::helper", "rs/src/util.rs"},
+		{"rs/src/net/tcp.rs", "Rust", "super::super::util", "rs/src/util.rs"},
+	}
+	for _, c := range cases {
+		got, ok := r.Resolve(c.file, c.lang, c.spec)
+		s := ""
+		if ok {
+			s = got.Path
+			if got.Dir {
+				s += "/"
+			}
+		}
+		if s != c.want {
+			t.Errorf("Resolve(%s, %q) = %q, want %q", c.file, c.spec, s, c.want)
+		}
+	}
+	li := LocalImports("Python", []byte("from . import a, b\nfrom .x import (y,\n z)\nimport acme.sub.mod as m\n"))
+	sort.Strings(li)
+	if strings.Join(li, " ") != ". .a .b .x .x.y .x.z acme.sub.mod" {
+		t.Errorf("python local imports = %v", li)
+	}
+	li = LocalImports("Rust", []byte("mod net;\npub mod util;\nuse crate::net::tcp::Conn;\nuse std::io;\n"))
+	sort.Strings(li)
+	if strings.Join(li, " ") != "crate::net::tcp::Conn mod:net mod:util" {
+		t.Errorf("rust local imports = %v", li)
+	}
+}

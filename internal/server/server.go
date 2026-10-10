@@ -99,14 +99,17 @@ type Server struct {
 	allowLocal bool // local paths / file:// may be analyzed from the page
 	allowHosts map[string]bool
 
-	mu     sync.Mutex
-	body   []byte
-	city   *city.City
-	repos  []*gitx.Repo       // kept open for /api/file, indexed like city.Repos
-	paths  map[string]fileRef // building path → repo + path inside it
-	job    *Job
-	cancel context.CancelFunc
-	nextID int
+	mu    sync.Mutex
+	body  []byte
+	city  *city.City
+	repos []*gitx.Repo // kept open for /api/file, indexed like city.Repos
+	// symbols is the lazily built definition index for /api/symbols (nil until requested)
+	symbols   []byte
+	symbolsMu sync.Mutex
+	paths     map[string]fileRef // building path → repo + path inside it
+	job       *Job
+	cancel    context.CancelFunc
+	nextID    int
 }
 
 // New creates a server. addr is the listen address; local paths are only
@@ -224,7 +227,7 @@ func (s *Server) finish(j *Job, c *city.City, repos []*gitx.Repo, err error, ctx
 		j.State, j.Error = "error", err.Error()
 	default:
 		j.State = "done"
-		s.body, s.city = body, c
+		s.body, s.city, s.symbols = body, c, nil
 		s.paths = make(map[string]fileRef, len(c.Buildings))
 		for _, b := range c.Buildings {
 			orig := b.Path
@@ -263,6 +266,79 @@ func (s *Server) Close() {
 		r.Close()
 	}
 	s.repos = nil
+}
+
+// maxSymbols caps the definition index.
+const maxSymbols = 150000
+
+// Symbols returns the definition index of the loaded world at each repository's
+// newest analyzed commit: JSON {"symbols": [[name, kind, path, start, end], ...]}.
+// It is built on first use (it reads every code file) and cached.
+func (s *Server) Symbols(ctx context.Context) ([]byte, error) {
+	s.symbolsMu.Lock()
+	defer s.symbolsMu.Unlock()
+	s.mu.Lock()
+	c, repos, cached := s.city, s.repos, s.symbols
+	s.mu.Unlock()
+	if cached != nil {
+		return cached, nil
+	}
+	if c == nil || len(repos) == 0 {
+		return nil, &httpErr{http.StatusNotFound, "no repository loaded"}
+	}
+	type sym = [5]any
+	var out []sym
+	for k, repo := range repos {
+		commit := c.Repo.Commit
+		prefix := ""
+		if len(c.Repos) > 0 {
+			commit = c.Repos[k].Commit
+			prefix = c.Repos[k].Name + "/"
+		}
+		entries, err := repo.ListFiles(ctx, commit)
+		if err != nil {
+			return nil, err
+		}
+		oid := make(map[string]string, len(entries))
+		for _, e := range entries {
+			oid[e.Path] = e.Oid
+		}
+		br, err := repo.NewBlobReader(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range c.Buildings {
+			if b.Repo != k || !outline.Supported(b.Lang) || len(out) >= maxSymbols {
+				continue
+			}
+			o, ok := oid[strings.TrimPrefix(b.Path, prefix)]
+			if !ok {
+				continue
+			}
+			content, err := br.Read(o, maxFileBytes)
+			if err != nil {
+				br.Close()
+				return nil, err
+			}
+			for _, p := range outline.Outline(b.Lang, content) {
+				if p.Kind == "imports" || p.Kind == "scope" || p.Name == "" {
+					continue
+				}
+				out = append(out, sym{p.Name, p.Kind, b.Path, p.Start, p.End})
+			}
+		}
+		br.Close()
+	}
+	body, err := json.Marshal(map[string]any{"symbols": out})
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if s.city == c {
+		s.symbols = body
+	}
+	s.mu.Unlock()
+	return body, nil
 }
 
 // FileResponse is the body of GET /api/file.
@@ -414,6 +490,16 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, f)
+	})
+	mux.HandleFunc("GET /api/symbols", func(w http.ResponseWriter, r *http.Request) {
+		b, err := s.Symbols(r.Context())
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Write(b)
 	})
 	mux.HandleFunc("POST /api/cancel", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()

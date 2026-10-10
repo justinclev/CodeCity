@@ -121,6 +121,10 @@ func TestFileAPI(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &f) != nil || f.Content != "package a\n" || f.Lang != "Go" || len(f.Pieces) == 0 {
 		t.Fatalf("file: %d %s", w.Code, w.Body)
 	}
+	w = do(h, "GET", "/api/symbols", "", "127.0.0.1:8080", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"symbols"`) {
+		t.Errorf("symbols: %d %s", w.Code, w.Body)
+	}
 	for _, q := range []string{"path=../../etc/passwd&commit=0", "path=a.go&commit=zzz", "path=a.go&commit=99"} {
 		if w := do(h, "GET", "/api/file?"+q, "", "127.0.0.1:8080", ""); w.Code != 400 {
 			t.Errorf("%s: %d", q, w.Code)

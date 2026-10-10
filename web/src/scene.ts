@@ -6,6 +6,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { authorColor, depthColor, heat, languageColor } from './colors';
 import { buildingMaterial, circuitMaterial, type BuildingUniforms, type CircuitUniforms } from './material';
+import { route, TraceLayer, type Trace } from './links';
 import { circuitTexture, codeTexture, glyphAtlas, skyTexture, THEMES, type Theme, type ThemeName } from './theme';
 import type { City, ColorMode, Metric, ScaleMode } from './types';
 
@@ -98,6 +99,10 @@ export class CityScene {
   private linkGroup = new THREE.Group();
   private linkMeshes: LinkMesh[] = [];
   private linkHi = -1;
+  readonly codeLinks = new TraceLayer(true);
+  codeLinkMode: 'off' | 'selection' | 'all' = 'selection';
+  private importers: number[][] = []; // building → buildings that import it
+  private dirImporters = new Map<number, number[]>(); // district → buildings that import it (Go packages)
   private cumCommits!: Int32Array; // cumulative churn up to and including each commit
   private cumLines!: Int32Array;
   private buildingMesh?: THREE.InstancedMesh;
@@ -156,7 +161,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -194,7 +199,8 @@ export class CityScene {
     }
     if (this.moving) this.step(dt);
     if (this.exploded) this.animateExplode(dt);
-    if (this.linkMeshes.length || this.arcs.children.length) {
+    this.codeLinks.update(this.flowTime);
+    if (this.linkMeshes.length || this.arcs.children.length || this.codeLinks.group.children.length) {
       this.flowTime += dt;
       for (const l of this.linkMeshes) l.mat.uniforms.uTime.value = this.flowTime;
       for (const o of this.arcs.children) {
@@ -298,6 +304,7 @@ export class CityScene {
       if (m) { this.scene.remove(m); m.geometry.dispose(); (m.material as THREE.Material).dispose(); m.dispose(); }
     }
     this.expand();
+    this.indexImports();
 
     const { w, d } = city.bounds;
     const s = this.size();
@@ -409,7 +416,110 @@ export class CityScene {
     });
   }
 
-  private districtTop(depth: number) { return DISTRICT_STEP * (depth + 1); }
+  districtTop(depth: number) { return DISTRICT_STEP * (Math.max(-1, depth) + 1); }
+
+  // ------------------------------------------------------------------ code links (imports inside a repo)
+
+  private indexImports() {
+    const n = this.city.buildings.length;
+    this.importers = Array.from({ length: n }, () => []);
+    this.dirImporters = new Map();
+    this.city.buildings.forEach((b, i) => {
+      for (const j of b.imp ?? []) this.importers[j]?.push(i);
+      for (const d of b.impd ?? []) {
+        const l = this.dirImporters.get(d) ?? [];
+        l.push(i);
+        this.dirImporters.set(d, l);
+      }
+    });
+  }
+
+  /** Files that import building i: directly, or through its package directory. */
+  importersOf(i: number): number[] {
+    const set = new Set(this.importers[i] ?? []);
+    for (const k of this.dirImporters.get(this.city.buildings[i].district) ?? []) if (k !== i) set.add(k);
+    return [...set].filter(k => this.exists(k));
+  }
+
+  dependents(i: number) { return this.importersOf(i).length; }
+
+  buildingAnchor(i: number, lift = 0.03): THREE.Vector3 {
+    const b = this.city.buildings[i];
+    return new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + lift, b.z + b.d / 2);
+  }
+
+  districtAnchor(d: number, lift = 0.03): THREE.Vector3 { return this.districtCenter(d, lift); }
+
+  private linkPalette(): { out: THREE.Color; in: THREE.Color; all: THREE.Color } {
+    switch (this.theme.name) {
+      case 'hacker': return { out: new THREE.Color('#36e0ff'), in: new THREE.Color('#ff3cd0'), all: new THREE.Color('#b44cff') };
+      case 'day': return { out: new THREE.Color('#1c7ed6'), in: new THREE.Color('#d6336c'), all: new THREE.Color('#5f3dc4') };
+      default: return { out: new THREE.Color('#4dd4ff'), in: new THREE.Color('#ff6bd6'), all: new THREE.Color('#9a7bff') };
+    }
+  }
+
+  /** Redraw code-link traces for the current mode, selection and commit. */
+  refreshCodeLinks() {
+    if (!this.city) return;
+    this.codeLinks.setAdditive(this.theme.name !== 'day');
+    const s = this.size();
+    this.codeLinks.spacing = s * 0.05;
+    this.codeLinks.base = this.theme.name === 'day' ? 0.55 : 0.3;
+    const pal = this.linkPalette();
+    const traces: Trace[] = [];
+    const w = Math.max(0.06, s * 0.0016);
+    const speed = s * 0.06;
+    const sel = this.selected;
+    if (this.codeLinkMode !== 'off' && sel >= 0 && this.exists(sel)) {
+      const b = this.city.buildings[sel];
+      const from = this.buildingAnchor(sel);
+      for (const j of b.imp ?? []) if (this.exists(j)) traces.push({ points: route(from, this.buildingAnchor(j), j), color: pal.out, width: w * 1.6, speed });
+      for (const d of b.impd ?? []) traces.push({ points: route(from, this.districtAnchor(d), d), color: pal.out, width: w * 1.6, speed });
+      for (const k of this.importersOf(sel)) traces.push({ points: route(this.buildingAnchor(k), from, k + 1), color: pal.in, width: w * 1.3, speed });
+    } else if (this.codeLinkMode === 'all') {
+      traces.push(...this.cityTraces(pal.all, w, speed));
+    }
+    this.codeLinks.set(traces);
+  }
+
+  /** Whole-city view: every file edge when there are few, else bundles between directories. */
+  private cityTraces(color: THREE.Color, w: number, speed: number): Trace[] {
+    const edges: [number, THREE.Vector3, THREE.Vector3, number][] = [];
+    let total = 0;
+    this.city.buildings.forEach((b, i) => { if (this.exists(i)) total += (b.imp?.length ?? 0) + (b.impd?.length ?? 0); });
+    if (total <= 350) {
+      this.city.buildings.forEach((b, i) => {
+        if (!this.exists(i)) return;
+        const from = this.buildingAnchor(i);
+        for (const j of b.imp ?? []) if (this.exists(j)) edges.push([i * 31 + j, from, this.buildingAnchor(j), 1]);
+        for (const d of b.impd ?? []) edges.push([i * 31 + d, from, this.districtAnchor(d), 1]);
+      });
+      return edges.map(([salt, a, b]) => ({ points: route(a, b, salt), color, width: w, speed }));
+    }
+    // bundle by directory: ancestors at a depth that keeps the number of groups readable
+    const ds = this.city.districts;
+    const depthOf = (d: number) => ds[d].depth;
+    const maxDepth = ds.reduce((m, x) => Math.max(m, x.depth), 0);
+    let G = 1;
+    for (let g = Math.min(3, maxDepth); g >= 1; g--) {
+      if (ds.filter(x => x.depth === g).length <= 60) { G = g; break; }
+    }
+    const groupOf = (d: number) => { let x = d; while (x > 0 && depthOf(x) > G) x = ds[x].parent; return x; };
+    const counts = new Map<string, number>();
+    this.city.buildings.forEach((b, i) => {
+      if (!this.exists(i)) return;
+      const ga = groupOf(b.district);
+      const add = (gb: number) => { if (ga !== gb) counts.set(`${ga}:${gb}`, (counts.get(`${ga}:${gb}`) ?? 0) + 1); };
+      for (const j of b.imp ?? []) if (this.exists(j)) add(groupOf(this.city.buildings[j].district));
+      for (const d of b.impd ?? []) add(groupOf(d));
+    });
+    const out: Trace[] = [];
+    for (const [k, n] of counts) {
+      const [ga, gb] = k.split(':').map(Number);
+      out.push({ points: route(this.districtAnchor(ga, 0.04), this.districtAnchor(gb, 0.04), ga + gb), color, width: w * (1 + Math.log2(n)), speed });
+    }
+    return out;
+  }
 
   exists(i: number, c = this.commit) { return this.vals.loc[i * this.C + c] >= 0; }
   private value(i: number, c = this.commit) { return Math.max(0, this.vals[this.metric][i * this.C + c]); }
@@ -548,6 +658,7 @@ export class CityScene {
       case 'churn': heatOf(i => this.churnAt(i).commits); break;
       case 'hotspot': heatOf(i => this.hotspotScore(i)); break;
       case 'complexity': heatOf(i => (this.isCode(i) ? this.vals.complexity[i * this.C + this.commit] : 0)); break;
+      case 'dependents': heatOf(i => this.dependents(i)); break;
       case 'age': { // recent changes are hot; a year or more is cold
         for (let i = 0; i < n; i++) {
           const t = this.lastTs[i * this.C + this.commit];
@@ -590,6 +701,7 @@ export class CityScene {
     }
     this.recolor();
     if (this.selected >= 0 || this.arcs.children.length) this.showCoupling(this.selected);
+    this.refreshCodeLinks();
   }
 
   /** Ease displayed heights toward their targets and write instance matrices. */
@@ -732,6 +844,7 @@ export class CityScene {
     this.paint(prev);
     this.paint(i);
     this.showCoupling(i);
+    this.refreshCodeLinks();
   }
 
   private clearArcs() {

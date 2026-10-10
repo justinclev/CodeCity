@@ -52,7 +52,8 @@
           <option value="owner">owner</option>
           <option value="knowledge">knowledge risk</option>
           <option value="compare">compare to baseline</option>
-          <option value="depth">directory depth</option>
+          <option value="dependents">dependents (fan-in)</option>
+        <option value="depth">directory depth</option>
         </select>
       </label>
       <label id="cwinrow">Window
@@ -61,6 +62,13 @@
           <option value="5">last 5 samples</option>
           <option value="10">last 10 samples</option>
           <option value="25">last 25 samples</option>
+        </select>
+      </label>
+      <label>Code links
+        <select id="codelinks" title="imports between files, drawn as circuit traces (L)">
+          <option value="selection">selected file</option>
+          <option value="all">whole city</option>
+          <option value="off">off</option>
         </select>
       </label>
       <div id="connrow" class="row connrow" hidden>
@@ -109,6 +117,7 @@
         <button data-tab="risk">Risk</button>
         <button data-tab="complex">Complex</button>
         <button data-tab="areas">Areas</button>
+        <button data-tab="deps">Deps</button>
         <button data-tab="authors">People</button>
         <button data-tab="links" hidden>Links</button>
       </div>

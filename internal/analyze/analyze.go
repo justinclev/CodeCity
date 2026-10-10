@@ -210,10 +210,12 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 	return c, repo, nil
 }
 
-// collectFacts reads manifests and import statements at the newest commit.
+// collectFacts reads manifests and import statements at the newest commit,
+// and resolves imports between files of this repository (Building.Imp/ImpD).
 func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid map[string]string, remote string) (*city.Facts, error) {
 	f := &city.Facts{Remote: deps.NormalizeURL(remote), Imports: map[int][]string{}}
 	var paths []string
+	local := map[int][]string{}
 	for i, b := range c.Buildings {
 		oid, ok := tipOid[b.Path]
 		if !ok {
@@ -221,7 +223,7 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 		}
 		paths = append(paths, b.Path)
 		manifest := deps.IsManifest(b.Path)
-		code := b.Lang == "Go" || b.Lang == "JavaScript" || b.Lang == "TypeScript" || b.Lang == "Python" || b.Lang == "Rust" || b.Lang == "Vue" || b.Lang == "Svelte"
+		code := importLangs[b.Lang]
 		if !manifest && !code {
 			continue
 		}
@@ -242,13 +244,79 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 				sort.Strings(specs)
 				f.Imports[i] = specs
 			}
+			if specs := deps.LocalImports(b.Lang, content); len(specs) > 0 {
+				local[i] = specs
+			}
 		}
 	}
 	f.Identities = append(f.Identities, deps.PythonModules(paths)...)
 	if f.Remote != "" {
 		f.Identities = append(f.Identities, deps.Identity{Kind: deps.Git, Name: f.Remote})
 	}
+
+	// resolve imports inside this repository
+	res := deps.NewResolver(paths, f.Identities)
+	byPath := make(map[string]int, len(c.Buildings))
+	for i, b := range c.Buildings {
+		byPath[b.Path] = i
+	}
+	dirDistrict := map[string]int{}
+	for i, d := range c.Districts {
+		dirDistrict[d.Path] = i
+	}
+	for i, specs := range local {
+		b := &c.Buildings[i]
+		seenB, seenD := map[int]bool{}, map[int]bool{}
+		for _, spec := range specs {
+			t, ok := res.Resolve(b.Path, b.Lang, spec)
+			if !ok {
+				continue
+			}
+			if !t.Dir {
+				if j, ok := byPath[t.Path]; ok && j != i && !seenB[j] {
+					seenB[j] = true
+					b.Imp = append(b.Imp, j)
+				}
+				continue
+			}
+			d := districtOf(c, dirDistrict, t.Path)
+			if d >= 0 && d != b.District && !seenD[d] {
+				seenD[d] = true
+				b.ImpD = append(b.ImpD, d)
+			}
+		}
+		sort.Ints(b.Imp)
+		sort.Ints(b.ImpD)
+	}
 	return f, nil
+}
+
+var importLangs = map[string]bool{"Go": true, "JavaScript": true, "TypeScript": true, "Python": true, "Rust": true, "Vue": true, "Svelte": true}
+
+// districtOf finds the district for a directory: exact match, else the
+// collapsed chain that contains it, else the deepest ancestor (-1 if none).
+func districtOf(c *city.City, byPath map[string]int, dir string) int {
+	if d, ok := byPath[dir]; ok {
+		return d
+	}
+	best, bestLen := -1, -1
+	for i, d := range c.Districts {
+		if d.Path == "" {
+			continue
+		}
+		if strings.HasPrefix(d.Path, dir+"/") && (bestLen < 0 || len(d.Path) < bestLen) { // collapsed "a/b/c" for "a/b"
+			best, bestLen = i, len(d.Path)
+		}
+	}
+	if best >= 0 {
+		return best
+	}
+	for p := dir; p != "." && p != "" && p != "/"; p = path.Dir(p) {
+		if d, ok := byPath[p]; ok {
+			return d
+		}
+	}
+	return -1
 }
 
 // record appends pt to h if it differs from the previous state.

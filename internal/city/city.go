@@ -3,7 +3,7 @@ package city
 
 import "github.com/justinclev/codecity/internal/deps"
 
-const Version = 4
+const Version = 5
 
 type City struct {
 	// Facts is what the repo provides and uses, for linking repositories; not sent to the viewer.
@@ -142,6 +142,10 @@ type Building struct {
 	// Coupling lists files that change in the same commits:
 	// [building index, shared commits, degree %] where degree = shared / mean(revisions).
 	Coupling [][3]int `json:"cpl,omitempty"`
+	// Imp / ImpD: files (building indices) and package directories (district
+	// indices) of the same repository that this file imports, at the newest commit.
+	Imp  []int `json:"imp,omitempty"`
+	ImpD []int `json:"impd,omitempty"`
 }
 
 // Facts are extracted at the newest commit for cross-repository linking.
