@@ -54,8 +54,10 @@ export function setTheme(name: 'night' | 'day' | 'hacker') {
 }
 
 export function showRepo(c: City) {
-  $('repo').textContent = c.repo.ref ? `${c.repo.name} · ${c.repo.ref}` : c.repo.name;
-  $('repo').title = c.repo.remote || c.repo.path || c.repo.source;
+  const refs = c.repos?.length ? [...new Set(c.repos.map(r => r.ref))] : [c.repo.ref];
+  const ref = refs.length === 1 ? refs[0] : `${refs.length} refs`;
+  $('repo').textContent = ref ? `${c.repo.name} · ${ref} ▾` : c.repo.name;
+  $('repo').title = `${c.repo.remote || c.repo.path || c.repo.source}\nclick to switch branch`;
   document.title = `${c.repo.name} · Code City`;
   $('insights').hidden = false;
 }
@@ -714,14 +716,14 @@ export function bindControls(h: Controls) {
   $<HTMLInputElement>('search').oninput = e => h.onSearch((e.target as HTMLInputElement).value);
   $<HTMLInputElement>('search').onkeydown = e => { if (e.key === 'Enter') h.onSearchEnter(); if (e.key === 'Escape') (e.target as HTMLInputElement).blur(); };
   const src = $<HTMLTextAreaElement>('source');
-  src.oninput = autosize;
+  src.addEventListener('input', autosize);
   src.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $<HTMLFormElement>('repoform').requestSubmit(); };
   $('showdeps').onchange = () => h.onLinksToggle();
   $<HTMLSelectElement>('codelinks').onchange = e => h.onCodeLinks((e.target as HTMLSelectElement).value as 'off' | 'selection' | 'all');
   $('showpeople').onchange = () => h.onLinksToggle();
   $('repoform').onsubmit = e => {
     e.preventDefault();
-    h.onSubmit(src.value.trim(), $<HTMLInputElement>('ref').value.trim(),
+    h.onSubmit(src.value.trim(), '',
       Math.max(1, parseInt($<HTMLInputElement>('commits').value, 10) || 1), $<HTMLInputElement>('churn').checked);
   };
   $('cancel').onclick = () => h.onCancel();
@@ -752,9 +754,10 @@ export function setBaselineRow(visible: boolean, label: string) {
 }
 
 export function setForm(source: string, ref: string, commits: number, churn = true) {
+  // an old-style default ref folds into the lines that do not name one
+  if (ref) source = source.split('\n').map(l => (l.trim() && !l.trim().startsWith('#') && l.trim().split(/\s+/).length === 1 ? `${l.trim()} ${ref}` : l)).join('\n');
   $<HTMLTextAreaElement>('source').value = source;
   autosize();
-  $<HTMLInputElement>('ref').value = ref;
   $<HTMLInputElement>('commits').value = String(commits);
   $<HTMLInputElement>('churn').checked = churn;
 }

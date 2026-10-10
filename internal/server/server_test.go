@@ -141,6 +141,54 @@ func TestFileAPI(t *testing.T) {
 	}
 }
 
+func TestRefsAPI(t *testing.T) {
+	dir := repo(t)
+	for _, a := range [][]string{{"branch", "feature/x"}, {"tag", "v1.2.0"}, {"tag", "-a", "v1.10.0", "-m", "annotated"}} {
+		c := exec.Command("git", a...)
+		c.Dir = dir
+		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("%v %s", err, out)
+		}
+	}
+	h := New("127.0.0.1:8080", t.TempDir()).Handler()
+	body, _ := json.Marshal(map[string]string{"source": dir})
+	w := do(h, "POST", "/api/refs", string(body), "127.0.0.1:8080", "http://127.0.0.1:8080")
+	var r struct {
+		Default, Current string
+		Refs             []struct{ Name, Kind, Commit string }
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &r) != nil {
+		t.Fatalf("refs: %d %s", w.Code, w.Body)
+	}
+	got := map[string]string{}
+	for _, x := range r.Refs {
+		got[x.Name] = x.Kind
+		if len(x.Commit) != 40 {
+			t.Errorf("%s: commit %q", x.Name, x.Commit)
+		}
+	}
+	if r.Default != "main" || r.Current != "main" || got["main"] != "branch" || got["feature/x"] != "branch" || got["v1.2.0"] != "tag" || got["v1.10.0"] != "tag" {
+		t.Errorf("refs: %+v", r)
+	}
+	// the annotated tag points at the commit, not the tag object
+	for _, x := range r.Refs {
+		if x.Name == "v1.10.0" && x.Commit != r.Refs[0].Commit {
+			t.Errorf("annotated tag not peeled: %+v", x)
+		}
+	}
+	if w := do(h, "POST", "/api/refs", string(body), "127.0.0.1:8080", "https://evil.example"); w.Code != 403 {
+		t.Errorf("cross-origin refs: %d", w.Code)
+	}
+	if w := do(h, "POST", "/api/refs", `{"source":"--upload-pack=x"}`, "127.0.0.1:8080", ""); w.Code != 400 {
+		t.Errorf("option-like source: %d", w.Code)
+	}
+	pub := New("0.0.0.0:8080", t.TempDir()).Handler()
+	if w := do(pub, "POST", "/api/refs", string(body), "example.com:8080", ""); w.Code != 403 {
+		t.Errorf("local path on public server: %d", w.Code)
+	}
+}
+
 func TestMultiRepoFileAPI(t *testing.T) {
 	s := New("127.0.0.1:8080", t.TempDir())
 	h := s.Handler()

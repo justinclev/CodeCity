@@ -15,3 +15,11 @@ func TestStripTrailers(t *testing.T) {
 		}
 	}
 }
+
+func TestVersionLess(t *testing.T) {
+	for _, c := range [][2]string{{"v1.9.0", "v1.10.0"}, {"v1.2", "v1.2.1"}, {"1.0.0-rc1", "1.0.0-rc2"}, {"a", "b"}} {
+		if !versionLess(c[0], c[1]) || versionLess(c[1], c[0]) {
+			t.Errorf("%s < %s", c[0], c[1])
+		}
+	}
+}

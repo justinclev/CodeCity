@@ -7,6 +7,7 @@ import type { PanelRow } from './walk/codewall';
 import type { CardData, CardSection } from './walk/panels';
 import type { GameWorld } from './walk/game';
 import { buildTour, isTest, KIND_LABEL, type TourStop } from './tour';
+import { bindBranchRows, showSwitcher, type LoadedRepo } from './branches';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
 import { SCHEMA_VERSION, type City, type ColorMode } from './types';
@@ -262,6 +263,8 @@ function show(c: City) {
   scene.load(c);
   totals = scene.allTotals();
   ui.showRepo(c);
+  repoBtn.disabled = !apiAvailable || !loadedRepos().every(r => r.source);
+  renderBranches();
   ui.setupTimeline(c);
   selectedLink = -1;
   ui.setConnRow(!!c.repos?.length && !!c.links?.length);
@@ -671,6 +674,34 @@ ui.bindControls({
 });
 tab = store.get<ui.Tab>('tab') ?? 'hotspots';
 
+// ---------------------------------------------------------------- branches
+const sourceBox = document.getElementById('source') as HTMLTextAreaElement;
+const renderBranches = bindBranchRows(sourceBox, document.getElementById('branches')!, () => apiAvailable, src => loadedRepos().find(r => r.source === src)?.name);
+const repoBtn = document.getElementById('repo') as HTMLButtonElement;
+
+function loadedRepos(): LoadedRepo[] {
+  if (!city) return [];
+  return city.repos?.length ? city.repos.map(r => ({ name: r.name, source: r.source, ref: r.ref })) : [{ name: city.repo.name, source: city.repo.source, ref: city.repo.ref }];
+}
+
+/** Re-analyze the loaded city with repository k on another branch (the others keep theirs). */
+function switchBranch(k: number, ref: string) {
+  const text = loadedRepos().map((r, j) => {
+    const x = j === k ? ref : r.ref;
+    return x && x !== 'HEAD' ? `${r.source} ${x}` : r.source;
+  }).join('\n');
+  const commits = Math.max(1, parseInt((document.getElementById('commits') as HTMLInputElement).value, 10) || 100);
+  const churn = (document.getElementById('churn') as HTMLInputElement).checked;
+  ui.setForm(text, '', commits, churn);
+  renderBranches();
+  void submit(text, '', commits, churn);
+}
+
+repoBtn.addEventListener('click', () => {
+  if (!city || !apiAvailable) return;
+  showSwitcher(document.getElementById('branchpop')!, repoBtn, loadedRepos(), switchBranch);
+});
+
 // timeline chart: hover shows a marker, click seeks, shift-click sets the compare baseline
 const chart = document.getElementById('chart')!;
 chart.addEventListener('mousemove', e => { if (!city) return; chartHover = ui.chartIndex(e, city.commits.length); redrawChart(); });
@@ -808,6 +839,7 @@ async function start() {
     const r = st.job.request;
     ui.setForm((r.sources?.length ? r.sources : [r.source ?? '']).join('\n'), r.ref, r.maxCommits, !r.noChurn);
   }
+  renderBranches();
   if (st.job?.state === 'running') { void watchJob(); return; }
   if (st.hasCity) {
     try { await fetchCity('/api/city'); return; } catch (e) { ui.setJobStatus((e as Error).message, true); }

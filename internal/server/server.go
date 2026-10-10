@@ -542,6 +542,33 @@ func (s *Server) Handler() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, f)
 	})
+	// POST (not GET) so the Origin check applies: listing refs may contact a remote host.
+	mux.HandleFunc("POST /api/refs", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Source string `json:"source"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&body); err != nil || strings.TrimSpace(body.Source) == "" {
+			writeErr(w, errBad("source is required"))
+			return
+		}
+		src := strings.TrimSpace(body.Source)
+		if strings.HasPrefix(src, "-") || strings.ContainsAny(src, "\n\r") {
+			writeErr(w, errBad("invalid source"))
+			return
+		}
+		if !s.allowLocal && (!gitx.IsURL(src) || strings.HasPrefix(src, "file://")) {
+			writeErr(w, errForbidden("this server only lists refs of remote git URLs"))
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+		defer cancel()
+		refs, err := gitx.ListRefs(ctx, src)
+		if err != nil {
+			writeErr(w, errBad(err.Error()))
+			return
+		}
+		writeJSON(w, http.StatusOK, refs)
+	})
 	mux.HandleFunc("GET /api/history", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		n, _ := strconv.Atoi(q.Get("n"))

@@ -16,19 +16,21 @@
       <div class="logo" aria-hidden="true"><i></i><i></i><i></i></div>
       <div class="brandtext">
         <div class="name">Code City</div>
-        <div id="repo" class="sub">no repository</div>
+        <button id="repo" class="sub repobtn" type="button" title="switch branch" disabled>no repository</button>
       </div>
       <button id="walk" class="icon walkbtn" type="button" title="walk the city as a player (G)">WALK</button>
       <button id="hacker" class="icon mono" type="button" title="hacker mode (H)">&gt;_</button>
       <button id="theme" class="icon" type="button" title="toggle day / night (T)">☾</button>
     </header>
 
+    <div id="branchpop" hidden></div>
     <details id="repobox" open>
       <summary>Repository</summary>
       <form id="repoform">
         <textarea id="source" rows="2" placeholder="local path or git URL&#10;one repo per line (optional ref after a space)" autocomplete="off" spellcheck="false" required></textarea>
+        <div id="branches"></div>
         <div class="row">
-          <input id="ref" type="text" placeholder="ref (HEAD)" autocomplete="off" spellcheck="false" />
+          <span class="lbl">history samples</span>
           <input id="commits" type="number" min="1" max="1000" value="100" title="history samples (1 = snapshot only)" />
         </div>
         <label class="chk" title="change frequency, coupling and ownership from git log (needs a full clone)"><input id="churn" type="checkbox" checked /> history analysis (churn, coupling, owners)</label>

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -111,6 +112,195 @@ func Open(ctx context.Context, source, ref string, shallow bool) (*Repo, error) 
 		return nil, fmt.Errorf("%s is not a git repository", source)
 	}
 	return &Repo{Dir: abs, Source: source}, nil
+}
+
+// RefInfo is a branch or tag that can be analyzed.
+type RefInfo struct {
+	Name   string `json:"name"`           // what to pass as ref: "main", "origin/feature", "v1.2.0"
+	Kind   string `json:"kind"`           // branch | remote | tag
+	Commit string `json:"commit"`         // the commit it points to
+	Date   string `json:"date,omitempty"` // committer date (local repos only)
+}
+
+// Refs lists the branches and tags of a repository without cloning it.
+type Refs struct {
+	Default string    `json:"default"`           // the branch an empty ref resolves to
+	Current string    `json:"current,omitempty"` // checked-out branch of a local repo
+	Refs    []RefInfo `json:"refs"`
+	More    bool      `json:"more,omitempty"` // truncated at MaxRefs
+}
+
+// MaxRefs caps how many refs ListRefs returns (branches first, then the newest tags).
+const MaxRefs = 400
+
+// ListRefs returns the branches and tags of a local repo (for-each-ref) or a URL (ls-remote, no clone).
+func ListRefs(ctx context.Context, source string) (*Refs, error) {
+	if IsURL(source) {
+		return listRemote(ctx, source)
+	}
+	abs, err := filepath.Abs(source)
+	if err != nil {
+		return nil, err
+	}
+	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
+		return nil, fmt.Errorf("%s: not a directory", source)
+	}
+	out, err := run(ctx, abs, "for-each-ref", "--sort=-committerdate",
+		"--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(committerdate:iso-strict)%1f%(*committerdate:iso-strict)",
+		"refs/heads", "refs/remotes", "refs/tags")
+	if err != nil {
+		return nil, fmt.Errorf("%s is not a git repository", source)
+	}
+	r := &Refs{}
+	if b, e := run(ctx, abs, "symbolic-ref", "--short", "-q", "HEAD"); e == nil {
+		r.Current = strings.TrimSpace(b)
+	}
+	r.Default = r.Current
+	if r.Default == "" {
+		r.Default = "HEAD"
+	}
+	local := map[string]bool{}
+	var branches, remotes, tags []RefInfo
+	for _, ln := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Split(ln, "\x1f")
+		if len(f) != 5 {
+			continue
+		}
+		name, commit, date := f[0], f[1], f[3]
+		if f[2] != "" { // annotated tag: use the tagged commit
+			commit, date = f[2], f[4]
+		}
+		switch {
+		case strings.HasPrefix(name, "refs/heads/"):
+			n := strings.TrimPrefix(name, "refs/heads/")
+			local[n] = true
+			branches = append(branches, RefInfo{Name: n, Kind: "branch", Commit: commit, Date: date})
+		case strings.HasPrefix(name, "refs/remotes/"):
+			n := strings.TrimPrefix(name, "refs/remotes/")
+			if strings.HasSuffix(n, "/HEAD") {
+				continue
+			}
+			remotes = append(remotes, RefInfo{Name: n, Kind: "remote", Commit: commit, Date: date})
+		case strings.HasPrefix(name, "refs/tags/"):
+			tags = append(tags, RefInfo{Name: strings.TrimPrefix(name, "refs/tags/"), Kind: "tag", Commit: commit, Date: date})
+		}
+	}
+	// remote branches that are also local branches add nothing
+	kept := remotes[:0]
+	for _, x := range remotes {
+		if _, short, ok := strings.Cut(x.Name, "/"); ok && local[short] {
+			continue
+		}
+		kept = append(kept, x)
+	}
+	r.Refs, r.More = capRefs(branches, kept, tags)
+	return r, nil
+}
+
+func listRemote(ctx context.Context, url string) (*Refs, error) {
+	base := []string{"-c", "protocol.ext.allow=never", "ls-remote"}
+	head, err := run(ctx, "", append(base, "--symref", "--", url, "HEAD")...)
+	if err != nil {
+		return nil, err
+	}
+	r := &Refs{Default: "HEAD"}
+	for _, ln := range strings.Split(head, "\n") {
+		// "ref: refs/heads/main\tHEAD"
+		if rest, ok := strings.CutPrefix(ln, "ref: refs/heads/"); ok {
+			r.Default, _, _ = strings.Cut(rest, "\t")
+		}
+	}
+	out, err := run(ctx, "", append(base, "--heads", "--tags", "--", url)...)
+	if err != nil {
+		return nil, err
+	}
+	var branches, tags []RefInfo
+	peeled := map[string]string{}
+	for _, ln := range strings.Split(strings.TrimSpace(out), "\n") {
+		commit, name, ok := strings.Cut(ln, "\t")
+		if !ok {
+			continue
+		}
+		if t, ok := strings.CutSuffix(name, "^{}"); ok {
+			peeled[strings.TrimPrefix(t, "refs/tags/")] = commit
+			continue
+		}
+		if n, ok := strings.CutPrefix(name, "refs/heads/"); ok {
+			branches = append(branches, RefInfo{Name: n, Kind: "branch", Commit: commit})
+		} else if n, ok := strings.CutPrefix(name, "refs/tags/"); ok {
+			tags = append(tags, RefInfo{Name: n, Kind: "tag", Commit: commit})
+		}
+	}
+	for i := range tags {
+		if c, ok := peeled[tags[i].Name]; ok {
+			tags[i].Commit = c
+		}
+	}
+	// no dates from ls-remote: default branch first, then the usual suspects, then by name; tags newest-looking first
+	rank := func(n string) int {
+		switch n {
+		case r.Default:
+			return 0
+		case "main", "master", "develop", "dev", "trunk":
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(branches, func(i, j int) bool {
+		a, b := rank(branches[i].Name), rank(branches[j].Name)
+		if a != b {
+			return a < b
+		}
+		return branches[i].Name < branches[j].Name
+	})
+	sort.SliceStable(tags, func(i, j int) bool { return versionLess(tags[j].Name, tags[i].Name) })
+	r.Refs, r.More = capRefs(branches, nil, tags)
+	return r, nil
+}
+
+func capRefs(groups ...[]RefInfo) ([]RefInfo, bool) {
+	out := []RefInfo{}
+	more := false
+	for _, g := range groups {
+		for _, x := range g {
+			if len(out) >= MaxRefs {
+				more = true
+				break
+			}
+			out = append(out, x)
+		}
+	}
+	return out, more
+}
+
+// versionLess compares names with embedded numbers numerically ("v1.10" > "v1.9").
+func versionLess(a, b string) bool {
+	for a != "" && b != "" {
+		da, db := a[0] >= '0' && a[0] <= '9', b[0] >= '0' && b[0] <= '9'
+		if da && db {
+			i, j := 0, 0
+			for i < len(a) && a[i] >= '0' && a[i] <= '9' {
+				i++
+			}
+			for j < len(b) && b[j] >= '0' && b[j] <= '9' {
+				j++
+			}
+			na, nb := strings.TrimLeft(a[:i], "0"), strings.TrimLeft(b[:j], "0")
+			if len(na) != len(nb) {
+				return len(na) < len(nb)
+			}
+			if na != nb {
+				return na < nb
+			}
+			a, b = a[i:], b[j:]
+			continue
+		}
+		if a[0] != b[0] {
+			return a[0] < b[0]
+		}
+		a, b = a[1:], b[1:]
+	}
+	return len(a) < len(b)
 }
 
 // LocalPath returns the absolute work tree of a local (non-cloned) repo, or "".
