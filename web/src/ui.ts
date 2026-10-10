@@ -171,7 +171,11 @@ export interface BuildingInfo {
   links: { label: string; href: string }[];
   pieces: PiecesState;
   deps: { imports: { index: number; path: string }[]; importDirs: { district: number; path: string }[]; importedBy: { index: number; path: string }[] };
+  history?: HistoryState;
 }
+
+export interface FileCommit { hash: string; date: string; author: string; subject: string; body?: string }
+export type HistoryState = { status: 'loading' } | { status: 'unavailable' } | { status: 'ready'; total: number; created?: FileCommit; recent: FileCommit[] };
 
 export type PiecesState =
   | { status: 'loading' }
@@ -230,6 +234,7 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     rows.push(['owner last seen', day(d.owner.lastActive)]);
   }
   box.append(kv(rows));
+  if (d.history) box.append(storySection(d.history));
   if (d.series.length > 1) {
     box.append(el('h4', '', 'Size over time'));
     const cv = el('canvas');
@@ -268,6 +273,32 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     box.append(links);
   }
   box.hidden = false;
+}
+
+/** Where the file came from (the commit that added it) and what happened to it lately: the "why" behind the code. */
+function storySection(hs: HistoryState): HTMLElement {
+  const wrap = el('div', 'story');
+  wrap.append(el('h4', '', 'Story'));
+  if (hs.status === 'loading') { wrap.append(el('div', 'muted', 'reading history…')); return wrap; }
+  if (hs.status === 'unavailable') { wrap.append(el('div', 'muted', 'History needs the server (codecity serve).')); return wrap; }
+  if (hs.created) {
+    const c = hs.created;
+    const o = el('div', 'origin');
+    o.append(el('div', 'muted', `born ${c.date.slice(0, 10)} · ${c.author} · ${c.hash.slice(0, 7)}`), el('div', 'subj', c.subject));
+    if (c.body) o.append(el('div', 'body', c.body.length > 280 ? c.body.slice(0, 279) + '…' : c.body));
+    wrap.append(o);
+  }
+  const rest = hs.recent.filter(c => c.hash !== hs.created?.hash).slice(0, 5);
+  if (rest.length) {
+    wrap.append(el('div', 'muted', `latest of ${hs.total} commits`));
+    for (const c of rest) {
+      const r = el('div', 'commit');
+      r.append(el('span', 'num', c.date.slice(0, 10)), el('span', 'subj', c.subject));
+      r.title = `${c.author} · ${c.hash.slice(0, 7)}${c.body ? '\n\n' + c.body : ''}`;
+      wrap.append(r);
+    }
+  }
+  return wrap;
 }
 
 function depsSection(d: BuildingInfo['deps'], h: InfoHandlers): HTMLElement {

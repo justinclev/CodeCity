@@ -32,6 +32,8 @@ export class Avatar {
   private pop = 1;           // 0 → 1 while materializing
   private popFx: THREE.Mesh;
   private mood: Mood = 'idle';
+  private jets: THREE.Mesh[] = [];
+  private jetMat: THREE.MeshBasicMaterial;
 
   constructor() {
     const shell = this.mat(new THREE.MeshStandardMaterial({ color: '#f6f1e8', roughness: 0.32, metalness: 0.05, emissive: '#8a7f6e', emissiveIntensity: 0.55 }));
@@ -116,6 +118,19 @@ export class Avatar {
     this.body.add(line);
     this.group.add(this.body);
 
+    // ---- foot jets (only while flying)
+    this.jetMat = this.mat(new THREE.MeshBasicMaterial({ color: new THREE.Color(0.4, 1.3, 1.6), transparent: true, opacity: 0.85,
+      toneMapped: false, depthWrite: false, blending: THREE.AdditiveBlending }));
+    for (const leg of [this.legL, this.legR]) {
+      const g = new THREE.ConeGeometry(0.045, 0.22, 12, 1, true).rotateX(Math.PI); // tip pointing down
+      this.geometries.push(g);
+      const jet = new THREE.Mesh(g, this.jetMat);
+      jet.position.set(0, -0.26, 0.02);
+      jet.visible = false;
+      leg.add(jet);
+      this.jets.push(jet);
+    }
+
     // ---- materialize burst (a glowing shell that pops away)
     this.popFx = m(new THREE.SphereGeometry(0.62, 24, 16), this.mat(new THREE.MeshBasicMaterial({
       color: new THREE.Color(0.4, 1.2, 1.5), transparent: true, opacity: 0, toneMapped: false, depthWrite: false, blending: THREE.AdditiveBlending })));
@@ -135,18 +150,29 @@ export class Avatar {
    * Animate. speed: horizontal speed in body-heights per second; airborne: in the air.
    * The waddle phase advances with distance so the feet don't slide.
    */
-  update(dt: number, speed: number, airborne: boolean) {
+  update(dt: number, speed: number, airborne: boolean, flying = false) {
     this.t += dt;
     const moving = speed > 0.05 && !airborne;
     const running = speed > 2.6;
-    this.mood = this.pop < 1 ? 'pop' : airborne ? 'jump' : running ? 'run' : moving ? 'walk' : 'idle';
+    this.mood = this.pop < 1 ? 'pop' : flying ? (speed > 0.3 ? 'run' : 'idle') : airborne ? 'jump' : running ? 'run' : moving ? 'walk' : 'idle';
+    for (const j of this.jets) {
+      j.visible = flying;
+      if (flying) j.scale.set(1, 0.7 + 0.5 * Math.random() + Math.min(1.2, speed * 0.15), 1);
+    }
+    if (flying) this.jetMat.opacity = 0.6 + 0.3 * Math.sin(this.t * 40);
     this.phase += moving ? dt * speed * 6.5 : 0;
     const s = Math.sin(this.phase);
     const amp = moving ? (running ? 0.95 : 0.6) : 0;
     const k = Math.min(1, dt * 14);
     const ease = (o: THREE.Object3D, ax: 'x' | 'z', v: number) => { o.rotation[ax] += (v - o.rotation[ax]) * k; };
 
-    if (airborne) {
+    if (flying) {
+      // superhero glide: arms out like wings, legs trailing, lean into the speed
+      const lean = Math.min(0.6, speed * 0.08);
+      ease(this.armL, 'x', -0.2 - lean); ease(this.armR, 'x', -0.2 - lean);
+      ease(this.armL, 'z', -1.25 + Math.sin(this.t * 3) * 0.08); ease(this.armR, 'z', 1.25 - Math.sin(this.t * 3) * 0.08);
+      ease(this.legL, 'x', 0.25 + lean * 0.6); ease(this.legR, 'x', 0.35 + lean * 0.6);
+    } else if (airborne) {
       ease(this.armL, 'x', -2.5); ease(this.armR, 'x', -2.5);
       ease(this.armL, 'z', -0.6); ease(this.armR, 'z', 0.6);
       ease(this.legL, 'x', -0.5); ease(this.legR, 'x', 0.3);
@@ -162,10 +188,10 @@ export class Avatar {
       ease(this.armR, 'z', wave ? 0.5 : 0.25 + (moving ? 0.1 : 0));
     }
     // waddle: bounce on every step, roll side to side, lean into a run
-    const bounce = moving ? Math.abs(s) * (running ? 0.06 : 0.04) : 0.012 * (1 + Math.sin(this.t * 2.6));
+    const bounce = flying ? Math.sin(this.t * 2.2) * 0.04 : moving ? Math.abs(s) * (running ? 0.06 : 0.04) : 0.012 * (1 + Math.sin(this.t * 2.6));
     this.body.position.y = bounce;
     this.body.rotation.z += ((moving ? s * 0.09 : 0) - this.body.rotation.z) * k;
-    this.body.rotation.x += ((running ? 0.18 : moving ? 0.06 : 0) - this.body.rotation.x) * k;
+    this.body.rotation.x += ((flying ? Math.min(0.55, 0.1 + speed * 0.07) : running ? 0.18 : moving ? 0.06 : 0) - this.body.rotation.x) * k;
     // head lags a little behind the body; idle head tilt
     this.head.rotation.z += ((moving ? -s * 0.06 : Math.sin(this.t * 0.7) * 0.08) - this.head.rotation.z) * Math.min(1, dt * 6);
     this.head.rotation.y += ((moving ? 0 : Math.sin(this.t * 0.45) * 0.3) - this.head.rotation.y) * Math.min(1, dt * 3);

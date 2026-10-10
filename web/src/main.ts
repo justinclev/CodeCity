@@ -4,6 +4,9 @@ import { showCode, type FileData } from './code';
 import { WalkMode, type Destination, type Sym } from './walk/walk';
 import type { InteriorFloor, InteriorSpec } from './walk/interior';
 import type { PanelRow } from './walk/codewall';
+import type { CardData, CardSection } from './walk/panels';
+import type { GameWorld } from './walk/game';
+import { buildTour, isTest, KIND_LABEL, type TourStop } from './tour';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
 import { SCHEMA_VERSION, type City, type ColorMode } from './types';
@@ -140,6 +143,36 @@ function refreshSkin() {
   else scene.setSkin(-1, '');
 }
 
+// ---------------------------------------------------------------- file history (the "why": origin commit + recent changes)
+interface History { path: string; total: number; created?: ui.FileCommit; recent: ui.FileCommit[] }
+const historyCache = new Map<string, Promise<History>>();
+let historyState: ui.HistoryState | undefined;
+
+function fetchHistory(path: string): Promise<History> {
+  let p = historyCache.get(path);
+  if (!p) {
+    p = api<History>(`/api/history?path=${encodeURIComponent(path)}&n=8`);
+    p.catch(() => historyCache.delete(path));
+    historyCache.set(path, p);
+  }
+  return p;
+}
+
+async function loadHistory(i: number) {
+  if (!city) return;
+  if (!apiAvailable) { historyState = { status: 'unavailable' }; return; }
+  historyState = { status: 'loading' };
+  try {
+    const h = await fetchHistory(city.buildings[i].path);
+    if (selected !== i) return;
+    historyState = { status: 'ready', total: h.total, created: h.created, recent: h.recent };
+  } catch {
+    if (selected !== i) return;
+    historyState = { status: 'unavailable' };
+  }
+  refreshSelection();
+}
+
 function piecesState(): ui.PiecesState {
   if (fileError) return { status: 'unavailable', message: fileError };
   if (!file) return { status: 'loading' };
@@ -220,6 +253,7 @@ function show(c: City) {
   const wanted = new URLSearchParams(location.hash.slice(1)).get('file'); // read before writeHash() replaces it
   city = c;
   selected = selectedDistrict = -1;
+  tourAt = -1; tourBar(); historyCache.clear();
   ui.setMessage('');
   ui.setPathResolver(i => c.buildings[i].path);
   ui.setChurnAvailable(c.churn === true);
@@ -443,6 +477,7 @@ function buildingInfo(i: number): ui.BuildingInfo {
       importDirs: (b.impd ?? []).map(d => ({ district: d, path: c.districts[d].path })),
       importedBy: scene.importersOf(i).map(k => ({ index: k, path: c.buildings[k].path })),
     },
+    history: historyState,
   };
 }
 
@@ -454,6 +489,7 @@ function selectBuilding(i: number, fly: boolean) {
     if (codeOpen) closeCode();
     selected = i;
     void loadPieces(i);
+    void loadHistory(i);
   }
   selected = i;
   selectedDistrict = -1;
@@ -518,6 +554,43 @@ function refreshSelection() {
     else closeInfo();
   } else if (selectedDistrict >= 0) ui.showDistrict(districtInfo(selectedDistrict), infoHandlers);
 }
+
+// ---------------------------------------------------------------- guided tour (overview)
+let tourStops: TourStop[] = [];
+let tourAt = -1;
+
+function tourBar() {
+  const bar = document.getElementById('tourbar')!;
+  if (tourAt < 0 || !city) { bar.hidden = true; return; }
+  const st = tourStops[tourAt];
+  const mk = (tag: string, cls: string, text: string) => { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; };
+  const btn = (text: string, on: () => void, primary = false) => { const b = mk('button', primary ? 'primary' : '', text) as HTMLButtonElement; b.onclick = on; return b; };
+  const row = mk('div', 'tbtns', '');
+  row.append(btn('◀ Back (B)', () => tourGo(tourAt - 1)), btn(tourAt + 1 < tourStops.length ? 'Next (N) ▶' : 'Finish', () => tourGo(tourAt + 1), true),
+    btn('Walk here', () => { const b = st.building; endTour(); startWalk(b); }), btn('End', () => endTour()));
+  bar.replaceChildren(mk('div', 'tk', `TOUR ${tourAt + 1}/${tourStops.length} · ${st.title.toUpperCase()}`), mk('div', 'tp', city.buildings[st.building].path),
+    ...st.why.map(w => mk('div', 'tw', w)), row);
+  bar.hidden = false;
+}
+
+function tourGo(k: number) {
+  if (k >= tourStops.length) { endTour(); ui.setJobStatus('Tour complete — try walk mode (G) to explore on foot.'); return; }
+  if (k < 0) return;
+  tourAt = k;
+  selectBuilding(tourStops[k].building, true);
+  tourBar();
+}
+
+function startTour() {
+  if (!city) return;
+  stopPlayback();
+  tourStops = buildTour(city, scene);
+  if (!tourStops.length) { ui.setJobStatus('No tour for this city: it needs docs, entry points or imports.', true); return; }
+  tourGo(0);
+}
+
+function endTour() { tourAt = -1; tourBar(); }
+document.getElementById('tourbtn')!.addEventListener('click', () => (tourAt >= 0 ? endTour() : startTour()));
 
 // ---------------------------------------------------------------- deep links (#c=..&color=..&file=..)
 function writeHash() {
@@ -624,6 +697,9 @@ addEventListener('keydown', e => {
     else { closeInfo(); if (scene.authorFilter >= 0) setAuthorFilter(-1); }
   }
   else if (e.key === 'e' || e.key === 'E') toggleExplode();
+  else if (e.key === 'u' || e.key === 'U') { if (tourAt >= 0) endTour(); else startTour(); }
+  else if ((e.key === 'n' || e.key === 'N') && tourAt >= 0) tourGo(tourAt + 1);
+  else if ((e.key === 'b' || e.key === 'B') && tourAt >= 0) tourGo(tourAt - 1);
   else if (e.key === 'l' || e.key === 'L') {
     const order = ['selection', 'all', 'off'] as const;
     scene.codeLinkMode = order[(order.indexOf(scene.codeLinkMode) + 1) % 3];
@@ -822,9 +898,109 @@ const walk = new WalkMode(scene, {
   importsOf: i => city!.buildings[i].imp ?? [],
   symbols: async () => (await api<{ symbols: Sym[] }>('/api/symbols')).symbols ?? [],
   onExit: () => { onCommitChanged(); },
+  async floors(i) {
+    const hash = repoCommitAt(repoOf(i), scene.commit);
+    if (!hash) throw new Error('file does not exist at this commit');
+    const f = await fetchFile(city!.buildings[i].path, hash);
+    return floorsOf(f).map(x => ({ ...x, start: f.pieces[x.piece]?.start })).slice(0, MAX_FLOORS);
+  },
+  async card(i, act) {
+    const c = city!, b = c.buildings[i], v = scene.valuesAt(i);
+    const hash = repoCommitAt(repoOf(i), scene.commit);
+    const [file, hist] = await Promise.all([
+      hash ? fetchFile(b.path, hash).catch(() => null) : Promise.resolve(null),
+      fetchHistory(b.path).catch(() => null),
+    ]);
+    const stop = walkTour.find(t => t.building === i);
+    const ch = scene.churnAt(i);
+    const own = b.own ? c.authors?.[b.own[0]] : undefined;
+    const sub = [b.lang, `${ui.fmt(v.loc)} LOC`, `complexity ${ui.fmt(v.complexity)}`];
+    if (c.churn) sub.push(`${ch.allCommits} commits`);
+    const sections: CardSection[] = [];
+    const imports = (b.imp ?? []).filter(j => scene.exists(j));
+    const by = scene.importersOf(i);
+    const role: string[] = [];
+    if (by.length) role.push(`Used by ${by.length} file${by.length === 1 ? '' : 's'}${by.length >= 5 ? ' — a foundation: learn its names first' : ''}.`);
+    if (imports.length + (b.impd?.length ?? 0)) role.push(`Uses ${imports.length + (b.impd?.length ?? 0)} part${imports.length + (b.impd?.length ?? 0) === 1 ? '' : 's'} of this project.`);
+    if (!by.length && !imports.length) role.push(isTest(b.path) ? 'A test: shows how other code is meant to be used.' : 'Stands alone: no imports to or from this project.');
+    if (c.churn && scene.hotspotScore(i) > 0) {
+      const rank = scene.topHotspots(20).findIndex(h => h.index === i);
+      if (rank >= 0 && rank < 10) role.push(`Hotspot #${rank + 1}: changes often and is complex.`);
+    }
+    sections.push({ title: 'Role', lines: role });
+    if (own) sections.push({ title: 'People', lines: [`${own.name} wrote ${Math.round((b.own![1] / Math.max(1, scene.totalCommits(i))) * 100)}% of its commits · ${b.own![2]} author${b.own![2] === 1 ? '' : 's'}` +
+      (scene.risk(i) === 4 ? ' · owner inactive' : '')] });
+    if (hist?.created) {
+      const k = hist.created;
+      const lines = [`${k.date.slice(0, 10)} · ${k.author} · ${k.hash.slice(0, 7)}`, `“${k.subject}”`];
+      if (k.body) lines.push(k.body.length > 260 ? k.body.slice(0, 259) + '…' : k.body);
+      sections.push({ title: 'Origin story — the commit that created it', lines });
+    }
+    const recent = (hist?.recent ?? []).filter(k => k.hash !== hist?.created?.hash).slice(0, 4);
+    if (recent.length) sections.push({ title: `Recent changes (${hist!.total} in total)`, lines: recent.map(k => `${k.date.slice(0, 10)}  ${k.subject}`) });
+    if (file) {
+      const fl = floorsOf(file).filter(x => x.kind !== 'imports' && x.kind !== 'scope').slice(0, 10);
+      if (fl.length) sections.push({ title: 'Pieces (click to go in at that floor)', items: fl.map(x => {
+        const start = file.pieces[x.piece]?.start ?? 1;
+        return { text: x.name, sub: `${x.kind} · ${x.loc} LOC`, go: () => act.enterAt(i, start, `${x.name} — ${b.path}:${start}`) };
+      }) });
+    }
+    if (imports.length) sections.push({ title: 'Imports', items: imports.slice(0, 8).map(j => ({ text: c.buildings[j].path, go: () => act.visit(j) })) });
+    if (by.length) sections.push({ title: 'Imported by', items: by.slice(0, 8).map(j => ({ text: c.buildings[j].path, go: () => act.visit(j) })) });
+    const cpl = (b.cpl ?? []).filter(([j]) => scene.exists(j)).slice(0, 4);
+    if (cpl.length) sections.push({ title: 'Changes together with', items: cpl.map(([j, shared]) => ({ text: c.buildings[j].path, sub: `${shared} commits`, go: () => act.visit(j) })) });
+    const data: CardData = { title: b.path, subtitle: sub.join(' · '), tag: stop ? KIND_LABEL[stop.kind] : undefined, sections };
+    return { data, origin: !!hist?.created };
+  },
+  tour: () => (walkTour = buildTour(city!, scene)),
+  gameWorld: () => gameWorld(),
+  topDistricts: () => topDistricts().map(d => ({ path: d.path, name: d.name, x: d.x, z: d.z, w: d.w, d: d.d })),
+  mapLabels: () => {
+    const c = city!;
+    const lab = c.repos ? c.districts.filter(d => d.depth === 0) : topDistricts();
+    return lab.map(d => ({ text: (d.name || d.path) + '/', x: d.x + d.w / 2, z: d.z + d.d / 2 }));
+  },
+  searchFiles: q => scene.search(q),
 });
 
-function startWalk() {
+let walkTour: TourStop[] = [];
+
+/** Directories one level below the repository root(s). */
+function topDistricts() {
+  return city!.districts.filter(d => d.depth === 1 && scene.districtMembers(city!.districts.indexOf(d)).length > 0);
+}
+
+function gameWorld(): GameWorld {
+  const c = city!;
+  const topOf = (d: number): string => {
+    let x = d;
+    while (x >= 0 && c.districts[x].depth > 1) x = c.districts[x].parent;
+    return x >= 0 && c.districts[x].depth === 1 ? c.districts[x].path : '';
+  };
+  const files = c.buildings.map((b, i) => scene.exists(i) ? {
+    path: b.path, name: b.name, dir: c.districts[b.district].path, top: topOf(b.district), loc: scene.valuesAt(i).loc,
+    code: scene.isCode(i), test: isTest(b.path), lang: b.lang,
+  } : null);
+  const stops = walkTour.length ? walkTour : buildTour(c, scene);
+  const live = files.map((f, i) => (f ? i : -1)).filter(i => i >= 0);
+  const fanOut = (i: number) => (c.buildings[i].imp?.length ?? 0) + (c.buildings[i].impd?.length ?? 0);
+  const core = live.filter(i => files[i]!.code && !files[i]!.test && scene.importersOf(i).length >= 2)
+    .sort((a, b) => scene.importersOf(b).length - scene.importersOf(a).length || files[b]!.loc - files[a]!.loc);
+  const hubs = live.filter(i => files[i]!.code && !files[i]!.test && fanOut(i) >= 3).sort((a, b) => fanOut(b) - fanOut(a));
+  const key = c.repos ? c.repos.map(r => r.remote || r.name).join('+') : (c.repo.remote || c.repo.path || c.repo.name);
+  return {
+    key, files,
+    importsOf: i => [...(c.buildings[i].imp ?? []).filter(j => scene.exists(j))],
+    importersOf: i => scene.importersOf(i),
+    entries: stops.filter(s => s.kind === 'entry').map(s => s.building),
+    readme: stops.filter(s => s.kind === 'readme').map(s => s.building),
+    core, hubs,
+    hotspots: c.churn ? scene.topHotspots(6).map(h => h.index).filter(i => !files[i]!.test) : [],
+    tops: [...new Set(files.filter(f => f && f.top).map(f => f!.top))],
+  };
+}
+
+function startWalk(at = -1) {
   if (!city) return;
   if (!apiAvailable) { ui.setJobStatus('Walk mode needs the server (codecity serve).', true); return; }
   stopPlayback();
@@ -832,7 +1008,7 @@ function startWalk() {
   if (scene.commit !== city.commits.length - 1) setCommit(city.commits.length - 1);
   if (scene.theme.name !== 'hacker') applyTheme('hacker');
   pathIndex = new Map(city.buildings.map((b, i) => [b.path, i]));
-  walk.start();
+  walk.start(at);
 }
 document.getElementById('walk')!.addEventListener('click', () => startWalk());
 addEventListener('keydown', e => {

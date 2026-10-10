@@ -5,6 +5,12 @@ import { Avatar } from './avatar';
 import { LightTrail } from './trail';
 import { CodeWall, TextPanel, type PanelRow } from './codewall';
 import { FH, Interior, type InteriorFloor, type InteriorSpec } from './interior';
+import type { Floor } from '../scene';
+import type { TourStop } from '../tour';
+import { CityMap, type MapLabel, type MapMarker } from './map';
+import { Game, type GameWorld, type Reward } from './game';
+import { InfoCard, QuestLog, QuizBox, Rewards, SearchBox, StatusBar, TourCard, type CardData, type SearchHit } from './panels';
+import { Props, type Shard, type Terminal } from './props';
 
 /** A definition from the symbol index: [name, kind, path, start, end]. */
 export type Sym = [string, string, string, number, number];
@@ -20,7 +26,19 @@ export interface WalkHost {
   importsOf(i: number): number[];
   symbols(): Promise<Sym[]>;
   onExit(): void;
+  /** Floors (with first source lines) for taking a building apart. */
+  floors(i: number): Promise<Floor[]>;
+  /** Details card; `origin` = it shows the commit that created the file. */
+  card(i: number, act: { visit(j: number): void; enterAt(j: number, line: number, label: string): void }): Promise<{ data: CardData; origin: boolean }>;
+  tour(): TourStop[];
+  gameWorld(): GameWorld;
+  /** Top-level directories (terminal sites) and map labels. */
+  topDistricts(): { path: string; name: string; x: number; z: number; w: number; d: number }[];
+  mapLabels(): MapLabel[];
+  searchFiles(q: string): number[];
 }
+
+const HELP = 'WASD move · Space jump (double-tap: fly) · Shift run / descend · double-tap W sprint · M map · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
 
 const keyDown = new Set<string>();
 
@@ -53,7 +71,7 @@ export class WalkMode {
   private locked = false;
   private drag: { x: number; y: number } | null = null;
   private aim: { kind: 'code'; wall: CodeWall; token: string | null; line: number } | { kind: 'panel'; panel: TextPanel; row: PanelRow | null }
-    | { kind: 'elevator' } | { kind: 'exit' } | { kind: 'building'; i: number } | null = null;
+    | { kind: 'elevator' } | { kind: 'exit' } | { kind: 'building'; i: number } | { kind: 'floor'; k: number } | null = null;
   private busy = false; // teleporting / entering
   private savedCam = { pos: new THREE.Vector3(), target: new THREE.Vector3(), fov: 45, near: 0.1, far: 20000 };
   private tracer: { mesh: THREE.Mesh; head: THREE.Mesh; mat: THREE.ShaderMaterial; curve: THREE.CurvePath<THREE.Vector3>; t: number; dur: number; done: () => void } | null = null;
@@ -62,6 +80,34 @@ export class WalkMode {
   private lastDoorCheck = 0;
   private time = 0;
   private listeners: [EventTarget, string, EventListener][] = [];
+  // flying (Minecraft rules: double-tap Space toggles, Space up, Shift down, landing ends it)
+  private flying = false;
+  private lastSpace = -1;
+  private lastW = -1;
+  private sprint = false;
+  private velH = new THREE.Vector3();
+  // taking a building apart
+  private explodeFloors: Floor[] = [];
+  // map, game, panels
+  private map: CityMap | null = null;
+  private mini!: HTMLCanvasElement;
+  private miniLabel!: HTMLElement;
+  private game: Game | null = null;
+  private status = new StatusBar();
+  private rewards = new Rewards();
+  private card = new InfoCard();
+  private cardFor = -1;
+  private cardSeq = 0;
+  private tourCard = new TourCard();
+  private quizBox = new QuizBox();
+  private log = new QuestLog();
+  private search = new SearchBox(q => this.find(q), () => this.search.hide());
+  private tour: TourStop[] = [];
+  private tourK = -1;
+  private props: Props | null = null;
+  private symList: Sym[] = [];
+  private seeTimer = 0;
+  private mapDirty = false;
 
   constructor(private scene: CityScene, private host: WalkHost) {}
 
@@ -71,9 +117,11 @@ export class WalkMode {
 
   // ------------------------------------------------------------------ lifecycle
 
-  start() {
+  /** Start walking; with `at` >= 0, spawn on the street in front of that building. */
+  start(at = -1) {
     if (this.active || !this.scene.loaded) return;
     this.active = true;
+    (document.activeElement as HTMLElement | null)?.blur?.(); // keys belong to walk mode now
     document.body.classList.add('walking');
     const cam = this.scene.camera;
     this.savedCam = { pos: cam.position.clone(), target: this.scene.controls.target.clone(), fov: cam.fov, near: cam.near, far: cam.far };
@@ -93,6 +141,8 @@ export class WalkMode {
     this.pos.y = this.groundCity(this.pos.x, this.pos.z, 100);
     this.yaw = 0; this.faceCamera();
     this.pitch = -0.08;
+    const spot = at >= 0 ? this.frontSpot(at) : null;
+    if (spot) { this.pos.set(spot.x, spot.y, spot.z); this.yaw = spot.yaw; this.faceCamera(); this.pitch = 0.18; }
     this.camDist = this.u * 3.2;
     this.avatar.group.scale.setScalar(this.u);
     this.scene.cityScene.add(this.avatar.group, this.trail.mesh);
@@ -101,10 +151,13 @@ export class WalkMode {
     cam.near = Math.max(0.02, this.u * 0.05);
     cam.far = this.scene.worldSize * 8;
     cam.updateProjectionMatrix();
+    this.flying = false; this.velH.set(0, 0, 0); this.velY = 0;
+    this.setupGame();
     this.scene.onFrame = dt => this.frame(dt);
     this.bindInput();
-    this.toast('WASD move · mouse look (click to capture) · Shift run · Space jump · V view · E enter/use · wheel scroll code · Q exit', 6);
+    this.toast(HELP + ' · H help', 9);
     void this.host.symbols().then(list => {
+      this.symList = list;
       const m = new Map<string, Sym[]>();
       const add = (k: string, s: Sym) => { const l = m.get(k) ?? []; l.push(s); m.set(k, l); };
       for (const s of list) {
@@ -122,6 +175,11 @@ export class WalkMode {
     document.body.classList.remove('walking');
     if (document.pointerLockElement) document.exitPointerLock();
     this.leaveInterior();
+    if (this.scene.explodedBuilding >= 0) this.scene.collapse(true);
+    this.props?.dispose(); this.props = null;
+    this.map?.closeFull(); this.map = null;
+    this.tourK = -1; this.cardFor = -1;
+    this.card.hide(); this.tourCard.hide(); this.quizBox.hide(); this.log.hide(); this.search.hide();
     this.scene.setStreetLevel(false);
     this.scene.cityScene.remove(this.avatar.group);
     this.trail.mesh.parent?.remove(this.trail.mesh);
@@ -151,7 +209,7 @@ export class WalkMode {
   private bindInput() {
     const canvas = this.scene.renderer.domElement;
     this.on(window, 'keydown', e => this.keydown(e as KeyboardEvent), { capture: true });
-    this.on(window, 'keyup', e => keyDown.delete((e as KeyboardEvent).code));
+    this.on(window, 'keyup', e => { const c = (e as KeyboardEvent).code; keyDown.delete(c); if (c === 'KeyW') this.sprint = false; });
     this.on(document, 'pointerlockchange', () => { this.locked = document.pointerLockElement === canvas; this.hud.classList.toggle('locked', this.locked); });
     this.on(canvas, 'mousedown', e => {
       const m = e as MouseEvent;
@@ -192,15 +250,45 @@ export class WalkMode {
     const t = e.target as HTMLElement;
     if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
     e.stopImmediatePropagation(); // walk mode owns the keyboard
+    if (e.repeat && e.code !== 'Space' && !/^Key[WASD]$|^Arrow|^Shift/.test(e.code)) return;
+    if (this.quizBox.open) {
+      if (/^Digit[1-4]$/.test(e.code)) { const k = Number(e.code.slice(5)) - 1; if (this.quizBox.waiting) this.quizBox.choose(k); else this.quizBox.goTo(k); return; }
+      if (e.code === 'KeyN' && !this.quizBox.waiting) { this.quizBox.next(); return; }
+      if (e.code === 'Escape' || e.code === 'KeyE') { this.quizBox.hide(); return; }
+    }
     if (this.menuItems.length && /^Digit[1-9]$/.test(e.code)) {
       const it = this.menuItems[Number(e.code.slice(5)) - 1];
       if (it) { this.closeMenu(); it.go(); }
       return;
     }
-    if (e.code === 'Escape') { if (this.menuItems.length) this.closeMenu(); return; }
+    if (e.code === 'Escape') {
+      if (this.menuItems.length) this.closeMenu();
+      else if (this.log.open) this.log.hide();
+      else if (this.map?.full) this.toggleMap();
+      else if (this.card.open) this.closeCard();
+      else if (this.tourK >= 0) this.endTour();
+      return;
+    }
     if (e.code === 'KeyQ') { this.stop(); return; }
     if (e.code === 'KeyV') { this.firstPerson = !this.firstPerson; return; }
     if (e.code === 'KeyE') { this.use(); return; }
+    if (e.code === 'KeyM') { this.toggleMap(); return; }
+    if (e.code === 'KeyX') { void this.toggleExplode(); return; }
+    if (e.code === 'KeyI') { this.toggleCard(); return; }
+    if (e.code === 'KeyJ') { if (this.log.open) this.log.hide(); else { this.log.show(this.game!, () => this.resetGame()); this.freeMouse(); } return; }
+    if (e.code === 'KeyT') { if (this.tourK >= 0) this.endTour(); else this.startTour(); return; }
+    if (e.code === 'KeyN') { if (this.tourK >= 0) this.goStop(this.tourK + 1); return; }
+    if (e.code === 'KeyB') { if (this.tourK > 0) this.goStop(this.tourK - 1); return; }
+    if (e.code === 'KeyH') { this.toast(HELP, 10); return; }
+    if (e.code === 'Slash') { e.preventDefault(); this.search.show(); this.freeMouse(); return; }
+    if (e.code === 'Space' && !e.repeat) {
+      // Minecraft: a double tap toggles flight
+      if (this.time - this.lastSpace < 0.3) { this.toggleFly(); this.lastSpace = -1; } else this.lastSpace = this.time;
+    }
+    if (e.code === 'KeyW' && !e.repeat) {
+      if (this.time - this.lastW < 0.3) this.sprint = true;
+      this.lastW = this.time;
+    }
     if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
       if (this.aim?.kind === 'code') this.aim.wall.scrollBy(e.code === 'BracketLeft' ? -10 : 10);
       return;
@@ -232,8 +320,104 @@ export class WalkMode {
     view.className = 'wview';
     view.textContent = 'View (V)';
     view.onclick = () => { this.firstPerson = !this.firstPerson; };
-    this.hud.append(cross, this.prompt, this.menu, this.toastEl, this.fx, exit, view);
+    const miniWrap = document.createElement('div');
+    miniWrap.className = 'wmini';
+    this.mini = document.createElement('canvas');
+    this.mini.width = this.mini.height = Math.round(184 * devicePixelRatio);
+    this.miniLabel = document.createElement('div');
+    this.miniLabel.className = 'wminil';
+    this.miniLabel.textContent = 'M map';
+    miniWrap.append(this.mini, this.miniLabel);
+    miniWrap.onclick = () => this.toggleMap();
+    this.hud.append(cross, this.prompt, this.menu, this.toastEl, this.fx, exit, view, miniWrap, this.status.root, this.rewards.root,
+      this.card.root, this.tourCard.root, this.quizBox.root, this.log.root, this.search.root);
     document.body.append(this.hud);
+  }
+
+  // ------------------------------------------------------------------ game setup
+
+  private setupGame() {
+    const world = this.host.gameWorld();
+    this.game = new Game(world);
+    this.game.onReward(r => this.onReward(r));
+    this.tour = this.host.tour();
+    // props: shards in front of tour stops, gold shards on the roofs of the core modules, a quiz terminal per top directory
+    this.props?.dispose();
+    const pr = new Props(this.u);
+    this.props = pr;
+    const u = this.u;
+    const placed = new Set<number>();
+    for (const st of this.tour) {
+      if (placed.has(st.building)) continue;
+      const spot = this.frontSpot(st.building);
+      if (!spot) continue;
+      placed.add(st.building);
+      // a few steps along the facade from where the tour drops you, so it is a pickup, not a freebie
+      const along = Math.abs(Math.sin(spot.yaw)) < 0.5 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
+      let at = new THREE.Vector3(spot.x, spot.y, spot.z);
+      for (const d of [u * 3, -u * 3, u * 2, -u * 2]) {
+        const c = at.clone().addScaledVector(along, d);
+        if (!this.blockedCity(c.x, c.z, u * 0.38, u * 0.3)) { at = c; break; }
+      }
+      pr.addShard(st.building, new THREE.Vector3(at.x, this.groundCity(at.x, at.z, 1e9) + u * 0.9, at.z), false, u * 9);
+    }
+    for (const i of world.core.slice(0, 3)) {
+      if (!this.scene.exists(i)) continue;
+      const a = this.scene.buildingAnchor(i, 0);
+      pr.addShard(i, a.add(new THREE.Vector3(0, u * 1.1, 0)), true, u * 5);
+    }
+    pr.shards.forEach(sh => { if (this.game!.hasShard(sh.building)) { sh.taken = true; sh.group.visible = false; } });
+    this.game.shardTotal = pr.shards.length;
+    // terminals: on each top directory's street corner (the district padding strip is free of buildings)
+    const sites = this.host.topDistricts().slice(0, 14);
+    for (const d of sites) {
+      const pad = Math.min(3, 0.05 * Math.min(d.w, d.d));
+      if (pad < u * 0.5) continue;
+      const x = d.x + pad * 0.5, z = d.z + d.d - pad * 0.5;
+      if (this.blockedCity(x, z, 0, u * 0.25)) continue;
+      pr.addTerminal(d.path, d.name + '/', new THREE.Vector3(x, this.groundCity(x, z, 1e9), z));
+    }
+    // and one at the spawn point, about the whole city
+    const qx = this.pos.x + u * 2.2, qz = this.pos.z - u * 1.5;
+    if (!this.blockedCity(qx, qz, 0, u * 0.3)) pr.addTerminal(null, 'QUIZ', new THREE.Vector3(qx, this.groundCity(qx, qz, 1e9), qz));
+    this.scene.cityScene.add(pr.group);
+    // map
+    const o = this.obstacles!;
+    this.map = new CityMap(o.boxes.map(b => ({ i: b.i, x0: b.x0, x1: b.x1, z0: b.z0, z1: b.z1 })), o.plates, this.host.mapLabels(), {
+      seen: i => this.game!.isSeen(i),
+      studied: i => this.game!.isStudied(i),
+      markers: () => this.markers(),
+      player: () => {
+        if (this.where === 'inside') {
+          const b = this.obstacles?.boxes.find(x => x.i === this.inside);
+          if (b) return { x: (b.x0 + b.x1) / 2, z: (b.z0 + b.z1) / 2, heading: this.avatar.group.rotation.y, yaw: this.yaw };
+        }
+        return { x: this.pos.x, z: this.pos.z, heading: this.avatar.group.rotation.y, yaw: this.yaw };
+      },
+    }, [{ x: this.pos.x, z: this.pos.z }]);
+    this.status.update(this.game);
+  }
+
+  private markers(): MapMarker[] {
+    const out: MapMarker[] = [];
+    for (const s of this.props?.shards ?? []) if (!s.taken) out.push({ x: s.pos.x, z: s.pos.z, kind: s.gold ? 'gold' : 'shard' });
+    for (const t of this.props?.terminals ?? []) out.push({ x: t.pos.x, z: t.pos.z, kind: 'terminal' });
+    const center = (i: number) => { const b = this.obstacles?.boxes.find(x => x.i === i); return b ? { x: (b.x0 + b.x1) / 2, z: (b.z0 + b.z1) / 2 } : null; };
+    const q = this.game?.activeQuest();
+    for (const i of q?.pins?.() ?? []) { if (this.game!.isStudied(i) && q!.id !== 'entry' && q!.id !== 'wiring') continue; const c = center(i); if (c) out.push({ ...c, kind: 'quest' }); }
+    if (this.tourK >= 0) this.tour.forEach((st, k) => { const c = center(st.building); if (c) out.push({ ...c, kind: 'tour', label: String(k + 1) }); });
+    return out;
+  }
+
+  private onReward(r: Reward) {
+    switch (r.kind) {
+      case 'xp': this.rewards.xp(r.amount, r.why); break;
+      case 'quest': this.rewards.quest(r.quest); break;
+      case 'achievement': this.rewards.achievement(r.a); break;
+      case 'rank': this.rewards.rank(r.rank); break;
+    }
+    if (this.game) this.status.update(this.game);
+    this.mapDirty = true;
   }
 
   private toastTimer = 0;
@@ -283,6 +467,7 @@ export class WalkMode {
     if (a.kind === 'code' && a.token) this.offerTeleports(a.token, a.line);
     else if (a.kind === 'panel' && a.row?.action) a.row.action();
     else if (a.kind === 'building') this.enter(a.i);
+    else if (a.kind === 'floor') this.enterFloor(a.k);
     else if (a.kind === 'elevator') this.use();
     else if (a.kind === 'exit') this.exitBuilding();
   }
@@ -291,7 +476,11 @@ export class WalkMode {
   private use() {
     if (this.busy) return;
     if (this.where === 'city') {
-      const i = this.aim?.kind === 'building' ? this.aim.i : this.nearestFacade();
+      const t = this.nearTerminal();
+      if (t) { this.openQuiz(t); return; }
+      if (this.aim?.kind === 'floor') { this.enterFloor(this.aim.k); return; }
+      const landed = this.landed.i >= 0 && Math.hypot(this.pos.x - this.landed.x, this.pos.z - this.landed.z) < this.u * 2 ? this.landed.i : -1;
+      const i = this.aim?.kind === 'building' ? this.aim.i : landed >= 0 ? landed : this.nearestFacade();
       if (i >= 0) this.enter(i);
       else this.toast('Walk up to a building to enter it');
       return;
@@ -328,7 +517,7 @@ export class WalkMode {
     this.openMenu(`TRACE  ${token}`, hits.slice(0, 9).map(s => ({
       label: `${s[0]}  (${s[1]})`,
       sub: `${s[2]}:${s[3]}`,
-      go: () => this.teleport({ building: this.host.buildingByPath(s[2]), line: s[3], label: `${s[0]} — ${s[2]}:${s[3]}` }),
+      go: () => { this.game?.trace(); this.teleport({ building: this.host.buildingByPath(s[2]), line: s[3], label: `${s[0]} — ${s[2]}:${s[3]}` }); },
     })));
     void line;
   }
@@ -373,8 +562,12 @@ export class WalkMode {
       this.velY = 0;
       this.interior.platformY = 0;
       this.interior.ensureWalls(L);
+      this.snapCam = true;
       if (dest?.line && L > 0) this.interior.codeWall(L)?.highlight(dest.line, dest.line);
       this.avatar.materialize();
+      this.flying = false;
+      this.game?.study(i, 'entered', 10);
+      if (this.cardFor >= 0 && this.cardFor !== i) this.closeCard();
       this.toast(L === 0 ? `${spec.path} — ${spec.floors.length} floors · stairs on the right, elevator on the left` : dest?.label ?? '', 4);
     } catch (e) {
       this.toast(`Cannot enter: ${(e as Error).message}`);
@@ -414,13 +607,18 @@ export class WalkMode {
   }
 
   /** Building whose facade the player is touching / facing closely, or -1. */
-  private nearestFacade(): number {
-    const r = this.u * 0.9;
+  private nearestFacade(reach = 0.9): number {
+    const r = this.u * reach;
+    const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw); // camera forward
     let best = -1, bestD = Infinity;
     for (const b of this.obstacles?.boxes ?? []) {
       const dx = Math.max(b.x0 - this.pos.x, 0, this.pos.x - b.x1), dz = Math.max(b.z0 - this.pos.z, 0, this.pos.z - b.z1);
       const d = Math.hypot(dx, dz);
-      if (d < r && d < bestD && b.top - this.pos.y > this.u * 0.6) { best = b.i; bestD = d; }
+      if (d >= r || b.top - this.pos.y <= this.u * 0.6) continue;
+      // prefer what is in front of you over what is behind
+      const cx = (b.x0 + b.x1) / 2 - this.pos.x, cz = (b.z0 + b.z1) / 2 - this.pos.z;
+      const score = d - ((cx * fx + cz * fz) > 0 ? this.u * 0.8 : 0);
+      if (score < bestD) { best = b.i; bestD = score; }
     }
     return best;
   }
@@ -538,12 +736,231 @@ export class WalkMode {
     window.setTimeout(() => this.fx.classList.remove('on'), seconds * 1000);
   }
 
+  // ------------------------------------------------------------------ explode, cards, map, tour, quiz, search
+
+  /** Release the mouse so panels can be clicked. */
+  private freeMouse() { if (document.pointerLockElement) document.exitPointerLock(); }
+
+  /** The building you are looking at, standing in front of, or inside. */
+  private focusBuilding(): number {
+    if (this.where === 'inside') return this.inside;
+    if (this.aim?.kind === 'building') return this.aim.i;
+    if (this.aim?.kind === 'floor') return this.scene.explodedBuilding;
+    if (this.landed.i >= 0 && Math.hypot(this.pos.x - this.landed.x, this.pos.z - this.landed.z) < this.u * 2) return this.landed.i;
+    const near = this.nearestFacade(2);
+    if (near >= 0) return near;
+    return this.scene.explodingBuilding;
+  }
+
+  /** X: take the building apart in place — one floating floor per piece of code — or put it back. */
+  private async toggleExplode() {
+    if (this.busy) return;
+    if (this.where === 'inside') { this.toast('Step outside to take a building apart'); return; }
+    const i = this.focusBuilding();
+    if (i < 0) { this.toast('Look at a building (or walk up to one) and press X'); return; }
+    if (this.scene.explodingBuilding === i) { this.scene.collapse(); this.explodeFloors = []; return; }
+    try {
+      const floors = await this.host.floors(i);
+      if (!floors.length) { this.toast('Nothing to take apart here'); return; }
+      this.explodeFloors = floors;
+      this.scene.explode(i, floors, false);
+      this.game?.study(i, 'exploded', 8);
+      this.toast(`${this.host.buildingName(i)} — ${floors.length} pieces. Aim at a floor and click to go in there · fly up between them (double-tap Space)`, 5);
+    } catch (e) { this.toast(`Cannot take apart: ${(e as Error).message}`); }
+  }
+
+  private enterFloor(k: number) {
+    const i = this.scene.explodedBuilding, f = this.explodeFloors[k];
+    if (i < 0 || !f) return;
+    this.teleport({ building: i, line: f.start, label: `${f.name} — ${this.host.buildingName(i)}${f.start ? `:${f.start}` : ''}` });
+  }
+
+  private toggleCard() {
+    if (this.card.open) { this.closeCard(); return; }
+    const i = this.focusBuilding();
+    if (i < 0) { this.toast('Look at a building (or walk up to one) and press I'); return; }
+    void this.openCard(i);
+  }
+
+  private closeCard() { this.card.hide(); this.cardFor = -1; }
+
+  /** Show the details card for building i; `why` adds a "why it matters" section on top. */
+  private async openCard(i: number, why?: string[]) {
+    const seq = ++this.cardSeq;
+    this.cardFor = i;
+    this.card.show({ title: this.host.buildingName(i), subtitle: 'loading…', sections: [] }, () => this.closeCard());
+    try {
+      const { data, origin } = await this.host.card(i, {
+        visit: j => { this.closeCard(); this.travel(j, () => void this.openCard(j)); },
+        enterAt: (j, line, label) => { this.closeCard(); this.teleport({ building: j, line, label }); },
+      });
+      if (seq !== this.cardSeq) return;
+      if (why?.length) data.sections.unshift({ title: why[0].toUpperCase(), lines: why.slice(1), tone: 'why' });
+      this.card.show(data, () => this.closeCard());
+      this.game?.study(i, 'card', 4);
+      if (origin) this.game?.readOrigin(i);
+    } catch (e) {
+      if (seq === this.cardSeq) this.card.show({ title: this.host.buildingName(i), subtitle: (e as Error).message, sections: [] }, () => this.closeCard());
+    }
+  }
+
+  private toggleMap() {
+    if (!this.map) return;
+    if (this.map.full) { this.map.closeFull(); return; }
+    this.freeMouse();
+    this.map.openFull(this.hud, {
+      title: () => {
+        const e = this.game!.explored();
+        return `CITY MAP · ${this.game!.rank.name} · explored ${Math.round(e.loc * 100)}% (${e.files}/${e.total} files) · click a building to travel there`;
+      },
+      legend: '<span class="lg st"></span>studied <span class="lg se"></span>seen <span class="lg fo"></span>fog ' +
+        '<span class="lg sh"></span>shard <span class="lg go"></span>gold shard <span class="lg te">?</span>quiz terminal <span class="lg qu"></span>quest target',
+      name: i => this.host.buildingName(i),
+      pick: i => { this.map!.closeFull(); this.game?.mapTravel(); this.travel(i, () => void this.openCard(i)); },
+      close: () => this.map!.closeFull(),
+    });
+  }
+
+  /** A free street spot in front of building i (south side first) and the yaw that faces the building. */
+  private frontSpot(i: number): { x: number; y: number; z: number; yaw: number } | null {
+    const b = this.obstacles?.boxes.find(x => x.i === i);
+    if (!b) return null;
+    const off = this.u * 1.3, cx = (b.x0 + b.x1) / 2, cz = (b.z0 + b.z1) / 2;
+    const sides = [
+      { x: cx, z: b.z1 + off, yaw: 0 }, { x: cx, z: b.z0 - off, yaw: Math.PI },
+      { x: b.x1 + off, z: cz, yaw: Math.PI / 2 }, { x: b.x0 - off, z: cz, yaw: -Math.PI / 2 },
+    ];
+    const saved = this.pos.y;
+    this.pos.y = 0;
+    try {
+      for (const sd of sides) {
+        if (!this.blockedCity(sd.x, sd.z, this.u * 0.38)) return { ...sd, y: this.groundCity(sd.x, sd.z, this.u * 0.38) };
+      }
+    } finally { this.pos.y = saved; }
+    return { ...sides[0], y: this.scene.roofOf(i) }; // boxed in: stand on the roof
+  }
+
+  /** Ride a tracer to the street in front of building i (leaving any interior), then run `then`. */
+  travel(i: number, then?: () => void) {
+    if (this.busy || i < 0) return;
+    const spot = this.frontSpot(i);
+    if (!spot) return;
+    this.closeMenu();
+    const from = this.where === 'inside' ? this.inside : -1;
+    if (this.where === 'inside') {
+      this.leaveInterior();
+      this.where = 'city';
+      this.inside = -1;
+      this.obstacles = this.scene.walkData();
+      this.scene.cityScene.add(this.avatar.group, this.trail.mesh);
+      this.trail.clear();
+      this.avatar.group.scale.setScalar(this.u);
+      const cam = this.scene.camera;
+      cam.near = Math.max(0.02, this.u * 0.05); cam.far = this.scene.worldSize * 8; cam.updateProjectionMatrix();
+      this.camDist = this.u * 3.2;
+    }
+    this.busy = true;
+    this.flying = false;
+    this.glitch(2.2, `ROUTING → ${this.host.buildingName(i)}`);
+    const start = from >= 0 ? this.scene.buildingAnchor(from, 0) : this.pos.clone().add(new THREE.Vector3(0, this.u * 0.6, 0));
+    const end = new THREE.Vector3(spot.x, spot.y + this.u * 0.6, spot.z);
+    const pts = busRoute(start, end, Math.max(start.y, end.y, this.scene.skyline()) + this.scene.worldSize * 0.05, i);
+    const path = new THREE.CurvePath<THREE.Vector3>();
+    for (let k = 0; k < pts.length - 1; k++) if (pts[k].distanceToSquared(pts[k + 1]) > 1e-8) path.add(new THREE.LineCurve3(pts[k], pts[k + 1]));
+    const len = path.getLength();
+    this.startTracer(this.scene.cityScene, path, Math.max(0.08, this.scene.worldSize * 0.0025), Math.min(3, 1.2 + len / (this.scene.worldSize * 1.2)), () => {
+      this.pos.set(spot.x, spot.y, spot.z);
+      this.velY = 0; this.grounded = true;
+      this.yaw = spot.yaw; this.faceCamera();
+      this.pitch = 0.18; // look up at the building
+      this.snapCam = true;
+      this.landed = { i, x: spot.x, z: spot.z };
+      this.avatar.setVisible(true);
+      this.avatar.materialize();
+      this.busy = false;
+      then?.();
+    });
+  }
+
+  private startTour() {
+    if (!this.tour.length) { this.toast('No tour for this city (it needs entry points, imports or docs)'); return; }
+    this.goStop(0);
+  }
+
+  private endTour() {
+    this.tourK = -1;
+    this.tourCard.hide();
+    this.mapDirty = true;
+  }
+
+  private goStop(k: number) {
+    if (k >= this.tour.length) {
+      this.game?.tourDone();
+      this.endTour();
+      this.toast('Tour complete! The map (M) and quests (J) take it from here.', 5);
+      return;
+    }
+    if (k < 0 || this.busy) return;
+    this.tourK = k;
+    const st = this.tour[k];
+    const hint = `N next · B back · E go inside · X take apart · T end tour`;
+    this.tourCard.show(k, this.tour.length, st.title, this.host.buildingName(st.building), st.why, hint);
+    this.travel(st.building, () => void this.openCard(st.building, [st.title, ...st.why]));
+  }
+
+  private openQuiz(t: Terminal) {
+    if (!this.game) return;
+    const byPath = new Map<string, number>();
+    this.game.w.files.forEach((f, i) => { if (f) byPath.set(f.path, i); });
+    const q = this.game.question(this.symList.length ? this.symList : null, byPath, t.top) ?? this.game.question(this.symList.length ? this.symList : null, byPath, null);
+    if (!q) { this.toast('This terminal has no questions yet (needs imports or definitions)'); return; }
+    this.freeMouse();
+    this.quizBox.show(`QUIZ TERMINAL · ${t.label}`, q, {
+      answer: ok => { this.game!.quiz(ok); this.glitch(ok ? 0.3 : 0.15); },
+      go: k => { this.quizBox.hide(); const o = q.options[k]; if (o.line) this.teleport({ building: o.building, line: o.line, label: `${o.label}:${o.line}` }); else this.travel(o.building, () => void this.openCard(o.building)); },
+      next: () => this.openQuiz(t),
+      close: () => this.quizBox.hide(),
+    });
+  }
+
+  /** Search: files by path, then definitions by name. */
+  private find(q: string): SearchHit[] {
+    const out: SearchHit[] = [];
+    if (!q) {
+      return this.tour.slice(0, 8).map((st, k) => ({ label: this.host.buildingName(st.building), sub: `tour ${k + 1} · ${st.title}`,
+        go: () => this.travel(st.building, () => void this.openCard(st.building, [st.title, ...st.why])) }));
+    }
+    for (const i of this.host.searchFiles(q).slice(0, 6)) {
+      out.push({ label: this.host.buildingName(i), sub: 'file', go: () => this.travel(i, () => void this.openCard(i)) });
+    }
+    const lq = q.toLowerCase();
+    const syms = this.symList.filter(s => s[0].toLowerCase().includes(lq))
+      .sort((a, b) => {
+        const ra = a[0].toLowerCase() === lq ? 0 : a[0].toLowerCase().startsWith(lq) ? 1 : 2, rb = b[0].toLowerCase() === lq ? 0 : b[0].toLowerCase().startsWith(lq) ? 1 : 2;
+        return ra - rb || a[0].length - b[0].length || a[2].localeCompare(b[2]);
+      }).slice(0, 10);
+    for (const s of syms) {
+      out.push({ label: `${s[0]}  (${s[1]})`, sub: `${s[2]}:${s[3]}`,
+        go: () => this.teleport({ building: this.host.buildingByPath(s[2]), line: s[3], label: `${s[0]} — ${s[2]}:${s[3]}` }) });
+    }
+    return out;
+  }
+
+  private resetGame() {
+    this.game?.reset();
+    this.log.hide();
+    this.setupGame();
+    this.mapDirty = true;
+    this.toast('Progress reset', 2);
+  }
+
   // ------------------------------------------------------------------ per-frame
 
   private frame(dt: number) {
     this.time += dt;
     if (this.toastTimer > 0) { this.toastTimer -= dt; if (this.toastTimer <= 0) this.toastEl.classList.remove('on'); }
     const cam = this.scene.camera;
+    this.hudFrame(dt);
 
     if (this.tracer) {
       const tr = this.tracer;
@@ -589,14 +1006,68 @@ export class WalkMode {
     d = Math.atan2(Math.sin(d), Math.cos(d));
     this.avatar.group.rotation.y += d * Math.min(1, dt * (this.idle > 1.6 ? 4 : 12));
     this.avatar.setVisible(!this.firstPerson && !this.busy);
-    this.avatar.update(dt, speed, !this.grounded);
-    const running = keyDown.has('ShiftLeft') || keyDown.has('ShiftRight');
-    this.trail.update(dt, this.pos, this.h * 0.32, running && this.lastSpeed > this.h * 0.5);
+    this.avatar.update(dt, speed, !this.grounded && !this.flying, this.flying);
+    const running = keyDown.has('ShiftLeft') || keyDown.has('ShiftRight') || this.sprint;
+    this.trail.update(dt, this.pos, this.h * 0.32, (running || this.flying) && this.lastSpeed > this.h * 0.5);
     if (this.where === 'city' && this.time - this.lastDoorCheck > 0.3) {
       this.lastDoorCheck = this.time;
+      const t = this.nearTerminal();
       const near = this.nearestFacade();
-      if (near >= 0 && this.aim?.kind !== 'building') this.showPrompt(`[E] enter ${this.host.buildingName(near)}`);
+      if (t && !this.quizBox.open) this.showPrompt(`[E] quiz terminal · ${t.label}`);
+      else if (near >= 0 && this.aim?.kind !== 'building' && this.aim?.kind !== 'floor') this.showPrompt(`[E] enter ${this.host.buildingName(near)} · [X] take apart · [I] info`);
     }
+    if (this.where === 'city') this.cityChecks(dt);
+  }
+
+  /** Minimap, full map and prop animation (also during tracer rides). */
+  private hudFrame(dt: number) {
+    this.props?.update(dt, this.time, this.yaw);
+    if (!this.map) return;
+    if (this.mapDirty && this.time - this.lastMapRender > 0.5) { this.map.invalidate(); this.mapDirty = false; this.lastMapRender = this.time; }
+    if (this.time - this.lastMini > 0.066) { this.map.drawMini(this.mini, Math.max(this.u * 28, (this.flying ? this.pos.y : 0) * 1.2 + this.u * 20)); this.lastMini = this.time; }
+    if (this.map.full) this.map.drawFull(this.time);
+  }
+  private lastMapRender = 0;
+  private lastMini = 0;
+
+  /** Outdoors: reveal what is near, pick up shards, put taken-apart buildings back when you leave them. */
+  private cityChecks(dt: number) {
+    this.seeTimer -= dt;
+    if (this.seeTimer <= 0 && this.game && this.obstacles) {
+      this.seeTimer = 0.25;
+      const r = this.u * 22 + Math.max(0, this.pos.y) * 1.5; // higher up, you see further
+      for (const b of this.obstacles.boxes) {
+        const dx = Math.max(b.x0 - this.pos.x, 0, this.pos.x - b.x1), dz = Math.max(b.z0 - this.pos.z, 0, this.pos.z - b.z1);
+        if (dx * dx + dz * dz < r * r && !this.game.isSeen(b.i)) { this.game.see(b.i); this.mapDirty = true; }
+      }
+    }
+    const body = this.pos.clone().add(new THREE.Vector3(0, this.h * 0.5, 0));
+    for (const sh of this.props?.shards ?? []) {
+      if (sh.taken || sh.pos.distanceTo(body) > this.u * 1.3) continue;
+      this.collect(sh);
+    }
+    const ex = this.scene.explodingBuilding;
+    if (ex >= 0) {
+      const b = this.obstacles?.boxes.find(x => x.i === ex);
+      if (b) {
+        const d = Math.hypot(Math.max(b.x0 - this.pos.x, 0, this.pos.x - b.x1), Math.max(b.z0 - this.pos.z, 0, this.pos.z - b.z1));
+        if (d > this.u * 40) this.scene.collapse();
+      }
+    }
+  }
+
+  private collect(sh: Shard) {
+    this.props!.take(sh);
+    if (!this.game!.shard(sh.building)) return;
+    this.glitch(0.4);
+    const stop = this.tour.find(t => t.building === sh.building);
+    this.toast(`${sh.gold ? 'GOLD ' : ''}DATA SHARD · ${this.host.buildingName(sh.building)}`, 3);
+    void this.openCard(sh.building, stop ? [stop.title, ...stop.why] : undefined);
+  }
+
+  private nearTerminal(): Terminal | null {
+    for (const t of this.props?.terminals ?? []) if (Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) < this.u * 1.6 && Math.abs(t.pos.y - this.pos.y) < this.u) return t;
+    return null;
   }
 
   private lastSpeed = 0;
@@ -611,17 +1082,30 @@ export class WalkMode {
   }
 
   private move(dt: number) {
-    const run = keyDown.has('ShiftLeft') || keyDown.has('ShiftRight');
-    const speed = this.h * (run ? (this.where === 'city' ? 7 : 5.5) : 2.4);
-    const f = (keyDown.has('KeyW') || keyDown.has('ArrowUp') ? 1 : 0) - (keyDown.has('KeyS') || keyDown.has('ArrowDown') ? 1 : 0);
-    const s = (keyDown.has('KeyD') || keyDown.has('ArrowRight') ? 1 : 0) - (keyDown.has('KeyA') || keyDown.has('ArrowLeft') ? 1 : 0);
+    const shift = keyDown.has('ShiftLeft') || keyDown.has('ShiftRight');
+    const typing = this.search.open;
+    const key = (c: string) => !typing && keyDown.has(c);
+    const f = (key('KeyW') || key('ArrowUp') ? 1 : 0) - (key('KeyS') || key('ArrowDown') ? 1 : 0);
+    const sd = (key('KeyD') || key('ArrowRight') ? 1 : 0) - (key('KeyA') || key('ArrowLeft') ? 1 : 0);
     const fwd = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
-    const v = fwd.multiplyScalar(f).add(right.multiplyScalar(s));
-    if (v.lengthSq() > 0) {
+    const dir = fwd.multiplyScalar(f).add(right.multiplyScalar(sd));
+    if (dir.lengthSq() > 0) {
       // W/A/S/D move relative to the camera; the body turns to walk that way (S walks towards the camera)
-      this.heading = Math.atan2(v.x, v.z);
-      v.normalize().multiplyScalar(speed * dt);
+      this.heading = Math.atan2(dir.x, dir.z);
+      dir.normalize();
+    } else this.sprint = false;
+    let v: THREE.Vector3;
+    if (this.flying) {
+      // creative-mode flight: faster than walking, with a little glide (inertia)
+      const speed = this.h * (this.sprint ? 14 : 6.5);
+      this.velH.lerp(dir.clone().multiplyScalar(speed), Math.min(1, dt * 5));
+      v = this.velH.clone().multiplyScalar(dt);
+    } else {
+      const run = shift || this.sprint;
+      const speed = this.h * (run ? (this.where === 'city' ? 7 : 5.5) : 2.4);
+      v = dir.multiplyScalar(speed * dt);
+      this.velH.set(0, 0, 0);
     }
     this.lastSpeed = v.length() / Math.max(dt, 1e-4);
 
@@ -637,38 +1121,78 @@ export class WalkMode {
       this.pos.x = nx; this.pos.z = nz;
       return true;
     };
-    if (!tryMove(this.pos.x + v.x, this.pos.z)) { /* slide along z */ }
-    if (!tryMove(this.pos.x, this.pos.z + v.z)) { /* slide along x */ }
+    if (!tryMove(this.pos.x + v.x, this.pos.z)) { if (this.flying) this.velH.x = 0; }
+    if (!tryMove(this.pos.x, this.pos.z + v.z)) { if (this.flying) this.velH.z = 0; }
     if (this.where === 'inside' && this.interior!.clamp(this.pos, 0.35)) { this.exitBuilding(); return; }
 
-    // vertical: gravity, stepping, jumping, elevator
-    if (keyDown.has('Space') && this.grounded) { this.velY = this.h * 3.6; this.grounded = false; }
+    // vertical: flight, or gravity / stepping / jumping / elevator
     const g = this.where === 'inside' ? this.interior!.ground(this.pos.x, this.pos.z, this.pos.y, step) : this.groundCity(this.pos.x, this.pos.z, step);
-    this.velY -= this.h * 11 * dt;
-    let ny = this.pos.y + this.velY * dt;
-    const onElevator = this.where === 'inside' && this.interior!.inShaft(this.pos.x, this.pos.z) && Math.abs(this.pos.y - this.interior!.platformY) < 1.2;
-    if (onElevator && this.velY <= 0) { ny = this.interior!.platformY; this.velY = 0; this.grounded = true; }
-    else if (ny <= g) { ny = g; this.velY = 0; this.grounded = true; }
-    else this.grounded = ny - g < 0.02;
+    let ny: number;
+    if (this.flying) {
+      const up = (key('Space') ? 1 : 0) - (shift && !typing ? 1 : 0);
+      this.velY += (up * this.h * 5.5 - this.velY) * Math.min(1, dt * 8);
+      ny = this.pos.y + this.velY * dt;
+      const ceiling = this.scene.skyline() * 2 + this.scene.worldSize * 0.6;
+      if (ny > ceiling) { ny = ceiling; this.velY = 0; }
+      if (ny <= g) { // touching down ends the flight
+        ny = g; this.velY = 0;
+        if (up <= 0) { this.flying = false; this.grounded = true; this.toast('Landed', 1.2); }
+      }
+      if (ny > this.scene.skyline() + this.h) this.game?.flewHigh();
+    } else {
+      if (key('Space') && this.grounded) { this.velY = this.h * 3.6; this.grounded = false; }
+      this.velY -= this.h * 11 * dt;
+      ny = this.pos.y + this.velY * dt;
+      const onElevator = this.where === 'inside' && this.interior!.inShaft(this.pos.x, this.pos.z) && Math.abs(this.pos.y - this.interior!.platformY) < 1.2;
+      if (onElevator && this.velY <= 0) { ny = this.interior!.platformY; this.velY = 0; this.grounded = true; }
+      else if (ny <= g) { ny = g; this.velY = 0; this.grounded = true; }
+      else this.grounded = ny - g < 0.02;
+    }
+    // heads: floating floors of a taken-apart building are ceilings too
+    if (this.where === 'city' && this.velY > 0) {
+      const head = this.h * 0.9, r = this.u * 0.22;
+      for (const b of this.scene.explodedBoxes()) {
+        if (this.pos.x + r > b.x0 && this.pos.x - r < b.x1 && this.pos.z + r > b.z0 && this.pos.z - r < b.z1 &&
+          b.y0 >= this.pos.y + head - 1e-3 && ny + head > b.y0) { ny = b.y0 - head; this.velY = 0; }
+      }
+    }
     if (!isFinite(ny) || ny < -50) { ny = 0; this.velY = 0; } // safety net
     this.pos.y = ny;
     if (this.where === 'inside') this.interior!.ensureWalls(this.interior!.levelAt(this.pos.y));
   }
 
-  /** Outdoor ground: district plates and low building tops you can step onto. */
-  private groundCity(x: number, z: number, step: number): number {
+  private toggleFly() {
+    if (this.busy) return;
+    if (this.where === 'inside') { this.toast('No flying indoors — take the stairs or the elevator'); return; }
+    this.flying = !this.flying;
+    this.velY = this.flying ? this.h * 2.5 : 0; // a little hop into the air
+    this.grounded = false;
+    this.velH.set(0, 0, 0);
+    if (this.flying) this.toast('FLYING · Space up · Shift down · double-tap W fast · double-tap Space to drop', 4);
+  }
+
+  /** Building boxes plus the floors of a taken-apart building (which replaces its own box). */
+  private *cityBoxes(): Generator<{ x0: number; x1: number; z0: number; z1: number; top: number; y0?: number }> {
+    const ex = this.scene.explodedBuilding;
+    for (const b of this.obstacles?.boxes ?? []) if (b.i !== ex) yield b;
+    if (ex >= 0) yield* this.scene.explodedBoxes();
+  }
+
+  /** Outdoor ground: district plates and roofs (or floating floors) below your feet that you can step onto. */
+  private groundCity(x: number, z: number, step: number, from = this.pos.y): number {
     let g = 0;
     for (const p of this.obstacles?.plates ?? []) if (x >= p.x0 && x <= p.x1 && z >= p.z0 && z <= p.z1) g = Math.max(g, p.top);
-    for (const b of this.obstacles?.boxes ?? []) {
-      if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1 && b.top <= this.pos.y + step) g = Math.max(g, b.top);
+    for (const b of this.cityBoxes()) {
+      if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1 && b.top <= from + step) g = Math.max(g, b.top);
     }
     return g;
   }
 
-  private blockedCity(x: number, z: number, step: number): boolean {
-    const r = this.u * 0.22;
-    for (const b of this.obstacles?.boxes ?? []) {
-      if (x + r > b.x0 && x - r < b.x1 && z + r > b.z0 && z - r < b.z1 && b.top > this.pos.y + step) return true;
+  private blockedCity(x: number, z: number, step: number, radius?: number): boolean {
+    const r = radius ?? this.u * 0.22;
+    const head = this.pos.y + this.h * 0.9;
+    for (const b of this.cityBoxes()) {
+      if (x + r > b.x0 && x - r < b.x1 && z + r > b.z0 && z - r < b.z1 && b.top > this.pos.y + step && (b.y0 ?? 0) < head) return true;
     }
     return false;
   }
@@ -699,9 +1223,13 @@ export class WalkMode {
       want.z = Math.max(-7.7, Math.min(7.7, want.z));
       want.y = Math.max(L * FH + 0.3, Math.min(L * FH + FH - 0.4, want.y));
     } else {
-      want.y = Math.max(want.y, this.groundCity(want.x, want.z, 1e9) + this.h * 0.2);
+      // keep the camera above whatever surface is just below it (not the floors stacked above it)
+      const floor = this.groundCity(want.x, want.z, this.h * 0.5, want.y);
+      if (this.scene.explodedBuilding < 0) want.y = Math.max(want.y, this.groundCity(want.x, want.z, 1e9) + this.h * 0.2);
+      else want.y = Math.max(want.y, floor + this.h * 0.2);
     }
-    cam.position.lerp(want, Math.min(1, dt * 12));
+    if (this.snapCam) { cam.position.copy(want); this.snapCam = false; } // just arrived: no swoop from the ride camera
+    else cam.position.lerp(want, Math.min(1, dt * 12));
     cam.lookAt(pivot.clone().addScaledVector(look, this.h * 2));
   }
 
@@ -726,10 +1254,13 @@ export class WalkMode {
         else if (o.userData.exit) aim = { kind: 'exit' };
       }
     } else {
-      const i = this.scene.rayBuilding(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 30);
-      if (i >= 0) aim = { kind: 'building', i };
+      const k = this.scene.rayFloor(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 60);
+      const i = k >= 0 ? -1 : this.scene.rayBuilding(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 30);
+      if (k >= 0) aim = { kind: 'floor', k };
+      else if (i >= 0) aim = { kind: 'building', i };
     }
     if (this.aim?.kind === 'panel' && (aim?.kind !== 'panel' || aim.panel !== this.aim.panel)) this.aim.panel.clearHover();
+    if (this.aim?.kind === 'floor' && aim?.kind !== 'floor') { this.scene.highlightFloor(-1); this.lastFloorHover = -1; }
     if (this.aim?.kind === 'code' && (aim?.kind !== 'code' || aim.wall !== this.aim.wall)) this.aim.wall.setHover(null);
     this.aim = aim;
     switch (aim?.kind) {
@@ -737,10 +1268,21 @@ export class WalkMode {
       case 'panel': this.showPrompt(aim.row?.action ? `click: ${aim.row.text}` : ''); break;
       case 'elevator': this.showPrompt(this.interior!.inShaft(this.pos.x, this.pos.z) ? '[E] choose floor' : '[E] call elevator'); break;
       case 'exit': this.showPrompt('click / walk through: back to the city'); break;
-      case 'building': this.showPrompt(`[E] / click: enter ${this.host.buildingName(aim.i)}`); break;
+      case 'building': this.showPrompt(`[E] / click: enter ${this.host.buildingName(aim.i)} · [X] take apart · [I] info`); break;
+      case 'floor': {
+        const f = this.explodeFloors[aim.k];
+        if (this.lastFloorHover !== aim.k) { this.scene.highlightFloor(aim.k); this.lastFloorHover = aim.k; }
+        this.showPrompt(f ? `click: enter at L${aim.k + 1} · ${f.name} (${f.loc} LOC)` : '');
+        break;
+      }
       default: if (this.where === 'inside' && this.interior!.inShaft(this.pos.x, this.pos.z)) this.showPrompt('[E] choose floor'); else this.showPrompt('');
     }
   }
+
+  private lastFloorHover = -1;
+  private snapCam = false;
+  /** The building travel last brought you to, and where you landed. */
+  private landed = { i: -1, x: 0, z: 0 };
 
   private showPrompt(text: string) {
     if (this.prompt.textContent !== text) this.prompt.textContent = text;

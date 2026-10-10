@@ -201,6 +201,75 @@ func (r *Repo) Log(ctx context.Context, commit string, n int) ([]Commit, error) 
 	return cs, nil
 }
 
+// FileCommit is a commit that touched a file, with the start of its message body.
+type FileCommit struct {
+	Commit
+	Body string `json:"body,omitempty"`
+}
+
+// FileLog returns up to n non-merge commits reachable from commit that touched path, newest first.
+// With added set it returns only the commit(s) that added the file.
+func (r *Repo) FileLog(ctx context.Context, commit, path string, n int, added bool) ([]FileCommit, error) {
+	if err := checkRef(commit); err != nil {
+		return nil, err
+	}
+	args := []string{"log", "--no-merges", "--no-renames", "--format=%H%x1f%aI%x1f%an%x1f%s%x1f%b%x1e"}
+	if n > 0 {
+		args = append(args, "-n", strconv.Itoa(n))
+	}
+	if added {
+		args = append(args, "--diff-filter=A")
+	}
+	args = append(args, "--end-of-options", commit, "--", path)
+	out, err := run(ctx, r.Dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	var cs []FileCommit
+	for _, rec := range strings.Split(out, "\x1e") {
+		rec = strings.TrimLeft(rec, "\n")
+		if rec == "" {
+			continue
+		}
+		f := strings.SplitN(rec, "\x1f", 5)
+		if len(f) != 5 {
+			continue
+		}
+		body := stripTrailers(strings.TrimSpace(f[4]))
+		if len(body) > 600 {
+			body = strings.ToValidUTF8(body[:600], "") + "…"
+		}
+		cs = append(cs, FileCommit{Commit: Commit{Hash: f[0], Date: f[1], Author: f[2], Subject: f[3]}, Body: body})
+	}
+	return cs, nil
+}
+
+// stripTrailers drops a final paragraph of git trailers ("Signed-off-by: …", "Co-Authored-By: …").
+func stripTrailers(body string) string {
+	paras := strings.Split(body, "\n\n")
+	last := strings.Split(strings.TrimSpace(paras[len(paras)-1]), "\n")
+	for _, l := range last {
+		k, _, ok := strings.Cut(l, ": ")
+		// trailer keys are hyphenated (Signed-off-by, Co-Authored-By, Change-Id) or a few known words
+		if !ok || k == "" || strings.ContainsAny(k, " \t") || !(strings.Contains(k, "-") || k == "Fixes" || k == "Closes" || k == "Refs" || k == "Bug") {
+			return body
+		}
+	}
+	return strings.TrimSpace(strings.Join(paras[:len(paras)-1], "\n\n"))
+}
+
+// FileCommitCount counts the non-merge commits reachable from commit that touched path.
+func (r *Repo) FileCommitCount(ctx context.Context, commit, path string) (int, error) {
+	if err := checkRef(commit); err != nil {
+		return 0, err
+	}
+	out, err := run(ctx, r.Dir, "rev-list", "--count", "--no-merges", "--end-of-options", commit, "--", path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(out))
+}
+
 // Name guesses a display name for the repo.
 func (r *Repo) Name() string {
 	s := strings.TrimSuffix(strings.TrimRight(r.Source, "/"), ".git")

@@ -125,6 +125,15 @@ func TestFileAPI(t *testing.T) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"symbols"`) {
 		t.Errorf("symbols: %d %s", w.Code, w.Body)
 	}
+	w = do(h, "GET", "/api/history?path=a.go", "", "127.0.0.1:8080", "")
+	var hist HistoryResponse
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &hist) != nil || hist.Total != 1 || len(hist.Recent) != 1 ||
+		hist.Recent[0].Subject != "x" || hist.Created == nil || hist.Created.Hash != hist.Recent[0].Hash {
+		t.Errorf("history: %d %s", w.Code, w.Body)
+	}
+	if w := do(h, "GET", "/api/history?path=../x", "", "127.0.0.1:8080", ""); w.Code != 400 {
+		t.Errorf("history of unknown path: %d", w.Code)
+	}
 	for _, q := range []string{"path=../../etc/passwd&commit=0", "path=a.go&commit=zzz", "path=a.go&commit=99"} {
 		if w := do(h, "GET", "/api/file?"+q, "", "127.0.0.1:8080", ""); w.Code != 400 {
 			t.Errorf("%s: %d", q, w.Code)

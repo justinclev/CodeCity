@@ -53,7 +53,7 @@ function flowMaterial(a: THREE.Color, b: THREE.Color, count: number, speed: numb
 }
 
 /** One floor of an exploded building (a piece of the file). */
-export interface Floor { name: string; kind: string; loc: number; complexity: number; piece: number }
+export interface Floor { name: string; kind: string; loc: number; complexity: number; piece: number; /** first source line (walk mode) */ start?: number }
 
 interface Exploded {
   building: number;
@@ -276,8 +276,39 @@ export class CityScene {
       boxes.push({ i, x0: b.x, x1: b.x + b.w, z0: b.z, z1: b.z + b.d, top: this.baseY[i] + Math.max(this.target[i], MIN_H) });
     });
     const plates = this.city.districts.filter(d => d.depth >= 0)
-      .map(d => ({ x0: d.x, x1: d.x + d.w, z0: d.z, z1: d.z + d.d, top: this.districtTop(d.depth) }));
+      .map(d => ({ x0: d.x, x1: d.x + d.w, z0: d.z, z1: d.z + d.d, top: this.districtTop(d.depth), depth: d.depth }));
     return { boxes, plates };
+  }
+
+  /** Boxes of the floors of the exploded building (walk-mode collision: you can stand on them). */
+  explodedBoxes(): { x0: number; x1: number; z0: number; z1: number; y0: number; top: number }[] {
+    const e = this.exploded;
+    if (!e) return [];
+    const out: { x0: number; x1: number; z0: number; z1: number; y0: number; top: number }[] = [];
+    const m = new THREE.Matrix4(), p = new THREE.Vector3(), q = new THREE.Quaternion(), sc = new THREE.Vector3();
+    for (let k = 0; k < e.floors.length; k++) {
+      e.mesh.getMatrixAt(k, m);
+      m.decompose(p, q, sc);
+      out.push({ x0: p.x - sc.x / 2, x1: p.x + sc.x / 2, z0: p.z - sc.z / 2, z1: p.z + sc.z / 2, y0: p.y - sc.y / 2, top: p.y + sc.y / 2 });
+    }
+    return out;
+  }
+
+  /** Floor of the exploded building under a ray, or -1. */
+  rayFloor(origin: THREE.Vector3, dir: THREE.Vector3, far: number): number {
+    if (!this.exploded) return -1;
+    this.raycaster.set(origin, dir);
+    this.raycaster.far = far;
+    const h = this.raycaster.intersectObject(this.exploded.mesh, false)[0];
+    this.raycaster.far = Infinity;
+    return h?.instanceId ?? -1;
+  }
+
+  /** Top of the skyline (walk mode: "above the skyline"). */
+  skyline() {
+    let tallest = 0;
+    for (let i = 0; i < this.target.length; i++) if (this.exists(i)) tallest = Math.max(tallest, this.baseY[i] + this.target[i]);
+    return tallest;
   }
 
   /** Distance along a ray to the first building or plate (Infinity if none within far). */
@@ -285,7 +316,7 @@ export class CityScene {
     if (!this.buildingMesh || !this.districtMesh) return Infinity;
     this.raycaster.set(origin, dir);
     this.raycaster.far = far;
-    const hit = this.raycaster.intersectObjects([this.buildingMesh], false)[0];
+    const hit = this.raycaster.intersectObjects(this.exploded ? [this.buildingMesh, this.exploded.mesh] : [this.buildingMesh], false)[0];
     this.raycaster.far = Infinity;
     return hit ? hit.distance : Infinity;
   }
@@ -1227,7 +1258,7 @@ export class CityScene {
   get explodingBuilding() { return this.exploded && this.exploded.dir > 0 ? this.exploded.building : -1; }
 
   /** Split building i into stacked floors, one per piece, separated by gaps. */
-  explode(i: number, floors: Floor[]) {
+  explode(i: number, floors: Floor[], frame = true) {
     this.collapse(true);
     if (!floors.length) return;
     const b = this.city.buildings[i];
@@ -1257,6 +1288,7 @@ export class CityScene {
     this.makeFloorLabels();
     this.layoutFloors();
     this.moving = true; // hides the original instance on the next step
+    if (!frame) return; // walk mode drives the camera itself
     // frame the exploded tower
     const gapTotal = this.floorGap() * (floors.length - 1);
     const mid = new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + (H + gapTotal) / 2, b.z + b.d / 2);

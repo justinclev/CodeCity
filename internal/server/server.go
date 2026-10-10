@@ -402,6 +402,57 @@ func (s *Server) File(ctx context.Context, path, commit string) (*FileResponse, 
 	return &FileResponse{Path: path, Commit: hash, Lang: lang, Content: text, Lines: lines, Pieces: pieces, Partial: partial}, nil
 }
 
+// HistoryResponse explains where a file came from: the commit that added it and its recent changes.
+type HistoryResponse struct {
+	Path    string            `json:"path"`
+	Total   int               `json:"total"`             // non-merge commits touching the file
+	Created *gitx.FileCommit  `json:"created,omitempty"` // the (oldest) commit that added it
+	Recent  []gitx.FileCommit `json:"recent"`            // newest first
+}
+
+// History returns the commit history of a file of the loaded city, as of its repository's newest analyzed commit.
+func (s *Server) History(ctx context.Context, path string, n int) (*HistoryResponse, error) {
+	s.mu.Lock()
+	c, repos, paths := s.city, s.repos, s.paths
+	s.mu.Unlock()
+	if c == nil || len(repos) == 0 {
+		return nil, &httpErr{http.StatusNotFound, "no repository loaded"}
+	}
+	ref, ok := paths[path]
+	if !ok {
+		return nil, errBad("unknown path")
+	}
+	tip := ""
+	for _, k := range c.Commits {
+		if k.Repo == ref.repo {
+			tip = k.Hash // commits are oldest first: the last one wins
+		}
+	}
+	if tip == "" {
+		return nil, errBad("no commits for this repository")
+	}
+	if n <= 0 || n > 50 {
+		n = 12
+	}
+	repo := repos[ref.repo]
+	recent, err := repo.FileLog(ctx, tip, ref.path, n, false)
+	if err != nil {
+		return nil, err
+	}
+	out := &HistoryResponse{Path: path, Recent: recent}
+	if recent == nil {
+		out.Recent = []gitx.FileCommit{}
+	}
+	if total, err := repo.FileCommitCount(ctx, tip, ref.path); err == nil {
+		out.Total = total
+	}
+	// shallow clones have no history to speak of; the oldest "add" is where the file was born
+	if added, err := repo.FileLog(ctx, tip, ref.path, 0, true); err == nil && len(added) > 0 {
+		out.Created = &added[len(added)-1]
+	}
+	return out, nil
+}
+
 // Current returns a copy of the latest job (zero value if none).
 func (s *Server) Current() Job {
 	s.mu.Lock()
@@ -490,6 +541,16 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, f)
+	})
+	mux.HandleFunc("GET /api/history", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		n, _ := strconv.Atoi(q.Get("n"))
+		h, err := s.History(r.Context(), q.Get("path"), n)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, h)
 	})
 	mux.HandleFunc("GET /api/symbols", func(w http.ResponseWriter, r *http.Request) {
 		b, err := s.Symbols(r.Context())
