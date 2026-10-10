@@ -189,7 +189,11 @@ export class CityScene {
     this.renderer.setAnimationLoop(() => this.frameLoop());
   }
 
+  /** While another full-screen view (the flow diagram) covers the city, skip rendering. */
+  paused = false;
+
   private frameLoop() {
+    if (this.paused) { this.last = performance.now(); return; }
     const now = performance.now();
     const dt = Math.min((now - this.last) / 1000, 0.1);
     this.last = now;

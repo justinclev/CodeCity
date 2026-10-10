@@ -8,6 +8,8 @@ import type { CardData, CardSection } from './walk/panels';
 import type { GameWorld } from './walk/game';
 import { buildTour, isTest, KIND_LABEL, type TourStop } from './tour';
 import { bindBranchRows, showSwitcher, type LoadedRepo } from './branches';
+import { FlowView } from './flow/view';
+import type { FlowGraph } from './flow/model';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
 import { SCHEMA_VERSION, type City, type ColorMode } from './types';
@@ -255,6 +257,7 @@ function show(c: City) {
   city = c;
   selected = selectedDistrict = -1;
   tourAt = -1; tourBar(); historyCache.clear();
+  flowView.reset();
   ui.setMessage('');
   ui.setPathResolver(i => c.buildings[i].path);
   ui.setChurnAvailable(c.churn === true);
@@ -716,6 +719,7 @@ chart.addEventListener('click', e => {
 addEventListener('resize', () => redrawChart());
 
 addEventListener('keydown', e => {
+  if (flowView.open) return; // the flow view has its own keys
   const t = e.target as HTMLElement;
   const typing = (t.tagName === 'INPUT' && !['range', 'checkbox'].includes((t as HTMLInputElement).type)) || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA';
   if (typing) return;
@@ -1045,9 +1049,45 @@ function startWalk(at = -1) {
 document.getElementById('walk')!.addEventListener('click', () => startWalk());
 addEventListener('keydown', e => {
   const t = e.target as HTMLElement;
-  if (walk.active || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
+  if (walk.active || flowView.open || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
   if (e.key === 'g' || e.key === 'G') startWalk();
 });
 
 // debug handle for automated checks (no behaviour change)
 (window as unknown as { __codecity: unknown }).__codecity = { scene, walk };
+
+// ---------------------------------------------------------------- flow view (a diagram of how the code runs)
+const flowView = new FlowView({
+  load: async () => {
+    if (!apiAvailable) throw new Error('the flow view needs the server (codecity serve)');
+    return api<FlowGraph>('/api/flow');
+  },
+  file: async (path, commit) => {
+    const f = await fetchFile(path, commit);
+    return { content: f.content, lang: f.lang };
+  },
+  showInCity: path => {
+    flowView.close();
+    const i = city ? city.buildings.findIndex(b => b.path === path) : -1;
+    if (i >= 0 && scene.exists(i)) selectBuilding(i, true);
+  },
+  onClose: () => {
+    scene.paused = false;
+    document.getElementById('flowbtn')!.classList.remove('on');
+  },
+});
+
+function openFlow() {
+  if (!city || walk.active) return;
+  stopPlayback();
+  scene.paused = true;
+  document.getElementById('flowbtn')!.classList.add('on');
+  if (selected >= 0) void flowView.focusPath(city.buildings[selected].path);
+  else void flowView.show();
+}
+document.getElementById('flowbtn')!.addEventListener('click', () => (flowView.open ? flowView.close() : openFlow()));
+addEventListener('keydown', e => {
+  const t = e.target as HTMLElement;
+  if (walk.active || flowView.open || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
+  if (e.key === 'd' || e.key === 'D') openFlow();
+});

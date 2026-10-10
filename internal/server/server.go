@@ -2,10 +2,13 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -18,6 +21,7 @@ import (
 
 	"github.com/justinclev/codecity/internal/analyze"
 	"github.com/justinclev/codecity/internal/city"
+	"github.com/justinclev/codecity/internal/flow"
 	"github.com/justinclev/codecity/internal/gitx"
 	"github.com/justinclev/codecity/internal/outline"
 	"github.com/justinclev/codecity/internal/scan"
@@ -106,10 +110,13 @@ type Server struct {
 	// symbols is the lazily built definition index for /api/symbols (nil until requested)
 	symbols   []byte
 	symbolsMu sync.Mutex
-	paths     map[string]fileRef // building path → repo + path inside it
-	job       *Job
-	cancel    context.CancelFunc
-	nextID    int
+	// flow is the lazily built flow graph for /api/flow (gzip-compressed JSON)
+	flow   []byte
+	flowMu sync.Mutex
+	paths  map[string]fileRef // building path → repo + path inside it
+	job    *Job
+	cancel context.CancelFunc
+	nextID int
 }
 
 // New creates a server. addr is the listen address; local paths are only
@@ -227,7 +234,7 @@ func (s *Server) finish(j *Job, c *city.City, repos []*gitx.Repo, err error, ctx
 		j.State, j.Error = "error", err.Error()
 	default:
 		j.State = "done"
-		s.body, s.city, s.symbols = body, c, nil
+		s.body, s.city, s.symbols, s.flow = body, c, nil, nil
 		s.paths = make(map[string]fileRef, len(c.Buildings))
 		for _, b := range c.Buildings {
 			orig := b.Path
@@ -402,6 +409,76 @@ func (s *Server) File(ctx context.Context, path, commit string) (*FileResponse, 
 	return &FileResponse{Path: path, Commit: hash, Lang: lang, Content: text, Lines: lines, Pieces: pieces, Partial: partial}, nil
 }
 
+// Flow returns the flow graph of the loaded city at each repository's newest commit, as gzip-compressed JSON.
+func (s *Server) Flow(ctx context.Context) ([]byte, error) {
+	s.flowMu.Lock()
+	defer s.flowMu.Unlock()
+	s.mu.Lock()
+	c, repos, cached := s.city, s.repos, s.flow
+	s.mu.Unlock()
+	if cached != nil {
+		return cached, nil
+	}
+	if c == nil || len(repos) == 0 {
+		return nil, &httpErr{http.StatusNotFound, "no repository loaded"}
+	}
+	const maxFiles, maxBytes = 25000, 96 << 20
+	var groups []flow.Repo
+	total, count := 0, 0
+	for k, repo := range repos {
+		commit, prefix := c.Repo.Commit, ""
+		if len(c.Repos) > 0 {
+			commit, prefix = c.Repos[k].Commit, c.Repos[k].Name+"/"
+		}
+		entries, err := repo.ListFiles(ctx, commit)
+		if err != nil {
+			return nil, err
+		}
+		br, err := repo.NewBlobReader(ctx)
+		if err != nil {
+			return nil, err
+		}
+		g := flow.Repo{Prefix: prefix, Commit: commit}
+		for _, e := range entries {
+			lang := scan.Language(e.Path)
+			if !flow.Wanted(e.Path, lang) || e.Size > maxFileBytes || count >= maxFiles || total >= maxBytes ||
+				strings.Contains("/"+e.Path, "/node_modules/") || strings.Contains("/"+e.Path, "/vendor/") || strings.HasSuffix(e.Path, ".min.js") {
+				continue
+			}
+			content, err := br.Read(e.Oid, maxFileBytes)
+			if err != nil {
+				br.Close()
+				return nil, err
+			}
+			if scan.ContentSkip(content, scan.Options{}) != "" { // generated, minified, binary
+				continue
+			}
+			g.Files = append(g.Files, flow.File{Path: e.Path, Lang: lang, Content: content})
+			total += len(content)
+			count++
+		}
+		br.Close()
+		groups = append(groups, g)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	graph := flow.BuildAll(groups, flow.Options{})
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if err := json.NewEncoder(zw).Encode(graph); err != nil {
+		return nil, err
+	}
+	zw.Close()
+	body := buf.Bytes()
+	s.mu.Lock()
+	if s.city == c {
+		s.flow = body
+	}
+	s.mu.Unlock()
+	return body, nil
+}
+
 // HistoryResponse explains where a file came from: the commit that added it and its recent changes.
 type HistoryResponse struct {
 	Path    string            `json:"path"`
@@ -568,6 +645,26 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, refs)
+	})
+	mux.HandleFunc("GET /api/flow", func(w http.ResponseWriter, r *http.Request) {
+		body, err := s.Flow(r.Context())
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Write(body)
+			return
+		}
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		io.Copy(w, zr)
 	})
 	mux.HandleFunc("GET /api/history", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()

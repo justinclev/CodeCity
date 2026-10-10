@@ -9,11 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 
 	"github.com/justinclev/codecity/internal/analyze"
 	"github.com/justinclev/codecity/internal/city"
+	"github.com/justinclev/codecity/internal/flow"
 	"github.com/justinclev/codecity/internal/insights"
 	"github.com/justinclev/codecity/internal/outline"
 	"github.com/justinclev/codecity/internal/scan"
@@ -33,6 +35,7 @@ Usage:
 Several repos become several cities on one map, connected where one depends on
 another (manifests, imports) or where they share contributors.
   codecity outline <file>           show the pieces (types, functions, …) found in a source file
+  codecity flow <dir> [-json]       summarize the flow graph (calls, inputs, outputs) of a working tree
   codecity version
 
 <repo> is a local path or a git URL (https://, ssh://, git@host:path).
@@ -88,6 +91,11 @@ func main() {
 				ind = "    "
 			}
 			fmt.Printf("%5d-%-5d %s%-10s %s  (loc %d, complexity %d)\n", p.Start, p.End, ind, p.Kind, p.Name, p.LOC, p.Complexity)
+		}
+	case "flow":
+		if err := flowCmd(args); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
 		}
 	case "version", "--version":
 		fmt.Println("codecity", version)
@@ -215,4 +223,52 @@ func writeCity(c *city.City, out string) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", " ")
 	return enc.Encode(c)
+}
+
+// flowCmd builds the flow graph of a working tree (a debugging aid; the viewer gets it from /api/flow at a commit).
+func flowCmd(args []string) error {
+	asJSON := false
+	dir := "."
+	for _, a := range args {
+		if a == "-json" || a == "--json" {
+			asJSON = true
+		} else {
+			dir = a
+		}
+	}
+	var files []flow.File
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if p != dir && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "dist" || name == "target" || name == "__pycache__") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		rel = filepath.ToSlash(rel)
+		lang := scan.Language(rel)
+		if !flow.Wanted(rel, lang) {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err != nil || len(b) > 1<<20 {
+			return nil
+		}
+		files = append(files, flow.File{Path: rel, Lang: lang, Content: b})
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	g := flow.Build(files, flow.Options{})
+	if asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		return enc.Encode(g)
+	}
+	fmt.Print(flow.Summary(g))
+	return nil
 }

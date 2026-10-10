@@ -125,6 +125,15 @@ func TestFileAPI(t *testing.T) {
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"symbols"`) {
 		t.Errorf("symbols: %d %s", w.Code, w.Body)
 	}
+	w = do(h, "GET", "/api/flow", "", "127.0.0.1:8080", "")
+	var fg struct {
+		Version int
+		Nodes   []struct{ Name, Kind string }
+		Commits map[string]string
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &fg) != nil || fg.Version != 1 || len(fg.Commits) != 1 {
+		t.Errorf("flow: %d %.300s", w.Code, w.Body)
+	}
 	w = do(h, "GET", "/api/history?path=a.go", "", "127.0.0.1:8080", "")
 	var hist HistoryResponse
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &hist) != nil || hist.Total != 1 || len(hist.Recent) != 1 ||
