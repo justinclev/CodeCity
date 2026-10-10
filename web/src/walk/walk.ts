@@ -66,7 +66,7 @@ export class WalkMode {
   constructor(private scene: CityScene, private host: WalkHost) {}
 
   /** Outdoor scale: body height in city units. */
-  private get u() { return Math.max(0.5, this.scene.cell * 1.6); }
+  private get u() { return Math.max(0.2, this.scene.cell * 0.6); } // ~1/5 of a median building's width
   private get h() { return this.where === 'inside' ? 1.8 : this.u; }
 
   // ------------------------------------------------------------------ lifecycle
@@ -80,6 +80,7 @@ export class WalkMode {
     this.scene.stopFly();
     this.scene.controls.enabled = false;
     this.obstacles = this.scene.walkData();
+    this.scene.setStreetLevel(true);
     this.buildHud();
     // spawn on the ground in front of the city, facing it
     const { boxes } = this.obstacles;
@@ -90,7 +91,7 @@ export class WalkMode {
     this.where = 'city';
     this.pos.set(cx, 0, cz);
     this.pos.y = this.groundCity(this.pos.x, this.pos.z, 100);
-    this.yaw = 0;
+    this.yaw = 0; this.faceCamera();
     this.pitch = -0.08;
     this.camDist = this.u * 3.2;
     this.avatar.group.scale.setScalar(this.u);
@@ -121,6 +122,7 @@ export class WalkMode {
     document.body.classList.remove('walking');
     if (document.pointerLockElement) document.exitPointerLock();
     this.leaveInterior();
+    this.scene.setStreetLevel(false);
     this.scene.cityScene.remove(this.avatar.group);
     this.trail.mesh.parent?.remove(this.trail.mesh);
     this.clearTracer();
@@ -179,7 +181,7 @@ export class WalkMode {
       const w = e as WheelEvent;
       w.preventDefault();
       if (this.aim?.kind === 'code') this.aim.wall.scrollBy(Math.sign(w.deltaY) * 3);
-      else if (!this.firstPerson) this.camDist = Math.max(this.h * 1.2, Math.min(this.h * 9, this.camDist * (w.deltaY > 0 ? 1.12 : 0.89)));
+      else if (!this.firstPerson) this.camDist = Math.max(this.h * 1.2, Math.min(this.h * (this.where === 'city' ? 24 : 9), this.camDist * (w.deltaY > 0 ? 1.12 : 0.89)));
     }, { passive: false });
   }
 
@@ -366,7 +368,7 @@ export class WalkMode {
       }
       const sp = L === 0 ? { pos: new THREE.Vector3(0, 0, 3.6), yaw: 0 } : this.interior.spawn(L);
       this.pos.copy(sp.pos);
-      this.yaw = sp.yaw;
+      this.yaw = sp.yaw; this.faceCamera();
       this.pitch = L === 0 ? 0.02 : -0.02;
       this.velY = 0;
       this.interior.platformY = 0;
@@ -403,7 +405,7 @@ export class WalkMode {
     if (b) {
       this.pos.set((b.x0 + b.x1) / 2, 0, b.z1 + this.u * 1.2);
       this.pos.y = this.groundCity(this.pos.x, this.pos.z, 100);
-      this.yaw = Math.PI; // face away from the building
+      this.yaw = Math.PI; this.faceCamera(); // face away from the building
     }
     const cam = this.scene.camera;
     cam.near = Math.max(0.02, this.u * 0.05); cam.far = this.scene.worldSize * 8; cam.updateProjectionMatrix();
@@ -447,7 +449,7 @@ export class WalkMode {
       this.startTracer(it.scene, path, 0.06, 1.2 + Math.abs(a.y - b.y) / 40, () => {
         it.ensureWalls(L);
         this.pos.copy(sp.pos);
-        this.yaw = sp.yaw;
+        this.yaw = sp.yaw; this.faceCamera();
         this.pitch = -0.02;
         this.velY = 0;
         if (d.line && L > 0) it.codeWall(L)?.highlight(d.line, d.line);
@@ -581,10 +583,11 @@ export class WalkMode {
     // face the walking direction; after standing still a moment, turn round to look at the camera
     this.idle = this.lastSpeed > 0.05 || !this.grounded ? 0 : this.idle + dt;
     const camYaw = Math.atan2(cam.position.x - this.pos.x, cam.position.z - this.pos.z);
-    const want = this.idle > 1.6 && !this.firstPerson ? camYaw : this.yaw + Math.PI;
+    if (this.firstPerson) this.heading = this.yaw + Math.PI;
+    const want = this.idle > 1.6 && !this.firstPerson ? camYaw : this.heading;
     let d = want - this.avatar.group.rotation.y;
     d = Math.atan2(Math.sin(d), Math.cos(d));
-    this.avatar.group.rotation.y += d * Math.min(1, dt * (this.idle > 1.6 ? 4 : 14));
+    this.avatar.group.rotation.y += d * Math.min(1, dt * (this.idle > 1.6 ? 4 : 12));
     this.avatar.setVisible(!this.firstPerson && !this.busy);
     this.avatar.update(dt, speed, !this.grounded);
     const running = keyDown.has('ShiftLeft') || keyDown.has('ShiftRight');
@@ -598,16 +601,28 @@ export class WalkMode {
 
   private lastSpeed = 0;
   private idle = 0;
+  /** Direction the body faces (rotation.y; the model looks down +z). Follows the walking direction. */
+  private heading = Math.PI;
+
+  /** Turn the body to face where the camera looks (used at spawn points). */
+  private faceCamera() {
+    this.heading = this.yaw + Math.PI;
+    this.avatar.group.rotation.y = this.heading;
+  }
 
   private move(dt: number) {
     const run = keyDown.has('ShiftLeft') || keyDown.has('ShiftRight');
-    const speed = this.h * (run ? 5.5 : 2.4);
+    const speed = this.h * (run ? (this.where === 'city' ? 7 : 5.5) : 2.4);
     const f = (keyDown.has('KeyW') || keyDown.has('ArrowUp') ? 1 : 0) - (keyDown.has('KeyS') || keyDown.has('ArrowDown') ? 1 : 0);
     const s = (keyDown.has('KeyD') || keyDown.has('ArrowRight') ? 1 : 0) - (keyDown.has('KeyA') || keyDown.has('ArrowLeft') ? 1 : 0);
     const fwd = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
     const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
     const v = fwd.multiplyScalar(f).add(right.multiplyScalar(s));
-    if (v.lengthSq() > 0) v.normalize().multiplyScalar(speed * dt);
+    if (v.lengthSq() > 0) {
+      // W/A/S/D move relative to the camera; the body turns to walk that way (S walks towards the camera)
+      this.heading = Math.atan2(v.x, v.z);
+      v.normalize().multiplyScalar(speed * dt);
+    }
     this.lastSpeed = v.length() / Math.max(dt, 1e-4);
 
     const step = this.h * 0.38;
@@ -711,7 +726,7 @@ export class WalkMode {
         else if (o.userData.exit) aim = { kind: 'exit' };
       }
     } else {
-      const i = this.scene.rayBuilding(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 12);
+      const i = this.scene.rayBuilding(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 30);
       if (i >= 0) aim = { kind: 'building', i };
     }
     if (this.aim?.kind === 'panel' && (aim?.kind !== 'panel' || aim.panel !== this.aim.panel)) this.aim.panel.clearHover();

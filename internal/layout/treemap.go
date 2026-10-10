@@ -44,7 +44,9 @@ type Options struct {
 }
 
 // DefaultOptions are sensible city spacings.
-var DefaultOptions = Options{PadRatio: 0.04, MaxPad: 2.5, GapRatio: 0.06, MaxGap: 0.6}
+// Streets are wide enough to walk: buildings are inset by up to 10% of their cell (1.4 units),
+// districts by 5% (3 units), so walk mode has walkways and avenues.
+var DefaultOptions = Options{PadRatio: 0.05, MaxPad: 3, GapRatio: 0.1, MaxGap: 1.4}
 
 // Layout places root in a w×h rectangle at the origin.
 func Layout(root *Node, w, h float64, o Options) {

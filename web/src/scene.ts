@@ -244,13 +244,22 @@ export class CityScene {
   setView(sc: THREE.Scene | null) {
     this.view = sc ?? this.scene;
     this.renderPass.scene = this.view;
-    // interiors are close-up and full of emissive surfaces: a calmer bloom than the night skyline
+    // interiors are close-up and full of emissive surfaces: a calmer bloom than the night skyline;
+    // walking the streets sits between the two (whole facades fill the frame up close)
     const t = this.theme.bloom;
-    this.bloom.enabled = sc ? true : t.strength > 0;
-    this.bloom.strength = sc ? 0.45 : t.strength;
-    this.bloom.radius = sc ? 0.4 : t.radius;
-    this.bloom.threshold = sc ? 0.82 : t.threshold;
-    this.renderer.toneMappingExposure = sc ? 1.0 : this.theme.exposure;
+    const street = !sc && this.streetLevel;
+    this.bloom.enabled = sc || street ? true : t.strength > 0;
+    this.bloom.strength = sc ? 0.45 : street ? Math.min(t.strength, 0.6) : t.strength;
+    this.bloom.radius = sc ? 0.4 : street ? 0.35 : t.radius;
+    this.bloom.threshold = sc ? 0.82 : street ? Math.max(t.threshold, 0.7) : t.threshold;
+    this.renderer.toneMappingExposure = sc ? 1.0 : street ? this.theme.exposure * 0.9 : this.theme.exposure;
+  }
+
+  private streetLevel = false;
+  /** Walk mode outdoors: the camera is at street level, so tone the bloom down. */
+  setStreetLevel(on: boolean) {
+    this.streetLevel = on;
+    if (this.view === this.scene) this.setView(null);
   }
 
   get cityScene() { return this.scene; }
@@ -320,6 +329,7 @@ export class CityScene {
     this.bloom.strength = t.bloom.strength;
     this.bloom.radius = t.bloom.radius;
     this.bloom.threshold = t.bloom.threshold;
+    if (this.streetLevel && this.view === this.scene) this.setView(null);
     if (t.hacker) {
       this.circuitTex ??= circuitTexture();
       if (this.city && !this.glyphTex) this.glyphTex = glyphAtlas(this.glyphWords());
