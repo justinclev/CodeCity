@@ -361,10 +361,17 @@ export class WalkMode {
       }
       pr.addShard(st.building, new THREE.Vector3(at.x, this.groundCity(at.x, at.z, 1e9) + u * 0.9, at.z), false, u * 9);
     }
+    const golden = new Set<number>();
     for (const i of world.core.slice(0, 3)) {
       if (!this.scene.exists(i)) continue;
+      golden.add(i);
       const a = this.scene.buildingAnchor(i, 0);
       pr.addShard(i, a.add(new THREE.Vector3(0, u * 1.1, 0)), true, u * 5);
+    }
+    // a gold shard crowns each entry point's spire (fly up to it)
+    for (const i of world.landmarks.filter(j => this.scene.specOf(j).roof.includes('spire')).slice(0, 2)) {
+      if (golden.has(i) || !this.scene.exists(i)) continue;
+      pr.addShard(i, this.scene.buildingAnchor(i, 0).add(new THREE.Vector3(0, u * 0.9, 0)), true, u * 5);
     }
     pr.shards.forEach(sh => { if (this.game!.hasShard(sh.building)) { sh.taken = true; sh.group.visible = false; } });
     this.game.shardTotal = pr.shards.length;
