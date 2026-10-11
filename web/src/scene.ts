@@ -9,6 +9,7 @@ import { buildingMaterial, circuitMaterial, type BuildingUniforms, type CircuitU
 import { busRoute, TraceLayer, type Trace } from './links';
 import { buildSpecs, classicSpec, facadeCode, pathSeed, explain, type BuildingSpec, type Condition } from './architecture';
 import { RoofKit, type Works } from './roofs';
+import { Walkways } from './walkways';
 import { HackerFx } from './fx';
 import { circuitTexture, codeTexture, glyphAtlas, skyTexture, THEMES, type Theme, type ThemeName } from './theme';
 import type { City, ColorMode, Metric, ScaleMode } from './types';
@@ -124,6 +125,7 @@ export class CityScene {
   private specs: BuildingSpec[] = [];
   private classic = false;
   private roofs = new RoofKit();
+  private ways = new Walkways();
   private conds: Condition[] = [];
   private worksKey = '';
   private uniforms?: BuildingUniforms;
@@ -181,7 +183,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.hackerFx.group, this.roofs.group);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.hackerFx.group, this.roofs.group, this.ways.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -303,9 +305,17 @@ export class CityScene {
         solids.push({ i, x0: cx - hw, x1: cx + hw, z0: cz - hd, z1: cz + hd, y0: k === 0 ? undefined : y + h * t.y0, top: y + h * t.y1 });
       });
     });
+    if (!this.classic) for (const w of this.ways.solids(i => this.podiumTop(i, true))) solids.push({ i: -2, ...w });
     const plates = this.city.districts.filter(d => d.depth >= 0)
       .map(d => ({ x0: d.x, x1: d.x + d.w, z0: d.z, z1: d.z + d.d, top: this.districtTop(d.depth), depth: d.depth }));
     return { boxes, solids, plates };
+  }
+
+  /** y of a building's podium roof (the level test walkways meet); -1 when absent. */
+  private podiumTop(i: number, target: boolean): number {
+    if (!this.exists(i)) return -1;
+    const h = target ? Math.max(this.target[i], MIN_H) : this.cur[i];
+    return h <= 0.02 ? -1 : this.baseY[i] + h * this.ways.podiumFraction(i);
   }
 
   /** Boxes of the floors of the exploded building (walk-mode collision: you can stand on them). */
@@ -400,6 +410,7 @@ export class CityScene {
   setClassic(on: boolean) {
     if (on === this.classic) return;
     this.classic = on;
+    this.ways.setVisible(!on);
     if (!this.city) return;
     const sel = this.skin ? { i: this.skin.building, c: this.skin.content } : null;
     this.buildTiers();
@@ -564,6 +575,7 @@ export class CityScene {
       bm.roughness = t.hacker ? 0.15 : 0.55; bm.metalness = t.hacker ? 0.9 : 0.15;
     }
     this.roofs.setHacker(!!t.hacker);
+    this.ways.setTheme(!!t.hacker, t.name === 'night');
     if (this.skin) this.skin.mesh.visible = !!t.hacker;
     if (this.grid) {
       this.grid.visible = !t.hacker;
@@ -684,6 +696,8 @@ export class CityScene {
     // architecture: shapes come from the newest commit (the one just loaded)
     this.specs = buildSpecs(city, i => (this.exists(i) ? this.importersOf(i).length : 0));
     this.buildTiers();
+    this.ways.build(city, this.specs, uniforms.uCell.value, i => this.exists(i));
+    this.ways.setVisible(!this.classic);
 
     this.setTheme(this.theme.name); // fog, labels, colors, uniforms
     this.refresh(false);
@@ -1046,6 +1060,7 @@ export class CityScene {
     mesh.instanceMatrix.needsUpdate = true;
     if (this.tierMesh) this.tierMesh.instanceMatrix.needsUpdate = true;
     this.roofs.flush();
+    this.ways.update(i => this.podiumTop(i, false));
     this.moving = any;
     if (!any) {
       mesh.computeBoundingSphere(); mesh.computeBoundingBox();
