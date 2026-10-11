@@ -12,6 +12,7 @@ import { FlowView } from './flow/view';
 import type { FlowGraph } from './flow/model';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
+import { legend } from './architecture';
 import { SCHEMA_VERSION, type City, type ColorMode } from './types';
 import type { ThemeName } from './theme';
 
@@ -367,6 +368,8 @@ function ownedFiles() {
 
 function refreshLegend() {
   if (!city) return;
+  ui.showArchLegend(legend());
+  ui.setArchLegendVisible(!scene.classicBoxes);
   ui.showLegend({ mode: scene.colorMode, city, ownedFiles: ownedFiles(), authorFilter: scene.authorFilter,
     onAuthor: setAuthorFilter, baselineLabel: commitLabel(scene.baseline) });
   ui.setBaselineRow(scene.colorMode === 'compare', commitLabel(scene.baseline));
@@ -478,6 +481,7 @@ function buildingInfo(i: number): ui.BuildingInfo {
     coupled: (b.cpl ?? []).filter(([j]) => scene.exists(j)).map(([j, shared, degree]) => ({ index: j, path: c.buildings[j].path, shared, degree })),
     links: links(b.path),
     pieces: piecesState(),
+    looks: scene.whyLooks(i),
     deps: {
       imports: (b.imp ?? []).filter(j => scene.exists(j)).map(j => ({ index: j, path: c.buildings[j].path })),
       importDirs: (b.impd ?? []).map(d => ({ district: d, path: c.districts[d].path })),
@@ -645,6 +649,13 @@ function stopPlayback() { playing = false; ui.setPlaying(false); }
 
 // ---------------------------------------------------------------- controls
 let searchHits: number[] = [];
+function setBuildings(classic: boolean) {
+  scene.setClassic(classic);
+  store.set('classic', classic);
+  ui.setArchLegendVisible(!classic);
+  refreshSelection();
+}
+
 ui.bindControls({
   onMetric: v => { scene.metric = v; scene.refresh(false); },
   onScale: v => { scene.scale = v; scene.refresh(false); },
@@ -668,6 +679,7 @@ ui.bindControls({
   onHacker: () => toggleHacker(),
   onTab: t => { tab = t; store.set('tab', t); refreshInsights(); },
   onLinksToggle: () => { scene.setLinks(linkViews()); },
+  onBuildings: setBuildings,
   onCodeLinks: m => { scene.codeLinkMode = m; store.set('codelinks.' + scene.theme.name, m); scene.refreshCodeLinks(); },
   onCopyReport: () => {
     if (!city || !insights) return;
@@ -676,6 +688,7 @@ ui.bindControls({
   },
 });
 tab = store.get<ui.Tab>('tab') ?? 'hotspots';
+if (store.get<boolean>('classic')) { scene.setClassic(true); ui.setBuildingsMode(true); }
 
 // ---------------------------------------------------------------- branches
 const sourceBox = document.getElementById('source') as HTMLTextAreaElement;
@@ -735,6 +748,11 @@ addEventListener('keydown', e => {
   else if (e.key === 'u' || e.key === 'U') { if (tourAt >= 0) endTour(); else startTour(); }
   else if ((e.key === 'n' || e.key === 'N') && tourAt >= 0) tourGo(tourAt + 1);
   else if ((e.key === 'b' || e.key === 'B') && tourAt >= 0) tourGo(tourAt - 1);
+  else if (e.key === 'b' || e.key === 'B') {
+    const classic = !scene.classicBoxes;
+    ui.setBuildingsMode(classic);
+    setBuildings(classic);
+  }
   else if (e.key === 'l' || e.key === 'L') {
     const order = ['selection', 'all', 'off'] as const;
     scene.codeLinkMode = order[(order.indexOf(scene.codeLinkMode) + 1) % 3];

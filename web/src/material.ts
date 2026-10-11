@@ -218,7 +218,7 @@ float aline(float x, float w) { float fw = max(fwidth(x), 1e-4); float d = abs(f
     vec3 warm = mix(vec3(1.0, 0.78, 0.45), vec3(0.75, 0.88, 1.0), step(0.8, r2));
     if (glassy > 0.5) {
       vec3 sky = mix(vec3(0.16, 0.22, 0.32), vec3(0.42, 0.55, 0.7), clamp(wc.y / max(vSize.y, 1e-3), 0.0, 1.0));
-      vec3 glass = mix(base * 0.38, sky, 0.35 + 0.25 * (1.0 - uNight));
+      vec3 glass = mix(base * 0.38, sky * (0.3 + 0.7 * (1.0 - uNight)), 0.35 + 0.25 * (1.0 - uNight));
       diffuseColor.rgb = mix(base, glass, win);
       float litG = step(0.74 + 0.2 * age, r); // big panes: fewer lit, softer
       totalEmissiveRadiance += win * litG * mix(warm, vec3(0.7, 0.85, 1.0), 0.6) * (0.25 + 0.4 * r2) * uNight;
