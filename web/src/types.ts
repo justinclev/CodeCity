@@ -43,10 +43,29 @@ export interface Building {
   /** Same-repo files (building indices) and package directories (district indices) this file imports. */
   imp?: number[];
   impd?: number[];
+  /** Architecture from the code at the newest commit (absent if the file is gone by then). */
+  shape?: Shape;
+}
+
+export type ShapeKind = 'tower' | 'slab' | 'types' | 'data' | 'doc' | 'test';
+export type Role = 'entry' | 'serve' | 'db' | 'exec' | 'files' | 'call';
+
+export interface Shape {
+  /** LOC of the stacked tiers, bottom first: the podium, then each dominant declaration group (largest first). */
+  t: number[];
+  /** Names of the tiers above the podium. */
+  n?: string[];
+  k?: ShapeKind;
+  /** Functions and methods. */
+  f?: number;
+  /** Classes, structs, interfaces, enums, type aliases. */
+  y?: number;
+  /** Roles from the flow analysis (rooftops). */
+  r?: Role[];
 }
 
 export type Metric = 'loc' | 'lines' | 'bytes' | 'complexity';
 export type ScaleMode = 'sqrt' | 'linear' | 'log';
 export type ColorMode = 'language' | 'hotspot' | 'churn' | 'complexity' | 'age' | 'owner' | 'knowledge' | 'compare' | 'depth' | 'dependents';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;

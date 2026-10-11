@@ -361,10 +361,17 @@ export class WalkMode {
       }
       pr.addShard(st.building, new THREE.Vector3(at.x, this.groundCity(at.x, at.z, 1e9) + u * 0.9, at.z), false, u * 9);
     }
+    const golden = new Set<number>();
     for (const i of world.core.slice(0, 3)) {
       if (!this.scene.exists(i)) continue;
+      golden.add(i);
       const a = this.scene.buildingAnchor(i, 0);
       pr.addShard(i, a.add(new THREE.Vector3(0, u * 1.1, 0)), true, u * 5);
+    }
+    // a gold shard crowns each entry point's spire (fly up to it)
+    for (const i of world.landmarks.filter(j => this.scene.specOf(j).roof.includes('spire')).slice(0, 2)) {
+      if (golden.has(i) || !this.scene.exists(i)) continue;
+      pr.addShard(i, this.scene.buildingAnchor(i, 0).add(new THREE.Vector3(0, u * 0.9, 0)), true, u * 5);
     }
     pr.shards.forEach(sh => { if (this.game!.hasShard(sh.building)) { sh.taken = true; sh.group.visible = false; } });
     this.game.shardTotal = pr.shards.length;
@@ -478,6 +485,8 @@ export class WalkMode {
     if (this.where === 'city') {
       const t = this.nearTerminal();
       if (t) { this.openQuiz(t); return; }
+      const roof = this.roofUnderfoot();
+      if (roof >= 0) { this.useRoof(roof); return; }
       if (this.aim?.kind === 'floor') { this.enterFloor(this.aim.k); return; }
       const landed = this.landed.i >= 0 && Math.hypot(this.pos.x - this.landed.x, this.pos.z - this.landed.z) < this.u * 2 ? this.landed.i : -1;
       const i = this.aim?.kind === 'building' ? this.aim.i : landed >= 0 ? landed : this.nearestFacade();
@@ -502,11 +511,33 @@ export class WalkMode {
     this.toast('Elevator called — step onto the platform and press E');
   }
 
+  /** The building whose rooftop equipment you are standing next to (on its roof), or -1. */
+  private roofUnderfoot(): number {
+    for (const b of this.obstacles?.solids ?? []) {
+      if (Math.abs(this.pos.y - b.top) > this.u * 0.4) continue;
+      if (this.pos.x < b.x0 - this.u || this.pos.x > b.x1 + this.u || this.pos.z < b.z0 - this.u || this.pos.z > b.z1 + this.u) continue;
+      if (this.scene.specOf(b.i).roof.length && b.top >= this.scene.roofOf(b.i) - 1e-3) return b.i;
+    }
+    return -1;
+  }
+
+  /** Rooftop equipment says what the file does with the outside world. */
+  private useRoof(i: number) {
+    const lines = this.scene.whyLooks(i).filter(l => l.startsWith('Roof:')).map(l => l.slice(6));
+    if (!lines.length) return;
+    this.game?.roofVisited(i);
+    this.toast(`${this.host.buildingName(i)} · ${lines.join(' · ')} — E on the ground floor to go in, D for the flow view`, 6);
+  }
+
   private elevatorPage = 0;
+
+  /** Standing on the platform while it moves: the platform carries you (however long a frame takes). */
+  private riding = false;
 
   private ride(L: number) {
     const it = this.interior!;
     const dur = it.callElevator(L);
+    this.riding = it.inShaft(this.pos.x, this.pos.z) && Math.abs(this.pos.y - it.platformY) < 1.2;
     this.toast(`Going to ${L === 0 ? 'the lobby' : `L${L} · ${it.spec.floors[L - 1].name}`}`, dur + 0.5);
   }
 
@@ -1143,8 +1174,11 @@ export class WalkMode {
       if (key('Space') && this.grounded) { this.velY = this.h * 3.6; this.grounded = false; }
       this.velY -= this.h * 11 * dt;
       ny = this.pos.y + this.velY * dt;
-      const onElevator = this.where === 'inside' && this.interior!.inShaft(this.pos.x, this.pos.z) && Math.abs(this.pos.y - this.interior!.platformY) < 1.2;
-      if (onElevator && this.velY <= 0) { ny = this.interior!.platformY; this.velY = 0; this.grounded = true; }
+      const inShaft = this.where === 'inside' && this.interior!.inShaft(this.pos.x, this.pos.z);
+      if (!inShaft) this.riding = false;
+      const onElevator = inShaft && (this.riding || Math.abs(this.pos.y - this.interior!.platformY) < 1.2);
+      if (this.riding && !this.interior!.elevatorMoving) this.riding = false; // arrived: this frame still lands you on it
+      if (onElevator && (this.riding || this.velY <= 0)) { ny = this.interior!.platformY; this.velY = 0; this.grounded = true; }
       else if (ny <= g) { ny = g; this.velY = 0; this.grounded = true; }
       else this.grounded = ny - g < 0.02;
     }
@@ -1171,10 +1205,10 @@ export class WalkMode {
     if (this.flying) this.toast('FLYING · Space up · Shift down · double-tap W fast · double-tap Space to drop', 4);
   }
 
-  /** Building boxes plus the floors of a taken-apart building (which replaces its own box). */
+  /** Building tiers (setbacks are terraces) plus the floors of a taken-apart building (which replace its tiers). */
   private *cityBoxes(): Generator<{ x0: number; x1: number; z0: number; z1: number; top: number; y0?: number }> {
     const ex = this.scene.explodedBuilding;
-    for (const b of this.obstacles?.boxes ?? []) if (b.i !== ex) yield b;
+    for (const b of this.obstacles?.solids ?? []) if (b.i !== ex) yield b;
     if (ex >= 0) yield* this.scene.explodedBoxes();
   }
 

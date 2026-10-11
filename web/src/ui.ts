@@ -174,6 +174,8 @@ export interface BuildingInfo {
   pieces: PiecesState;
   deps: { imports: { index: number; path: string }[]; importDirs: { district: number; path: string }[]; importedBy: { index: number; path: string }[] };
   history?: HistoryState;
+  /** Reasons for the building's architecture (empty in classic mode). */
+  looks: string[];
 }
 
 export interface FileCommit { hash: string; date: string; author: string; subject: string; body?: string }
@@ -258,6 +260,12 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
       list.append(b);
     }
     box.append(list);
+  }
+  if (d.looks.length) {
+    const w = el('div', 'looks');
+    w.append(el('div', 'title', 'Why it looks like this'));
+    for (const t of d.looks) w.append(el('div', 'archrow', t));
+    box.append(w);
   }
   box.append(depsSection(d.deps, h));
   box.append(piecesSection(d.pieces, h));
@@ -694,6 +702,7 @@ export interface Controls {
   onCopyReport(): void;
   onLinksToggle(): void;
   onCodeLinks(mode: 'off' | 'selection' | 'all'): void;
+  onBuildings(classic: boolean): void;
 }
 
 export function linkToggles() {
@@ -719,6 +728,7 @@ export function bindControls(h: Controls) {
   src.addEventListener('input', autosize);
   src.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $<HTMLFormElement>('repoform').requestSubmit(); };
   $('showdeps').onchange = () => h.onLinksToggle();
+  $<HTMLSelectElement>('buildings').onchange = e => h.onBuildings((e.target as HTMLSelectElement).value === 'classic');
   $<HTMLSelectElement>('codelinks').onchange = e => h.onCodeLinks((e.target as HTMLSelectElement).value as 'off' | 'selection' | 'all');
   $('showpeople').onchange = () => h.onLinksToggle();
   $('repoform').onsubmit = e => {
@@ -767,5 +777,19 @@ export function flashCopied(text: string) {
   c.textContent = text;
   setTimeout(() => { if (c.textContent === text) c.textContent = ''; }, 2500);
 }
+
+export function setBuildingsMode(classic: boolean) { $<HTMLSelectElement>('buildings').value = classic ? 'classic' : 'arch'; }
+
+/** Architecture legend: what shape, facade, roof and condition mean. */
+export function showArchLegend(rows: [string, string[]][]) {
+  const box = $('archbody');
+  box.replaceChildren();
+  for (const [group, items] of rows) {
+    box.append(el('div', 'title', group));
+    for (const t of items) box.append(el('div', 'archrow', t));
+  }
+}
+
+export function setArchLegendVisible(on: boolean) { $('archlegend').hidden = !on; }
 
 export function setCodeLinksMode(m: 'off' | 'selection' | 'all') { $<HTMLSelectElement>('codelinks').value = m; }

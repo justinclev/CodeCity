@@ -3,7 +3,7 @@ package city
 
 import "github.com/justinclev/codecity/internal/deps"
 
-const Version = 5
+const Version = 6
 
 type City struct {
 	// Facts is what the repo provides and uses, for linking repositories; not sent to the viewer.
@@ -146,6 +146,42 @@ type Building struct {
 	// indices) of the same repository that this file imports, at the newest commit.
 	Imp  []int `json:"imp,omitempty"`
 	ImpD []int `json:"impd,omitempty"`
+	// Shape is the building's architecture, derived from its code at the newest
+	// commit (nil when the file is absent then). It never changes between commits.
+	Shape *Shape `json:"shape,omitempty"`
+}
+
+// Shape kinds (archetypes).
+const (
+	ShapeTower = "tower" // one class / type with its methods dominates: a tower on a podium
+	ShapeSlab  = "slab"  // many small functions, none dominant
+	ShapeTypes = "types" // declarations only (types, interfaces): a glass box
+	ShapeData  = "data"  // data / config files: utility block
+	ShapeDoc   = "doc"   // documentation: library
+	ShapeTest  = "test"  // tests: lattice annex
+)
+
+// Roles (rooftops), from the flow analysis at the newest commit.
+const (
+	RoleEntry = "entry" // program entry point (main)
+	RoleServe = "serve" // handles HTTP routes
+	RoleDB    = "db"    // talks to a database
+	RoleExec  = "exec"  // runs processes
+	RoleFiles = "files" // reads / writes files
+	RoleCall  = "call"  // calls HTTP services
+)
+
+// Shape describes how a file is built.
+type Shape struct {
+	// Tiers: LOC of the stacked tiers, bottom first. Tier 0 is the podium (imports,
+	// small declarations); each further tier is one dominant declaration group
+	// (≥15% of the file, largest first), named in Names.
+	Tiers []int    `json:"t"`
+	Names []string `json:"n,omitempty"`
+	Kind  string   `json:"k,omitempty"`
+	Funcs int      `json:"f,omitempty"` // functions and methods
+	Types int      `json:"y,omitempty"` // classes, structs, interfaces, enums, type aliases
+	Roles []string `json:"r,omitempty"`
 }
 
 // Facts are extracted at the newest commit for cross-repository linking.

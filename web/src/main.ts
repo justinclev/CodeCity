@@ -2,7 +2,7 @@ import './style.css';
 import { CityScene, type Floor, type LinkView } from './scene';
 import { showCode, type FileData } from './code';
 import { WalkMode, type Destination, type Sym } from './walk/walk';
-import type { InteriorFloor, InteriorSpec } from './walk/interior';
+import type { InteriorArch, InteriorFloor, InteriorSpec } from './walk/interior';
 import type { PanelRow } from './walk/codewall';
 import type { CardData, CardSection } from './walk/panels';
 import type { GameWorld } from './walk/game';
@@ -12,6 +12,7 @@ import { FlowView } from './flow/view';
 import type { FlowGraph } from './flow/model';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
+import { legend, FINISH_COLOR, TIER_COLORS, tierOfFloors } from './architecture';
 import { SCHEMA_VERSION, type City, type ColorMode } from './types';
 import type { ThemeName } from './theme';
 
@@ -119,6 +120,13 @@ function floorsOf(f: FileData): Floor[] {
   return out;
 }
 
+/** Floors in the order the building stacks them: podium pieces first, then each tier's (file order within). */
+function byTier<T extends { name: string }>(i: number, fl: T[]): T[] {
+  if (scene.classicBoxes) return fl;
+  const t = tierOfFloors(scene.specOf(i), fl.map(x => x.name));
+  return fl.map((x, k) => ({ x, t: t[k], k })).sort((a, b) => a.t - b.t || a.k - b.k).map(y => y.x);
+}
+
 async function loadPieces(i: number) {
   if (!city) return;
   const path = city.buildings[i].path, commit = scene.commit;
@@ -131,7 +139,7 @@ async function loadPieces(i: number) {
     const f = await fetchFile(path, hash);
     if (selected !== i || scene.commit !== commit) return; // selection moved on
     file = f;
-    floors = floorsOf(f);
+    floors = byTier(i, floorsOf(f));
     refreshSkin();
   } catch (e) {
     if (selected !== i) return;
@@ -367,6 +375,8 @@ function ownedFiles() {
 
 function refreshLegend() {
   if (!city) return;
+  ui.showArchLegend(legend());
+  ui.setArchLegendVisible(!scene.classicBoxes);
   ui.showLegend({ mode: scene.colorMode, city, ownedFiles: ownedFiles(), authorFilter: scene.authorFilter,
     onAuthor: setAuthorFilter, baselineLabel: commitLabel(scene.baseline) });
   ui.setBaselineRow(scene.colorMode === 'compare', commitLabel(scene.baseline));
@@ -478,6 +488,7 @@ function buildingInfo(i: number): ui.BuildingInfo {
     coupled: (b.cpl ?? []).filter(([j]) => scene.exists(j)).map(([j, shared, degree]) => ({ index: j, path: c.buildings[j].path, shared, degree })),
     links: links(b.path),
     pieces: piecesState(),
+    looks: scene.whyLooks(i),
     deps: {
       imports: (b.imp ?? []).filter(j => scene.exists(j)).map(j => ({ index: j, path: c.buildings[j].path })),
       importDirs: (b.impd ?? []).map(d => ({ district: d, path: c.districts[d].path })),
@@ -645,6 +656,13 @@ function stopPlayback() { playing = false; ui.setPlaying(false); }
 
 // ---------------------------------------------------------------- controls
 let searchHits: number[] = [];
+function setBuildings(classic: boolean) {
+  scene.setClassic(classic);
+  store.set('classic', classic);
+  ui.setArchLegendVisible(!classic);
+  refreshSelection();
+}
+
 ui.bindControls({
   onMetric: v => { scene.metric = v; scene.refresh(false); },
   onScale: v => { scene.scale = v; scene.refresh(false); },
@@ -668,6 +686,7 @@ ui.bindControls({
   onHacker: () => toggleHacker(),
   onTab: t => { tab = t; store.set('tab', t); refreshInsights(); },
   onLinksToggle: () => { scene.setLinks(linkViews()); },
+  onBuildings: setBuildings,
   onCodeLinks: m => { scene.codeLinkMode = m; store.set('codelinks.' + scene.theme.name, m); scene.refreshCodeLinks(); },
   onCopyReport: () => {
     if (!city || !insights) return;
@@ -676,6 +695,7 @@ ui.bindControls({
   },
 });
 tab = store.get<ui.Tab>('tab') ?? 'hotspots';
+if (store.get<boolean>('classic')) { scene.setClassic(true); ui.setBuildingsMode(true); }
 
 // ---------------------------------------------------------------- branches
 const sourceBox = document.getElementById('source') as HTMLTextAreaElement;
@@ -735,6 +755,11 @@ addEventListener('keydown', e => {
   else if (e.key === 'u' || e.key === 'U') { if (tourAt >= 0) endTour(); else startTour(); }
   else if ((e.key === 'n' || e.key === 'N') && tourAt >= 0) tourGo(tourAt + 1);
   else if ((e.key === 'b' || e.key === 'B') && tourAt >= 0) tourGo(tourAt - 1);
+  else if (e.key === 'b' || e.key === 'B') {
+    const classic = !scene.classicBoxes;
+    ui.setBuildingsMode(classic);
+    setBuildings(classic);
+  }
   else if (e.key === 'l' || e.key === 'L') {
     const order = ['selection', 'all', 'off'] as const;
     scene.codeLinkMode = order[(order.indexOf(scene.codeLinkMode) + 1) % 3];
@@ -877,7 +902,11 @@ const walk = new WalkMode(scene, {
     const hash = repoCommitAt(repoOf(i), scene.commit);
     if (!hash) throw new Error('file does not exist at this commit');
     const f = await fetchFile(c.buildings[i].path, hash);
-    const floors = interiorFloors(f);
+    // storeys follow the building's tiers, as seen outside: the podium's pieces first, then each tier's (file order within)
+    const sp0 = scene.specOf(i);
+    const rawFloors = interiorFloors(f);
+    const rawTier = scene.classicBoxes ? rawFloors.map(() => 0) : tierOfFloors(sp0, rawFloors.map(fl => fl.name));
+    const floors = rawFloors.map((fl, k) => ({ fl, t: rawTier[k], k })).sort((a, b) => a.t - b.t || a.k - b.k).map(x => x.fl);
     const lines = f.content.split('\n');
     const b = c.buildings[i];
     const v = scene.valuesAt(i);
@@ -887,6 +916,8 @@ const walk = new WalkMode(scene, {
       { text: b.path, color: '#bff8ff', size: 30 },
       { text: `${b.lang} · ${ui.fmt(v.loc)} LOC · complexity ${ui.fmt(v.complexity)} · ${floors.length} floors`, color: '#7fb8c8', size: 28 },
     ];
+    // why the building looks the way it does (shape, facade, roof)
+    for (const t of scene.whyLooks(i).slice(0, 3)) lobby.push({ text: t, color: '#8fd9a8', size: 24 });
     const own = b.own ? c.authors?.[b.own[0]] : undefined;
     if (own) lobby.push({ text: `owner: ${own.name}`, color: '#7fb8c8', size: 28 });
     const imps = (b.imp ?? []).filter(j => scene.exists(j));
@@ -900,8 +931,12 @@ const walk = new WalkMode(scene, {
       lobby.push({ text: '' }, { text: 'IMPORTED BY', color: '#ff8adf', size: 28 });
       for (const k of by.slice(0, 8)) lobby.push({ text: c.buildings[k].path, action: () => go(dest(k)), size: 28 });
     }
+    const sp = scene.specOf(i);
+    const tierOf = tierOfFloors(sp, floors.map(fl => fl.name));
+    const multi = !scene.classicBoxes && sp.tiers.length > 1;
     const directory: PanelRow[] = floors.map((fl, k) => ({
-      text: `L${k + 1}  ${fl.name}`, hint: `${fl.loc} LOC`, size: 30,
+      text: `L${k + 1}  ${fl.name}`, hint: multi ? `${fl.loc} LOC · ${sp.tiers[tierOf[k]].name}` : `${fl.loc} LOC`, size: 30,
+      color: multi ? TIER_COLORS[tierOf[k] % TIER_COLORS.length] : undefined,
       action: () => go({ building: i, line: fl.start, label: `${fl.name} — ${b.path}:${fl.start}` }),
     }));
     const references = (fl: InteriorFloor): PanelRow[] => {
@@ -926,8 +961,14 @@ const walk = new WalkMode(scene, {
       }
       return rows.length ? rows : [{ text: '(no definitions from elsewhere)', size: 28 }];
     };
+    const arch: InteriorArch | undefined = scene.classicBoxes ? undefined : {
+      facade: sp.facade, finish: FINISH_COLOR[sp.facade],
+      tiers: sp.tiers.map((t, k) => ({ name: t.name, s: t.s, color: TIER_COLORS[k % TIER_COLORS.length] })),
+      tierOf,
+      roof: scene.whyLooks(i).filter(l => l.startsWith('Roof:')).map(l => l.slice(6)),
+    };
     return { path: b.path, lang: b.lang, lines, floors, lobby, directory, references,
-      glyphs: scene.glyphTexture, circuit: scene.circuitTexture };
+      glyphs: scene.glyphTexture, circuit: scene.circuitTexture, arch };
   },
   buildingByPath: p => pathIndex.get(p) ?? -1,
   buildingName: i => city!.buildings[i].path,
@@ -938,7 +979,7 @@ const walk = new WalkMode(scene, {
     const hash = repoCommitAt(repoOf(i), scene.commit);
     if (!hash) throw new Error('file does not exist at this commit');
     const f = await fetchFile(city!.buildings[i].path, hash);
-    return floorsOf(f).map(x => ({ ...x, start: f.pieces[x.piece]?.start })).slice(0, MAX_FLOORS);
+    return byTier(i, floorsOf(f)).map(x => ({ ...x, start: f.pieces[x.piece]?.start })).slice(0, MAX_FLOORS);
   },
   async card(i, act) {
     const c = city!, b = c.buildings[i], v = scene.valuesAt(i);
@@ -1006,6 +1047,17 @@ function topDistricts() {
   return city!.districts.filter(d => d.depth === 1 && scene.districtMembers(city!.districts.indexOf(d)).length > 0);
 }
 
+/** One landmark per rooftop role (spire, antenna, tanks, …), the most-imported file of each kind first. */
+function landmarkBuildings(live: number[], files: ({ test: boolean } | null)[]): number[] {
+  const out: number[] = [];
+  for (const role of ['entry', 'serve', 'db', 'exec', 'files', 'call'] as const) {
+    const cand = live.filter(i => !files[i]!.test && !out.includes(i) && scene.specOf(i).roles.includes(role))
+      .sort((a, b) => scene.importersOf(b).length - scene.importersOf(a).length || a - b);
+    if (cand.length) out.push(cand[0]);
+  }
+  return out;
+}
+
 function gameWorld(): GameWorld {
   const c = city!;
   const topOf = (d: number): string => {
@@ -1031,6 +1083,7 @@ function gameWorld(): GameWorld {
     entries: stops.filter(s => s.kind === 'entry').map(s => s.building),
     readme: stops.filter(s => s.kind === 'readme').map(s => s.building),
     core, hubs,
+    landmarks: landmarkBuildings(live, files),
     hotspots: c.churn ? scene.topHotspots(6).map(h => h.index).filter(i => !files[i]!.test) : [],
     tops: [...new Set(files.filter(f => f && f.top).map(f => f!.top))],
   };
