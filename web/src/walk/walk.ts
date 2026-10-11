@@ -531,9 +531,13 @@ export class WalkMode {
 
   private elevatorPage = 0;
 
+  /** Standing on the platform while it moves: the platform carries you (however long a frame takes). */
+  private riding = false;
+
   private ride(L: number) {
     const it = this.interior!;
     const dur = it.callElevator(L);
+    this.riding = it.inShaft(this.pos.x, this.pos.z) && Math.abs(this.pos.y - it.platformY) < 1.2;
     this.toast(`Going to ${L === 0 ? 'the lobby' : `L${L} · ${it.spec.floors[L - 1].name}`}`, dur + 0.5);
   }
 
@@ -1170,8 +1174,11 @@ export class WalkMode {
       if (key('Space') && this.grounded) { this.velY = this.h * 3.6; this.grounded = false; }
       this.velY -= this.h * 11 * dt;
       ny = this.pos.y + this.velY * dt;
-      const onElevator = this.where === 'inside' && this.interior!.inShaft(this.pos.x, this.pos.z) && Math.abs(this.pos.y - this.interior!.platformY) < 1.2;
-      if (onElevator && this.velY <= 0) { ny = this.interior!.platformY; this.velY = 0; this.grounded = true; }
+      const inShaft = this.where === 'inside' && this.interior!.inShaft(this.pos.x, this.pos.z);
+      if (!inShaft) this.riding = false;
+      const onElevator = inShaft && (this.riding || Math.abs(this.pos.y - this.interior!.platformY) < 1.2);
+      if (this.riding && !this.interior!.elevatorMoving) this.riding = false; // arrived: this frame still lands you on it
+      if (onElevator && (this.riding || this.velY <= 0)) { ny = this.interior!.platformY; this.velY = 0; this.grounded = true; }
       else if (ny <= g) { ny = g; this.velY = 0; this.grounded = true; }
       else this.grounded = ny - g < 0.02;
     }
