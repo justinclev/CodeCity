@@ -18,6 +18,8 @@ export interface GameWorld {
   core: number[]; // most-imported first
   hubs: number[];
   hotspots: number[];
+  /** Buildings with rooftop equipment (spire, antenna, tanks, …), one per role kind first. */
+  landmarks: number[];
   tops: string[]; // top-level directories that contain files
 }
 
@@ -26,6 +28,7 @@ interface State {
   seen: string[]; studied: string[]; entered: string[]; exploded: string[]; origins: string[]; shards: string[];
   traces: number; quizRight: number; quizWrong: number; flewHigh: boolean; mapTravel: number; tourDone: boolean;
   quests: string[]; achievements: string[];
+  roofs?: string[];
 }
 
 const empty = (): State => ({ xp: 0, seen: [], studied: [], entered: [], exploded: [], origins: [], shards: [], traces: 0,
@@ -84,6 +87,15 @@ export class Game {
       if (this.sets.studied.has(f.path)) { files++; loc += f.loc; }
     });
     return { loc: loc / this.totalLoc, files, total };
+  }
+  /** Stood on a landmark's roof and read what it does. */
+  roofVisited(i: number) {
+    const p = this.path(i);
+    const roofs = (this.s.roofs ??= []);
+    if (roofs.includes(p)) return;
+    roofs.push(p);
+    this.give(10, 'rooftop');
+    this.dirty(true);
   }
   questDone(q: Quest) { return this.s.quests.includes(q.id); }
   /** The first unfinished quest (shown in the tracker). */
@@ -191,6 +203,11 @@ export class Game {
     }
     if (w.tops.length > 1) q.push({ id: 'districts', title: 'Grand tour', desc: `Study at least one file in every top-level directory (${w.tops.length}).`, xp: 70, target: w.tops.length,
       progress: () => w.tops.filter(t => w.files.some(f => f && f.top === t && st.studied.has(f.path))).length });
+    if (w.landmarks.length) {
+      const lm = w.landmarks.slice(0, 4);
+      q.push({ id: 'landmarks', title: 'Skyline tour', desc: `Climb onto the roofs of landmarks (spires, antennas, tanks…) and press E: ${lm.map(i => w.files[i]!.name).join(', ')}.`, xp: 60, target: lm.length,
+        progress: () => lm.filter(i => (this.s.roofs ?? []).includes(this.path(i))).length, pins: () => lm });
+    }
     q.push({ id: 'quiz', title: 'Pop quiz', desc: 'Answer 5 questions right at the ? terminals.', xp: 60, target: 5, progress: () => this.s.quizRight });
     q.push({ id: 'map', title: 'Cartographer', desc: 'Study a quarter of the code (by lines).', xp: 80, target: 25, progress: () => Math.floor(this.explored().loc * 100) });
     return q;

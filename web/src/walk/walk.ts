@@ -478,6 +478,8 @@ export class WalkMode {
     if (this.where === 'city') {
       const t = this.nearTerminal();
       if (t) { this.openQuiz(t); return; }
+      const roof = this.roofUnderfoot();
+      if (roof >= 0) { this.useRoof(roof); return; }
       if (this.aim?.kind === 'floor') { this.enterFloor(this.aim.k); return; }
       const landed = this.landed.i >= 0 && Math.hypot(this.pos.x - this.landed.x, this.pos.z - this.landed.z) < this.u * 2 ? this.landed.i : -1;
       const i = this.aim?.kind === 'building' ? this.aim.i : landed >= 0 ? landed : this.nearestFacade();
@@ -500,6 +502,24 @@ export class WalkMode {
     const L = it.levelAt(this.pos.y);
     it.callElevator(L);
     this.toast('Elevator called — step onto the platform and press E');
+  }
+
+  /** The building whose rooftop equipment you are standing next to (on its roof), or -1. */
+  private roofUnderfoot(): number {
+    for (const b of this.obstacles?.solids ?? []) {
+      if (Math.abs(this.pos.y - b.top) > this.u * 0.4) continue;
+      if (this.pos.x < b.x0 - this.u || this.pos.x > b.x1 + this.u || this.pos.z < b.z0 - this.u || this.pos.z > b.z1 + this.u) continue;
+      if (this.scene.specOf(b.i).roof.length && b.top >= this.scene.roofOf(b.i) - 1e-3) return b.i;
+    }
+    return -1;
+  }
+
+  /** Rooftop equipment says what the file does with the outside world. */
+  private useRoof(i: number) {
+    const lines = this.scene.whyLooks(i).filter(l => l.startsWith('Roof:')).map(l => l.slice(6));
+    if (!lines.length) return;
+    this.game?.roofVisited(i);
+    this.toast(`${this.host.buildingName(i)} · ${lines.join(' · ')} — E on the ground floor to go in, D for the flow view`, 6);
   }
 
   private elevatorPage = 0;

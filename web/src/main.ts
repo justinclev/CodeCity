@@ -905,6 +905,8 @@ const walk = new WalkMode(scene, {
       { text: b.path, color: '#bff8ff', size: 30 },
       { text: `${b.lang} · ${ui.fmt(v.loc)} LOC · complexity ${ui.fmt(v.complexity)} · ${floors.length} floors`, color: '#7fb8c8', size: 28 },
     ];
+    // why the building looks the way it does (shape, facade, roof)
+    for (const t of scene.whyLooks(i).slice(0, 3)) lobby.push({ text: t, color: '#8fd9a8', size: 24 });
     const own = b.own ? c.authors?.[b.own[0]] : undefined;
     if (own) lobby.push({ text: `owner: ${own.name}`, color: '#7fb8c8', size: 28 });
     const imps = (b.imp ?? []).filter(j => scene.exists(j));
@@ -1024,6 +1026,17 @@ function topDistricts() {
   return city!.districts.filter(d => d.depth === 1 && scene.districtMembers(city!.districts.indexOf(d)).length > 0);
 }
 
+/** One landmark per rooftop role (spire, antenna, tanks, …), the most-imported file of each kind first. */
+function landmarkBuildings(live: number[], files: ({ test: boolean } | null)[]): number[] {
+  const out: number[] = [];
+  for (const role of ['entry', 'serve', 'db', 'exec', 'files', 'call'] as const) {
+    const cand = live.filter(i => !files[i]!.test && !out.includes(i) && scene.specOf(i).roles.includes(role))
+      .sort((a, b) => scene.importersOf(b).length - scene.importersOf(a).length || a - b);
+    if (cand.length) out.push(cand[0]);
+  }
+  return out;
+}
+
 function gameWorld(): GameWorld {
   const c = city!;
   const topOf = (d: number): string => {
@@ -1049,6 +1062,7 @@ function gameWorld(): GameWorld {
     entries: stops.filter(s => s.kind === 'entry').map(s => s.building),
     readme: stops.filter(s => s.kind === 'readme').map(s => s.building),
     core, hubs,
+    landmarks: landmarkBuildings(live, files),
     hotspots: c.churn ? scene.topHotspots(6).map(h => h.index).filter(i => !files[i]!.test) : [],
     tops: [...new Set(files.filter(f => f && f.top).map(f => f!.top))],
   };
