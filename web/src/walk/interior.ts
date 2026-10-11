@@ -16,6 +16,16 @@ export interface InteriorSpec {
   references: (floor: InteriorFloor) => PanelRow[]; // identifiers defined elsewhere (teleport actions)
   glyphs: THREE.Texture | null;
   circuit: THREE.Texture | null;
+  /** The building's architecture inside: finish (material), the tier of each storey, the roof. */
+  arch?: InteriorArch;
+}
+
+export interface InteriorArch {
+  facade: string;          // architecture.ts Facade
+  finish: string;          // wall accent color
+  tiers: { name: string; s: number; color: string }[];
+  tierOf: number[];        // per floor (level k = tierOf[k-1])
+  roof: string[];          // what the rooftop equipment means
 }
 
 // Layout (interior units ≈ metres; the player is 1.8 tall)
@@ -96,15 +106,34 @@ export class Interior {
     // ---- walls: dark glass with drifting data glyphs
     const glyph = spec.glyphs?.clone();
     if (glyph) { glyph.wrapS = glyph.wrapT = THREE.RepeatWrapping; glyph.repeat.set(16 / 5, top / 5); glyph.needsUpdate = true; this.disposables.push(glyph); }
+    const arch = spec.arch;
+    const finish = new THREE.Color(arch?.finish ?? '#2ad4ff');
     const wallMat = new THREE.MeshStandardMaterial({ color: '#01030a', roughness: 0.25, metalness: 0.4, side: THREE.DoubleSide,
-      emissive: new THREE.Color('#2ad4ff'), emissiveMap: glyph ?? null, emissiveIntensity: glyph ? 0.12 : 0 });
+      emissive: finish.clone().lerp(new THREE.Color('#2ad4ff'), 0.4), emissiveMap: glyph ?? null, emissiveIntensity: glyph ? 0.12 : 0 });
     this.disposables.push(wallMat);
+    // the facade's material, drawn as a faint pattern on the inside of the walls (brick courses, concrete grid, steel bracing, …)
+    const pattern = arch ? finishTexture(arch.facade) : null;
+    let patMat: THREE.MeshBasicMaterial | null = null;
+    if (pattern) {
+      pattern.repeat.set(16 / 4, top / 4);
+      patMat = new THREE.MeshBasicMaterial({ map: pattern, color: finish.clone().multiplyScalar(0.32), transparent: true, blending: THREE.AdditiveBlending,
+        depthWrite: false, toneMapped: false, side: THREE.DoubleSide });
+      this.disposables.push(pattern, patMat);
+    }
     const wall = (w: number, rotY: number, x: number, z: number) => {
       const m = new THREE.Mesh(new THREE.PlaneGeometry(w, top), wallMat);
       m.position.set(x, top / 2, z);
       m.rotation.y = rotY;
       sc.add(m);
       this.disposables.push(m.geometry);
+      if (patMat) {
+        const p = new THREE.Mesh(m.geometry, patMat);
+        p.position.copy(m.position).multiplyScalar(0.996);
+        p.position.y = top / 2;
+        p.rotation.y = rotY;
+        p.renderOrder = 1;
+        sc.add(p);
+      }
     };
     wall(16, 0, 0, -HALF);
     wall(16, Math.PI, 0, HALF);
@@ -218,10 +247,73 @@ export class Interior {
 
     for (let L = 1; L < this.levels; L++) {
       const f = spec.floors[L - 1];
-      const sign = textSprite(`L${L} · ${f.name}`, 0.42, L % 2 ? '#ff8adf' : '#5ff0ff');
+      const tier = arch?.tiers[arch.tierOf[L - 1] ?? 0];
+      const sign = textSprite(`L${L} · ${f.name}${tier && arch!.tiers.length > 1 ? `   ▣ ${tier.name}` : ''}`, 0.42, tier && arch!.tiers.length > 1 ? tier.color : L % 2 ? '#ff8adf' : '#5ff0ff');
       sign.position.set(4.4, L * FH + 3.4, -6.6);
       sc.add(sign);
       this.walls.set(L, { sign });
+    }
+    if (arch) this.buildTiers(arch, top);
+  }
+
+  /**
+   * Tiers inside: every storey wears its tier's accent (a band along the walls), and storeys of
+   * a set-back tier show where the facade steps in — a glowing outline with the terrace beyond it.
+   */
+  private buildTiers(arch: InteriorArch, top: number) {
+    const sc = this.scene;
+    const lineMats = new Map<string, THREE.MeshBasicMaterial>();
+    const mat = (c: string) => {
+      let m = lineMats.get(c);
+      if (!m) { m = new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(1.2), toneMapped: false }); lineMats.set(c, m); this.disposables.push(m); }
+      return m;
+    };
+    const terraceMat = new THREE.MeshBasicMaterial({ color: '#0b2a33', transparent: true, opacity: 0.35, depthWrite: false });
+    this.disposables.push(terraceMat);
+    const box = new THREE.BoxGeometry(1, 1, 1);
+    this.disposables.push(box);
+    for (let L = 1; L < this.levels; L++) {
+      const t = arch.tiers[arch.tierOf[L - 1] ?? 0];
+      if (!t || arch.tiers.length < 2) continue;
+      const m = mat(t.color);
+      // tier band along the walls, just under the ceiling
+      for (const [w, rot, x, z] of [[16, 0, 0, -HALF + 0.06], [16, 0, 0, HALF - 0.06], [16, Math.PI / 2, -HALF + 0.06, 0], [16, Math.PI / 2, HALF - 0.06, 0]] as const) {
+        const band = new THREE.Mesh(box, m);
+        band.scale.set(w, 0.12, 0.03);
+        band.position.set(x, L * FH + FH - 0.35, z);
+        band.rotation.y = rot;
+        sc.add(band);
+      }
+      if (t.s > 0.97) continue;
+      // setback: the tier's footprint as a glowing outline on the floor; beyond it, the terrace
+      const half = Math.max(5.5, HALF * t.s), y = L * FH + 0.025;
+      for (const [sx, sz, x, z] of [[half * 2, 0.06, 0, -half], [half * 2, 0.06, 0, half], [0.06, half * 2, -half, 0], [0.06, half * 2, half, 0]] as const) {
+        const ln = new THREE.Mesh(box, m);
+        ln.scale.set(sx, 0.03, sz);
+        ln.position.set(x, y, z);
+        sc.add(ln);
+      }
+      for (const [x0, x1, z0, z1] of [[-HALF, HALF, -HALF, -half], [-HALF, HALF, half, HALF], [-HALF, -half, -half, half], [half, HALF, -half, half]]) {
+        if (x1 - x0 < 0.05 || z1 - z0 < 0.05) continue;
+        const p = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0, z1 - z0).rotateX(-Math.PI / 2), terraceMat);
+        p.position.set((x0 + x1) / 2, y + 0.005, (z0 + z1) / 2);
+        sc.add(p);
+        this.disposables.push(p.geometry);
+      }
+      if ((arch.tierOf[L - 2] ?? -1) !== arch.tierOf[L - 1]) { // the first storey of a set-back tier
+        const lab = textSprite(`TERRACE · ${t.name} steps in`, 0.3, t.color);
+        lab.position.set(0, y + 0.4, -half - (HALF - half) / 2);
+        sc.add(lab);
+      }
+    }
+    // the roof: what the equipment up there says about this code
+    if (arch.roof.length) {
+      const rows = ['ROOF ▲', ...arch.roof];
+      rows.forEach((t, k) => {
+        const sp = textSprite(t, k === 0 ? 0.42 : 0.32, '#ffd23c');
+        sp.position.set(0, top - 0.6 - k * 0.42, 0);
+        sc.add(sp);
+      });
     }
   }
 
@@ -349,6 +441,36 @@ export class Interior {
       if (sp.isSprite) { sp.material.map?.dispose(); sp.material.dispose(); }
     });
   }
+}
+
+/** A tiling line pattern for an interior finish (white on transparent; tinted by the material). */
+function finishTexture(facade: string): THREE.CanvasTexture | null {
+  const S = 256;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = S;
+  const g = cv.getContext('2d')!;
+  g.strokeStyle = '#ffffff';
+  g.lineWidth = 3;
+  const line = (x0: number, y0: number, x1: number, y1: number) => { g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke(); };
+  switch (facade) {
+    case 'brick':
+      for (let r = 0; r < 8; r++) {
+        line(0, r * 32, S, r * 32);
+        for (let c = 0; c < 4; c++) { const x = c * 64 + (r % 2) * 32; line(x, r * 32, x, r * 32 + 32); }
+      }
+      break;
+    case 'concrete': for (let k = 0; k <= 4; k++) { line(k * 64, 0, k * 64, S); line(0, k * 64, S, k * 64); } g.lineWidth = 1.5; for (let k = 0; k < 4; k++) for (let j = 0; j < 4; j++) { g.beginPath(); g.arc(k * 64 + 12, j * 64 + 12, 3, 0, 7); g.stroke(); } break;
+    case 'glass': case 'crystal': for (let k = 0; k <= 2; k++) line(k * 128, 0, k * 128, S); line(0, 0, S, 0); line(0, 128, S, 128); break;
+    case 'steel': line(0, 0, S, S); line(S, 0, 0, S); line(0, 0, S, 0); line(0, 0, 0, S); g.lineWidth = 1.5; for (const [x, y] of [[8, 8], [S - 8, 8], [8, S - 8], [S - 8, S - 8]]) { g.beginPath(); g.arc(x, y, 4, 0, 7); g.stroke(); } break;
+    case 'library': case 'colonnade': for (let k = 0; k < 4; k++) { line(k * 64 + 20, 0, k * 64 + 20, S); line(k * 64 + 44, 0, k * 64 + 44, S); } line(0, 12, S, 12); break;
+    case 'lattice': for (let k = -S; k <= S; k += 64) { line(k, 0, k + S, S); line(k + S, 0, k, S); } break;
+    case 'utility': for (let k = 0; k < S; k += 16) line(0, k, S, k); break;
+    case 'storefront': line(0, 200, S, 200); for (let k = 0; k <= S; k += 32) line(k, 200, k + 16, 230); break;
+    default: return null;
+  }
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
 }
 
 export function textSprite(text: string, height: number, color: string): THREE.Sprite {

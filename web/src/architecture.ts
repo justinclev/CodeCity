@@ -142,6 +142,30 @@ export function specOf(b: Building, plinth: boolean): BuildingSpec {
   return { kind, facade, tiers, roof: roof.slice(0, 3), roles, plinth, ribbon: kind === 'slab' };
 }
 
+/** Interior finish color per facade (walk-mode interiors wear the building's material). */
+export const FINISH_COLOR: Record<Facade, string> = {
+  plain: '#5ff0ff', concrete: '#a9bccf', glass: '#5ff0ff', brick: '#ff9a5c', steel: '#b8c4d6', storefront: '#ff6bd6',
+  library: '#ffe08a', utility: '#8fa3b0', lattice: '#7dff9a', crystal: '#bff8ff', colonnade: '#ffe08a',
+};
+
+/** Accent per tier (podium first), shared by interiors and the inspector. */
+export const TIER_COLORS = ['#5ff0ff', '#ffb547', '#ff6bd6', '#7dff9a', '#b18cff'];
+
+/**
+ * Which tier each storey (a piece of the file, named like "Server.Start", "Server (body)" or "helper")
+ * belongs to: the tier named after its declaration group, else the podium (0). Indexes spec.tiers.
+ */
+export function tierOfFloors(spec: BuildingSpec, floorNames: string[]): number[] {
+  return floorNames.map(n => {
+    for (let k = spec.tiers.length - 1; k >= 0; k--) {
+      const t = spec.tiers[k].name;
+      if (t === 'podium' || t === 'lobby' || !t) continue;
+      if (n === t || n.startsWith(t + '.') || n.startsWith(t + ' ') || n.startsWith(t + '::') || n.endsWith(' for ' + t) || n.includes(' for ' + t + '.')) return k;
+    }
+    return spec.plinth && spec.tiers.length > 1 ? 1 : 0; // the podium sits on the lobby when there is one
+  });
+}
+
 /** A single box (the "Classic boxes" toggle). */
 export function classicSpec(b: Building): BuildingSpec {
   return { kind: 'mixed', facade: 'plain', tiers: [{ y0: 0, y1: 1, s: 1, facade: 'plain', name: b.name, loc: 0 }], roof: [], roles: [], plinth: false, ribbon: false };
