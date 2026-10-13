@@ -10,6 +10,7 @@ import { busRoute, TraceLayer, type Trace } from './links';
 import { buildSpecs, classicSpec, facadeCode, pathSeed, explain, type BuildingSpec, type Condition } from './architecture';
 import { RoofKit, type Works } from './roofs';
 import { Walkways } from './walkways';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { HackerFx } from './fx';
 import { circuitTexture, codeTexture, glyphAtlas, skyTexture, THEMES, type Theme, type ThemeName } from './theme';
 import type { City, ColorMode, Metric, ScaleMode } from './types';
@@ -36,7 +37,7 @@ export type Pick = { kind: 'building'; index: number } | { kind: 'district'; ind
 export type LinkKind = 'dependency' | 'people' | 'api' | 'message';
 export interface LinkView { index: number; from: number; to: number; kind: LinkKind; strength: number; label: string }
 
-interface LinkMesh { view: LinkView; mesh: THREE.Mesh; pick: THREE.Mesh; mat: THREE.ShaderMaterial; label?: THREE.Sprite }
+interface LinkMesh { view: LinkView; mesh: THREE.Mesh; pick: THREE.Mesh; mat: THREE.ShaderMaterial; label?: THREE.Sprite; extra?: THREE.ShaderMaterial[] }
 
 /** Tube material with light pulses flowing from the start (uv.x = 0) to the end. */
 function flowMaterial(a: THREE.Color, b: THREE.Color, count: number, speed: number, additive: boolean): THREE.ShaderMaterial {
@@ -262,7 +263,7 @@ export class CityScene {
     this.codeLinks.update(this.flowTime);
     if (this.linkMeshes.length || this.highwayGroup.children.length || this.arcs.children.length || this.codeLinks.group.children.length) {
       this.flowTime += dt;
-      for (const l of this.linkMeshes) l.mat.uniforms.uTime.value = this.flowTime;
+      for (const l of this.linkMeshes) { l.mat.uniforms.uTime.value = this.flowTime; for (const m of l.extra ?? []) m.uniforms.uTime.value = this.flowTime; }
       for (const o of this.arcs.children) {
         const m = (o as THREE.Mesh).material as THREE.ShaderMaterial;
         if (m.uniforms?.uTime) m.uniforms.uTime.value = this.flowTime;
@@ -1401,42 +1402,110 @@ export class CityScene {
     return [cx + dx * Math.min(1, t), cz + dz * Math.min(1, t)];
   }
 
+  /** Does the segment p→q cross rectangle r (grown by pad)? */
+  private segHits(p: [number, number], q: [number, number], r: { x: number; z: number; w: number; d: number }, pad: number): boolean {
+    const x0 = r.x - pad, x1 = r.x + r.w + pad, z0 = r.z - pad, z1 = r.z + r.d + pad;
+    let t0 = 0, t1 = 1;
+    const dx = q[0] - p[0], dz = q[1] - p[1];
+    for (const [pp, dd, lo, hi] of [[p[0], dx, x0, x1], [p[1], dz, z0, z1]] as [number, number, number, number][]) {
+      if (Math.abs(dd) < 1e-9) { if (pp < lo || pp > hi) return false; continue; }
+      let a = (lo - pp) / dd, b = (hi - pp) / dd;
+      if (a > b) [a, b] = [b, a];
+      t0 = Math.max(t0, a); t1 = Math.min(t1, b);
+      if (t0 > t1) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Route of a highway from city A to city B: straight when nothing is in the way, else the L-shaped
+   * route (through a corner of the two cities' centres) that avoids the other cities.
+   */
+  private highwayRoute(from: number, to: number): [number, number][] {
+    const rs = this.city.repos!;
+    const A = this.city.districts[rs[from].district], B = this.city.districts[rs[to].district];
+    const ac: [number, number] = [A.x + A.w / 2, A.z + A.d / 2], bc: [number, number] = [B.x + B.w / 2, B.z + B.d / 2];
+    const others = rs.map((r, k) => ({ k, d: this.city.districts[r.district] })).filter(o => o.k !== from && o.k !== to).map(o => o.d);
+    const pad = this.cell;
+    const straight: [number, number][] = [this.rim(A, bc[0], bc[1]), this.rim(B, ac[0], ac[1])];
+    const clear2 = (pts: [number, number][], o: { x: number; z: number; w: number; d: number }, self: CityScene, pd: number) => !self.segHits(pts[0], pts[1], o, pd);
+    const clear = (pts: [number, number][]) => pts.every((p, k) => k === 0 || others.every(o => !this.segHits(pts[k - 1], p, o, pad)));
+    if (clear(straight)) return straight;
+    for (const e of [[ac[0], bc[1]], [bc[0], ac[1]]] as [number, number][]) {
+      const pts: [number, number][] = [this.rim(A, e[0], e[1]), e, this.rim(B, e[0], e[1])];
+      if (Math.abs(pts[0][0] - e[0]) + Math.abs(pts[0][1] - e[1]) < 1e-3 || Math.abs(pts[2][0] - e[0]) + Math.abs(pts[2][1] - e[1]) < 1e-3) continue; // elbow inside a city
+      if (clear(pts)) return pts;
+    }
+    // boxed in (a column or row of cities): a dog-leg around the blockers
+    const hit = others.filter(o => !clear2(straight, o, this, pad));
+    if (hit.length) {
+      const vertical = Math.abs(bc[1] - ac[1]) >= Math.abs(bc[0] - ac[0]);
+      const lo = Math.min(...hit.map(o => (vertical ? o.x : o.z))) - pad * 3, hi = Math.max(...hit.map(o => (vertical ? o.x + o.w : o.z + o.d))) + pad * 3;
+      let best: [number, number][] | null = null, bestLen = Infinity;
+      for (const c of [lo, hi]) {
+        const p1: [number, number] = vertical ? [c, ac[1]] : [ac[0], c], p2: [number, number] = vertical ? [c, bc[1]] : [bc[0], c];
+        const pts: [number, number][] = [this.rim(A, p1[0], p1[1]), p1, p2, this.rim(B, p2[0], p2[1])];
+        if (!clear(pts)) continue;
+        const len = pts.reduce((t, p, k) => t + (k ? Math.hypot(p[0] - pts[k - 1][0], p[1] - pts[k - 1][1]) : 0), 0);
+        if (len < bestLen) { best = pts; bestLen = len; }
+      }
+      if (best) return best;
+    }
+    return straight;
+  }
+
   /** Highways between cities: asphalt strips from the rim of one city to the rim of the other. */
   private buildHighways(views: LinkView[]) {
-    const rs = this.city.repos!;
     const width = Math.max(this.cell * 1.5, this.size() * 0.006);
     const dark = this.theme.name === 'day';
     const lanes = new Map<string, number>(); // lateral slot per city pair, so highways side by side do not overlap
     const total = new Map<string, number>();
     for (const v of views) { const k = Math.min(v.from, v.to) + ':' + Math.max(v.from, v.to); total.set(k, (total.get(k) ?? 0) + 1); }
+    const pickMat = new THREE.MeshBasicMaterial({ visible: false });
     for (const v of views) {
-      const A = this.city.districts[rs[v.from].district], B = this.city.districts[rs[v.to].district];
-      const ac: [number, number] = [A.x + A.w / 2, A.z + A.d / 2], bc: [number, number] = [B.x + B.w / 2, B.z + B.d / 2];
-      let p0 = this.rim(A, bc[0], bc[1]), p1 = this.rim(B, ac[0], ac[1]);
       const k = Math.min(v.from, v.to) + ':' + Math.max(v.from, v.to);
       const slot = lanes.get(k) ?? 0; lanes.set(k, slot + 1);
-      let dx = p1[0] - p0[0], dz = p1[1] - p0[1];
-      let len = Math.hypot(dx, dz);
-      if (len < 1e-3) continue;
-      const nx = -dz / len, nz = dx / len, off = (slot - ((total.get(k) ?? 1) - 1) / 2) * width * 1.35;
-      p0 = [p0[0] + nx * off, p0[1] + nz * off]; p1 = [p1[0] + nx * off, p1[1] + nz * off];
-      dx = p1[0] - p0[0]; dz = p1[1] - p0[1]; len = Math.hypot(dx, dz);
+      let pts = this.highwayRoute(v.from, v.to);
+      const off = (slot - ((total.get(k) ?? 1) - 1) / 2) * width * 1.35;
+      if (pts.length === 2) {
+        const dx = pts[1][0] - pts[0][0], dz = pts[1][1] - pts[0][1], len = Math.hypot(dx, dz);
+        if (len < 1e-3) continue;
+        pts = pts.map(p => [p[0] - (dz / len) * off, p[1] + (dx / len) * off] as [number, number]);
+      } else {
+        pts = pts.map(p => [p[0] + off, p[1] + off] as [number, number]);
+      }
       const [c1] = this.linkColors(v.kind);
-      const mat = highwayMaterial(c1.clone(), len, v.kind === 'api', dark);
-      const geo = new THREE.PlaneGeometry(len, width).rotateX(-Math.PI / 2);
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set((p0[0] + p1[0]) / 2, 0.06, (p0[1] + p1[1]) / 2);
-      mesh.rotation.y = -Math.atan2(dz, dx);
-      mesh.renderOrder = 4;
-      const pick = new THREE.Mesh(new THREE.BoxGeometry(len, Math.max(width, this.size() * 0.01), Math.max(width * 2, this.size() * 0.01)), new THREE.MeshBasicMaterial({ visible: false }));
-      pick.position.copy(mesh.position); pick.rotation.y = mesh.rotation.y;
-      this.highwayGroup.add(mesh);
+      let longest = 0, longLen = 0;
+      const segs: { mesh: THREE.Mesh; len: number; mid: THREE.Vector3; p0: [number, number]; p1: [number, number] }[] = [];
+      const boxes: THREE.BufferGeometry[] = [];
+      for (let q = 0; q + 1 < pts.length; q++) {
+        const p0 = pts[q], p1 = pts[q + 1];
+        const dx = p1[0] - p0[0], dz = p1[1] - p0[1], len = Math.hypot(dx, dz);
+        if (len < 1e-3) continue;
+        const mat = highwayMaterial(c1.clone(), len, v.kind === 'api', dark);
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(len + (q + 2 < pts.length ? width : 0) + (q > 0 ? width : 0), width).rotateX(-Math.PI / 2), mat);
+        mesh.position.set((p0[0] + p1[0]) / 2, 0.06, (p0[1] + p1[1]) / 2);
+        mesh.rotation.y = -Math.atan2(dz, dx);
+        mesh.renderOrder = 4;
+        this.highwayGroup.add(mesh);
+        const box = new THREE.BoxGeometry(len, Math.max(width, this.size() * 0.01), Math.max(width * 2, this.size() * 0.01));
+        box.applyMatrix4(new THREE.Matrix4().compose(mesh.position, new THREE.Quaternion().setFromEuler(mesh.rotation), new THREE.Vector3(1, 1, 1)));
+        boxes.push(box);
+        segs.push({ mesh, len, mid: mesh.position.clone(), p0, p1 });
+        if (len > longLen) { longLen = len; longest = segs.length - 1; }
+      }
+      if (!segs.length) continue;
+      // one LinkMesh per highway: the longest segment stands for it (highlight / time uniforms of every segment follow it)
+      const main = segs[longest];
+      const mats = segs.map(sg => sg.mesh.material as THREE.ShaderMaterial);
+      const pick = new THREE.Mesh(mergeGeometries(boxes.map(b => { const g = b.clone(); g.deleteAttribute('uv'); g.deleteAttribute('normal'); return g; }))!, pickMat);
       this.linkGroup.add(pick);
-      const lm: LinkMesh = { view: v, mesh, pick, mat };
+      const lm: LinkMesh = { view: v, mesh: main.mesh, pick, mat: mats[longest], extra: mats.filter((_, i) => i !== longest) };
       if (v.label) {
         const h = Math.max(0.8, this.size() * 0.016);
         lm.label = this.textSprite(v.label, h);
-        lm.label.position.set(mesh.position.x, h * 0.9, mesh.position.z);
+        const f = (slot + 1) / ((total.get(k) ?? 1) + 1);
+        lm.label.position.set(main.p0[0] + (main.p1[0] - main.p0[0]) * f, h * (0.9 + 1.1 * slot), main.p0[1] + (main.p1[1] - main.p0[1]) * f);
         this.linkGroup.add(lm.label);
       }
       this.linkMeshes.push(lm);
@@ -1470,6 +1539,7 @@ export class CityScene {
     for (const l of this.linkMeshes) {
       const on = l.view.index === index;
       l.mat.uniforms.uHi.value = on ? 1 : 0;
+      for (const m of l.extra ?? []) m.uniforms.uHi.value = on ? 1 : 0;
       if (l.label) l.label.material.opacity = index < 0 || on ? 1 : 0.4;
     }
   }
