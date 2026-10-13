@@ -221,10 +221,10 @@ float aline(float x, float w) { float fw = max(fwidth(x), 1e-4); float d = abs(f
       vec3 glass = mix(base * 0.38, sky * (0.3 + 0.7 * (1.0 - uNight)), 0.35 + 0.25 * (1.0 - uNight));
       diffuseColor.rgb = mix(base, glass, win);
       float litG = step(0.74 + 0.2 * age, r); // big panes: fewer lit, softer
-      totalEmissiveRadiance += win * litG * mix(warm, vec3(0.7, 0.85, 1.0), 0.6) * (0.25 + 0.4 * r2) * uNight;
+      totalEmissiveRadiance += win * litG * mix(warm, vec3(0.7, 0.85, 1.0), 0.6) * (0.25 + 0.4 * r2) * uNight * 0.7;
     } else {
       diffuseColor.rgb = mix(base, base * 0.45 + vec3(0.12, 0.16, 0.24), win * (0.55 - 0.15 * uNight));
-      totalEmissiveRadiance += win * lit * warm * (0.55 + 0.9 * r2) * uNight;
+      totalEmissiveRadiance += win * lit * warm * (0.55 + 0.9 * r2) * uNight * 0.7;
     }
     if (st == 10.0) totalEmissiveRadiance += (1.0 - frame) * side * vec3(1.0, 0.8, 0.55) * 0.35 * uNight; // lit lobby
     diffuseColor.rgb = mix(diffuseColor.rgb, frameCol, frame * side);
