@@ -197,6 +197,7 @@ export interface InfoHandlers {
   onClose(): void; onPick(i: number): void; onZoomDistrict(): void; onDistrict(d: number): void;
   onPiece(k: number): void; onExplode(): void; onCode(): void;
   onGateFlow(id: number): void; onGateCode(line: number | undefined): void; onGate(k: number): void;
+  onRoute(k: number, door: number): void; onRouteStep(k: number): void; onRouteStop(): void;
 }
 
 function infoHead(title: string, h: InfoHandlers) {
@@ -252,8 +253,13 @@ function gatesSection(gates: NonNullable<BuildingInfo['gates']>, h: InfoHandlers
 }
 
 export interface GateInfo {
-  label: string; dir: 'in' | 'out'; kind: string; id: number; repo: string;
+  label: string; dir: 'in' | 'out'; kind: string; id: number; repo: string; index: number;
   leads: { building: number; path: string; line?: number; code?: number }[];
+}
+
+export interface RouteInfo {
+  title: string; at: number;
+  steps: { kind: 'enter' | 'code' | 'out'; label: string; detail: string; path: string; line?: number }[];
 }
 
 /** A gate on the city edge: what it is and the files its street leads to. */
@@ -262,17 +268,59 @@ export function showGate(d: GateInfo, h: InfoHandlers) {
   box.replaceChildren(infoHead(d.label, h), el('div', 'p', `${d.dir === 'in' ? 'Entrance' : 'Exit'} · ${GATE_NOUN[d.kind] ?? d.kind}${d.repo ? ' · ' + d.repo : ''}`));
   const open = el('button', 'wide', 'Open in flow view');
   open.onclick = () => h.onGateFlow(d.id);
-  box.append(open, el('h4', '', d.dir === 'in' ? 'The street leads to' : 'Reached from'));
+  box.append(open);
+  if (d.dir === 'in' && d.leads.length === 1) {
+    const go = el('button', 'wide primary', 'Follow the route');
+    go.title = 'walk through what this does, file by file';
+    go.onclick = () => h.onRoute(d.index, 0);
+    box.append(go);
+  }
+  box.append(el('h4', '', d.dir === 'in' ? 'The street leads to' : 'Reached from'));
   const list = el('div', 'list');
-  for (const l of d.leads) {
+  d.leads.forEach((l, n) => {
+    const row = el('div', 'leadrow');
     const b = el('button');
     b.title = l.line ? `${l.path}:${l.line}` : l.path;
     b.append(el('span', 'path', '‎' + l.path + (l.line ? ':' + l.line : '')));
     b.onclick = () => { h.onPick(l.building); if (l.line) setTimeout(() => h.onGateCode(l.line), 400); };
-    list.append(b);
-  }
+    row.append(b);
+    if (d.dir === 'in' && d.leads.length > 1) {
+      const r = el('button', 'icon', 'route');
+      r.title = 'follow what this does, file by file';
+      r.onclick = () => h.onRoute(d.index, n);
+      row.append(r);
+    }
+    list.append(row);
+  });
   box.append(list);
   box.hidden = false;
+}
+
+/** A route through the code, one stop per file; the current stop is open in the city. */
+export function showRoute(d: RouteInfo, h: InfoHandlers) {
+  const box = $('info');
+  box.replaceChildren(infoHead('Route · ' + d.title, h));
+  box.append(el('div', 'p', `Stop ${d.at + 1} of ${d.steps.length} · ← → to move, Esc to leave`));
+  const nav = el('div', 'routenav');
+  const back = el('button', '', '‹ Back');
+  back.disabled = d.at <= 0;
+  back.onclick = () => h.onRouteStep(d.at - 1);
+  const next = el('button', 'primary', d.at >= d.steps.length - 1 ? 'Done' : 'Next ›');
+  next.onclick = () => (d.at >= d.steps.length - 1 ? h.onRouteStop() : h.onRouteStep(d.at + 1));
+  nav.append(back, next);
+  box.append(nav);
+  const list = el('ol', 'routelist');
+  d.steps.forEach((s, k) => {
+    const li = el('li', `${s.kind}${k === d.at ? ' now' : k < d.at ? ' past' : ''}`);
+    const b = el('button');
+    b.append(el('span', 'rlabel', s.label), el('span', 'rdetail', s.detail), el('span', 'rpath', '‎' + s.path + (s.line ? ':' + s.line : '')));
+    b.onclick = () => h.onRouteStep(k);
+    li.append(b);
+    list.append(li);
+  });
+  box.append(list);
+  box.hidden = false;
+  list.querySelector('.now')?.scrollIntoView({ block: 'nearest' });
 }
 
 export function setGateCount(text: string) { $('gatecount').textContent = text; }

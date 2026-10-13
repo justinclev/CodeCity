@@ -2,7 +2,7 @@ import * as THREE from 'three';
 
 const TEAL = new THREE.Color(0x2de2d0), CORAL = new THREE.Color(0xff6b5b);
 
-export interface GateSpot { x: number; z: number; dir: 'in' | 'out' }
+export interface GateSpot { x: number; z: number; dir: 'in' | 'out'; label: string }
 
 /**
  * Gates on the edge of a city: an arch (two posts and a lintel) standing on the ground, teal where
@@ -14,6 +14,7 @@ export class GateMarks {
   private mesh: THREE.InstancedMesh | null = null;
   private spots: GateSpot[] = [];
   private selected = -1;
+  private labels: THREE.Sprite[] = [];
   width = 1;
 
   constructor() { this.group.visible = false; }
@@ -21,6 +22,8 @@ export class GateMarks {
   clear() {
     if (this.mesh) { this.group.remove(this.mesh); this.mesh.geometry.dispose(); (this.mesh.material as THREE.Material).dispose(); }
     this.mesh = null;
+    for (const s of this.labels) { this.group.remove(s); (s.material as THREE.SpriteMaterial).map?.dispose(); s.material.dispose(); }
+    this.labels = [];
     this.spots = [];
     this.selected = -1;
   }
@@ -46,6 +49,15 @@ export class GateMarks {
     if (m.instanceColor) m.instanceColor.needsUpdate = true;
     this.mesh = m;
     this.group.add(m);
+    // a name above each gate (alternating heights so neighbours do not hide each other)
+    spots.forEach((g, k) => {
+      const sp = textSprite(g.label, g.dir === 'in' ? '#7ff3e8' : '#ff9a8c');
+      const hgt = width * 0.62;
+      sp.scale.set(hgt * (sp.userData.aspect as number), hgt, 1);
+      sp.position.set(g.x, h + hgt * (0.7 + (k % 3) * 0.95), g.z);
+      this.labels.push(sp);
+      this.group.add(sp);
+    });
   }
 
   get count() { return this.spots.length; }
@@ -69,4 +81,25 @@ export class GateMarks {
     paint(k, true);
     m.instanceColor.needsUpdate = true;
   }
+}
+
+function textSprite(text: string, color: string): THREE.Sprite {
+  const cv = document.createElement('canvas');
+  const px = 48;
+  const ctx = cv.getContext('2d')!;
+  ctx.font = `600 ${px}px ui-monospace, "JetBrains Mono", monospace`;
+  const label = text.length > 28 ? text.slice(0, 27) + '…' : text;
+  const w = Math.ceil(ctx.measureText(label).width) + 24;
+  cv.width = w; cv.height = px + 20;
+  ctx.font = `600 ${px}px ui-monospace, "JetBrains Mono", monospace`;
+  ctx.fillStyle = 'rgba(4,8,18,0.72)';
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  ctx.fillStyle = color;
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, 12, cv.height / 2 + 2);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false }));
+  sp.userData.aspect = cv.width / cv.height;
+  return sp;
 }

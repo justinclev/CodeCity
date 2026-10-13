@@ -1456,6 +1456,27 @@ export class CityScene {
     this.streets.set(traces);
   }
 
+  /**
+   * A route spot by spot: streets between consecutive stops up to the current one (earlier legs dim, the
+   * current leg bright). A stop is a gate (index into the edge gates) or a building.
+   */
+  showTrail(legs: { from: { gate?: number; building?: number }; to: { gate?: number; building?: number } }[], current: number) {
+    this.clearStreets();
+    const at = (p: { gate?: number; building?: number }) => {
+      if (p.gate !== undefined) { const g = this.gateSpots[p.gate]; return g ? new THREE.Vector3(g.x, 0.05, g.z) : null; }
+      return p.building !== undefined && this.exists(p.building) ? this.buildingAnchor(p.building) : null;
+    };
+    const w = Math.max(this.cell * 0.55, this.size() * 0.0022);
+    const traces: Trace[] = [];
+    legs.slice(0, current + 1).forEach((l, k) => {
+      const a = at(l.from), b = at(l.to);
+      if (!a || !b) return;
+      const now = k === current;
+      traces.push({ points: busRoute(a, b, this.busLayer(k * 3 + 1), k + 1), color: new THREE.Color(now ? 0xffffff : 0x2de2d0), width: now ? w * 2.6 : w * 1.4, speed: this.size() * (now ? 0.09 : 0.04) });
+    });
+    this.streets.set(traces);
+  }
+
   clearStreets() { this.streets.clear(); }
 
   /** Footprint of a city's districts root (repo r, or the only city) and the offset gates stand outside it. */

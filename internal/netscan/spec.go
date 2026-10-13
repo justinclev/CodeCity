@@ -98,7 +98,7 @@ func OpenAPI(path string, src []byte) []Route {
 		}
 		if m := yamlMethod.FindStringSubmatch(ln); m != nil && cur != "" {
 			add(base, cur, m[1])
-			cur = cur // the same path may carry several methods
+			// the same path may carry several methods: keep cur
 		}
 	}
 	return out

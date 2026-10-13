@@ -668,3 +668,12 @@ svg.hovering .fe:not(.hov):not(.hl):not(.sel) { stroke-opacity: 0.12; }
 .gate .gname { text-align: left; background: none; border: 0; padding: 0; cursor: pointer; }
 .gate .gname:hover { text-decoration: underline; }
 #info button.wide { width: 100%; margin: 8px 0 4px; }
+
+#info button.primary { background: #1d6f68; border-color: #2de2d0; color: #eafffd; }
+.routenav { display: flex; gap: 8px; margin: 8px 0; } .routenav button { flex: 1; }
+.routelist { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 2px; }
+.routelist li button { display: grid; width: 100%; text-align: left; gap: 1px; padding: 5px 8px; border-left: 3px solid #2de2d0; background: transparent; }
+.routelist li.out button { border-left-color: #ff6b5b; } .routelist li.code button { border-left-color: #6d7ea8; }
+.routelist li.past { opacity: 0.55; } .routelist li.now button { background: rgba(45, 226, 208, 0.14); }
+.routelist .rlabel { font-family: var(--mono); font-size: 12px; } .routelist .rdetail { color: var(--dim); font-size: 11px; } .routelist .rpath { color: var(--dim); font-size: 11px; font-family: var(--mono); }
+.leadrow { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; } .leadrow .icon { font-size: 11px; padding: 1px 7px; }

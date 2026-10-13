@@ -41,9 +41,9 @@ export function buildGates(g: FlowGraph, buildingOf: (path: string) => number): 
       add({ id: b.id, dir: 'out', kind: 'request', label: `calls ${b.name}`, building: buildingOf(a.path), line: e.lines?.[0], code: a.id });
     }
   }
-  // CLI / program entry points (main, top level of a script)
+  // program entry points (main); a script's top level is not worth a gate
   for (const n of node) {
-    if (n.entry && n.path) add({ id: n.id, dir: 'in', kind: 'entry', label: `${n.name} (${n.entry})`, building: buildingOf(n.path), line: n.start, code: n.id });
+    if (n.entry === 'main' && n.path) add({ id: n.id, dir: 'in', kind: 'entry', label: `${n.name} (${n.entry})`, building: buildingOf(n.path), line: n.start, code: n.id });
   }
   return out;
 }
@@ -69,6 +69,10 @@ export interface EdgeGate {
   gates: Gate[];         // the doors behind it, one per file
 }
 
+const PLURAL: Record<string, string> = {
+  entry: 'entries', endpoint: 'routes', command: 'commands', flag: 'flags', event: 'events', http: 'HTTP hosts', db: 'tables', storage: 'stores', process: 'processes', file: 'files', network: 'connections', request: 'service calls', env: 'variables',
+};
+
 export interface Rect { x: number; z: number; w: number; d: number }
 
 /**
@@ -86,7 +90,19 @@ export function layoutGates(all: Gate[], repoOf: (building: number) => number, r
     if (!e) { e = { dir: g.dir, kind: g.kind, label: g.label, id: g.id, repo, x: 0, z: 0, gates: [] }; by.set(key, e); }
     e.gates.push(g);
   }
-  const edges = [...by.values()];
+  let edges = [...by.values()];
+  // dozens of DOM events, flags or tables: one gate per kind rather than a wall of arches
+  const kinds = new Map<string, EdgeGate[]>();
+  for (const e of edges) { const k = `${e.repo}:${e.dir}:${e.kind}`; const l = kinds.get(k); if (l) l.push(e); else kinds.set(k, [e]); }
+  for (const list of kinds.values()) {
+    if (list.length <= 5) continue;
+    const first = list[0];
+    const merged: EdgeGate = { dir: first.dir, kind: first.kind, label: `${list.length} ${PLURAL[first.kind] ?? first.kind + 's'}`, id: first.id, repo: first.repo, x: 0, z: 0, gates: [] };
+    const seenB = new Set<number>();
+    for (const e of list) for (const d of e.gates) if (!seenB.has(d.building)) { seenB.add(d.building); merged.gates.push(d); }
+    edges = edges.filter(e => !list.includes(e));
+    edges.push(merged);
+  }
   const groups = new Map<string, EdgeGate[]>();
   for (const e of edges) {
     const k = `${e.repo}:${e.dir}`;
@@ -115,3 +131,58 @@ export function layoutGates(all: Gate[], repoOf: (building: number) => number, r
   }
   return edges.sort((a, b) => a.repo - b.repo || (a.dir === b.dir ? a.x - b.x : a.dir === 'in' ? -1 : 1));
 }
+
+/** One stop on a route through the code. */
+export interface RouteStep {
+  kind: 'enter' | 'code' | 'out';
+  label: string;          // short title: the route, the function, the table ...
+  detail: string;         // one line: what happens here
+  building: number;
+  line?: number;
+  node: number;           // flow node: the function (code), or the route / table (enter, out)
+}
+
+const CALLS = new Set(['call', 'new', 'ref']);
+
+/**
+ * Follow the code from an entrance: the handler, then what it calls in the order the calls appear, and each
+ * way out it reaches. Stops are per file: a function is its own stop only when it leaves the previous file or
+ * reaches outside; helpers in the same file are walked through but not announced.
+ */
+export function traceRoute(g: FlowGraph, door: Gate, buildingOf: (path: string) => number, maxSteps = 18, maxDepth = 6): RouteStep[] {
+  const node = g.nodes;
+  const out: FEdgeLike[][] = node.map(() => []);
+  for (const e of g.edges) out[e.from]?.push(e);
+  for (const l of out) l.sort((a, b) => (a.lines?.[0] ?? 0) - (b.lines?.[0] ?? 0));
+
+  const steps: RouteStep[] = [];
+  const seen = new Set<number>();
+  const entry = node[door.id];
+  if (entry) steps.push({ kind: 'enter', label: entry.name, detail: `${door.kind === 'endpoint' ? 'request arrives' : door.kind === 'entry' ? 'program starts' : door.kind + ' comes in'}`, building: door.building, line: door.line, node: door.id });
+  let lastBuilding = door.building;
+
+  const visit = (id: number, depth: number, via?: FEdgeLike) => {
+    if (seen.has(id) || steps.length >= maxSteps) return;
+    seen.add(id);
+    const f = node[id];
+    if (!f?.path) return;
+    const b = buildingOf(f.path);
+    const exits = out[id].filter(e => (e.kind === 'io' && !QUIET.has(node[e.to]?.sub ?? '') && !IN_IO.has(node[e.to]?.sub ?? '')) || (e.kind === 'request' && node[e.to]?.kind === 'endpoint') || e.kind === 'writes');
+    if (b >= 0 && (b !== lastBuilding || exits.length > 0 || steps.length === 1)) {
+      steps.push({ kind: 'code', label: f.name, detail: via ? `called at line ${via.lines?.[0] ?? '?'}` : 'handles it', building: b, line: f.start, node: id });
+      lastBuilding = b;
+    }
+    for (const e of exits) {
+      const t = node[e.to];
+      if (!t || steps.length >= maxSteps) continue;
+      const nm = e.kind === 'request' ? `calls ${t.name}` : t.name;
+      steps.push({ kind: 'out', label: nm, detail: e.kind === 'writes' ? `writes ${t.name}` : e.kind === 'request' ? 'calls another service' : `reaches ${t.sub ?? 'outside'} (${e.label ?? 'access'})`, building: b >= 0 ? b : lastBuilding, line: e.lines?.[0], node: e.to });
+    }
+    if (depth >= maxDepth) return;
+    for (const e of out[id]) if (CALLS.has(e.kind) && node[e.to]?.path) visit(e.to, depth + 1, e);
+  };
+  if (door.code !== undefined) visit(door.code, 0);
+  return steps.filter(s => s.building >= 0);
+}
+
+type FEdgeLike = { from: number; to: number; kind: string; label?: string; lines?: number[] };

@@ -186,9 +186,13 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 	for _, p := range order {
 		files = append(files, hist[p])
 	}
-	c = build(files, o.MinWeight)
+	pre, err := readFlow(ctx, br, files, tipOid)
+	if err != nil {
+		return nil, nil, err
+	}
+	c = build(files, o.MinWeight, pre.bias)
 	progress("reading dependencies", 0, 0)
-	if c.Facts, err = collectFacts(ctx, br, c, tipOid, repo.Remote(ctx)); err != nil {
+	if c.Facts, err = collectFacts(ctx, br, c, tipOid, repo.Remote(ctx), pre.g); err != nil {
 		return nil, nil, err
 	}
 	if cd != nil {
@@ -213,14 +217,12 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 
 // collectFacts reads manifests and import statements at the newest commit,
 // and resolves imports between files of this repository (Building.Imp/ImpD).
-func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid map[string]string, remote string) (*city.Facts, error) {
+func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid map[string]string, remote string, g *flow.Graph) (*city.Facts, error) {
 	f := &city.Facts{Remote: deps.NormalizeURL(remote), Imports: map[int][]string{}}
 	var paths []string
 	local := map[int][]string{}
-	var flowFiles []flow.File
 	var netFiles []netFile
 	netBytes := 0
-	flowBytes := 0
 	for i, b := range c.Buildings {
 		oid, ok := tipOid[b.Path]
 		if !ok {
@@ -237,10 +239,6 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 			return nil, err
 		}
 		c.Buildings[i].Shape = shapeOf(b.Path, b.Lang, content)
-		if roleWanted(b.Path, b.Lang) && flowBytes+len(content) <= maxRoleBytes && len(flowFiles) < maxRoleFiles {
-			flowFiles = append(flowFiles, flow.File{Path: b.Path, Lang: b.Lang, Content: content})
-			flowBytes += len(content)
-		}
 		if wantNet(b.Path) && len(content) <= 400<<10 && netBytes+len(content) <= maxRoleBytes {
 			netFiles = append(netFiles, netFile{b.Path, content})
 			netBytes += len(content)
@@ -268,7 +266,7 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 		f.Identities = append(f.Identities, deps.Identity{Kind: deps.Git, Name: f.Remote})
 	}
 
-	assignRoles(c, flowFiles, f)
+	assignRolesFrom(c, g, f)
 	networkFacts(c, f, netFiles)
 
 	// resolve imports inside this repository
@@ -384,7 +382,8 @@ type dirNode struct {
 	files []*fileHist
 }
 
-func build(files []*fileHist, minWeight float64) *city.City {
+// bias (optional) pulls entrance files toward the north edge of their district and exit files toward the south.
+func build(files []*fileHist, minWeight float64, bias map[string]float64) *city.City {
 	if minWeight <= 0 {
 		minWeight = 8
 	}
@@ -411,6 +410,9 @@ func build(files []*fileHist, minWeight float64) *city.City {
 		dirOf[n] = d
 		for _, f := range d.files {
 			ln := &layout.Node{Name: path.Base(f.path), Weight: float64(f.weight) + minWeight}
+			if b, ok := bias[f.path]; ok {
+				ln.Bias, ln.Signal = b, true
+			}
 			fileOf[ln] = f
 			n.Children = append(n.Children, ln)
 		}

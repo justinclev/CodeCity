@@ -208,7 +208,14 @@ func assignRoles(c *city.City, files []flow.File, f *city.Facts) {
 	if len(files) == 0 {
 		return
 	}
-	g := flow.Build(files, flow.Options{})
+	assignRolesFrom(c, flow.Build(files, flow.Options{}), f)
+}
+
+// assignRolesFrom marks roles from an already built flow graph (nil = nothing to mark).
+func assignRolesFrom(c *city.City, g *flow.Graph, f *city.Facts) {
+	if g == nil {
+		return
+	}
 	byPath := make(map[string]int, len(c.Buildings))
 	for i, b := range c.Buildings {
 		byPath[b.Path] = i

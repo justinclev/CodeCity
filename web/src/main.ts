@@ -9,7 +9,7 @@ import type { GameWorld } from './walk/game';
 import { buildTour, isTest, KIND_LABEL, type TourStop } from './tour';
 import { bindBranchRows, showSwitcher, type LoadedRepo } from './branches';
 import { FlowView } from './flow/view';
-import { buildGates, layoutGates, type EdgeGate } from './gates';
+import { buildGates, layoutGates, traceRoute, type EdgeGate, type RouteStep } from './gates';
 import type { FlowGraph } from './flow/model';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
@@ -309,6 +309,7 @@ function show(c: City) {
   applyHash();
   onCommitChanged();
   closeInfo();
+  if (apiAvailable && store.get<boolean>('gates') !== false) void setGatesOn(true); // doors are on unless the person turned them off
   if (wanted) {
     const i = c.buildings.findIndex(b => b.path === wanted);
     if (i >= 0 && scene.exists(i)) setTimeout(() => { if (city === c) selectBuilding(i, true); }, 2700); // after the intro
@@ -494,6 +495,9 @@ const infoHandlers: ui.InfoHandlers = {
   onPick: i => selectBuilding(i, true),
   onGateFlow: id => openFlowAt(id),
   onGate: k => selectGate(k),
+  onRoute: (k, d) => startRoute(k, d),
+  onRouteStep: k => { void goStep(k); },
+  onRouteStop: () => stopRoute(),
   onGateCode: line => openCodeAt(line),
   onZoomDistrict: () => { if (selectedDistrict >= 0) scene.focusDistrict(selectedDistrict); },
 };
@@ -509,12 +513,60 @@ function selectGate(k: number) {
   scene.highlightGate(k);
   scene.showGateStreets(e.gates.filter(g => scene.exists(g.building)).map(g => ({ gate: k, building: g.building })));
   ui.showGate({
-    label: e.label, dir: e.dir, kind: e.kind, id: e.id,
+    label: e.label, dir: e.dir, kind: e.kind, id: e.id, index: k,
     repo: c.repos?.[e.repo]?.name ?? c.repo?.name ?? '',
     leads: e.gates.map(g => ({ building: g.building, path: c.buildings[g.building].path, line: g.line, code: g.code })),
   }, infoHandlers);
   const first = e.gates.find(g => scene.exists(g.building));
   if (first) scene.focus(first.building);
+}
+
+/** Start a route at an entrance: the handler, what it calls, each way out. */
+function startRoute(k: number, doorAt = 0) {
+  const c = city, e = edgeGates[k];
+  if (!c || !e || !gateGraph) return;
+  const door = e.gates[doorAt] ?? e.gates[0];
+  const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
+  const steps = traceRoute(gateGraph, door, p => pathIndex.get(p) ?? -1);
+  if (steps.length < 2) { ui.setGateCount('no route found'); return; }
+  const legs: NonNullable<typeof route>['legs'] = [];
+  let here: number | undefined;
+  steps.forEach(s => {
+    if (s.kind === 'enter') { legs.push({ from: { gate: k }, to: { building: s.building } }); here = s.building; return; }
+    if (s.kind === 'code') { legs.push({ from: { building: here ?? s.building }, to: { building: s.building } }); here = s.building; return; }
+    const out = edgeGates.findIndex(x => x.dir === 'out' && x.id === s.node && x.gates.some(g => g.building === s.building));
+    legs.push({ from: { building: here ?? s.building }, to: out >= 0 ? { gate: out } : { building: s.building } });
+  });
+  route = { gate: k, title: e.label, steps, legs, at: -1 };
+  stopPlayback();
+  void goStep(0);
+}
+
+async function goStep(k: number) {
+  const c = city, r = route;
+  if (!c || !r || k < 0 || k >= r.steps.length) return;
+  r.at = k;
+  const s = r.steps[k];
+  scene.showTrail(r.legs, k);
+  ui.showRoute({ title: r.title, at: k, steps: r.steps.map(x => ({ kind: x.kind, label: x.label, detail: x.detail, path: c.buildings[x.building].path, line: x.line })) }, infoHandlers);
+  const b = s.building;
+  if (selected !== b) {
+    if (scene.explodedBuilding >= 0) scene.collapse();
+    if (codeOpen) closeCode();
+    selected = b; selectedDistrict = -1;
+    scene.setSelected(b);
+    scene.setSelectedDistrict(-1);
+    await loadPieces(b);
+  }
+  if (route !== r || r.at !== k) return; // moved on
+  scene.focus(b);
+  if (file && selected === b) openCodeAt(s.line);
+}
+
+function stopRoute() {
+  if (!route) return;
+  route = null;
+  closeInfo();
 }
 
 function openCodeAt(line: number | undefined) {
@@ -610,6 +662,7 @@ function selectDistrict(d: number, fly: boolean) {
 }
 
 function closeInfo() {
+  route = null;
   selectedLink = -1;
   scene.highlightLink(-1);
   if (scene.explodedBuilding >= 0) scene.collapse();
@@ -626,7 +679,7 @@ function closeInfo() {
 }
 
 function refreshSelection() {
-  if (!city) return;
+  if (!city || route) return;
   if (selected >= 0) {
     if (scene.exists(selected)) ui.showBuilding(buildingInfo(selected), infoHandlers);
     else closeInfo();
@@ -749,7 +802,7 @@ ui.bindControls({
   onLinksToggle: () => { scene.setLinks(linkViews()); },
   onBuildings: setBuildings,
   onCodeLinks: m => { scene.codeLinkMode = m; store.set('codelinks.' + scene.theme.name, m); scene.refreshCodeLinks(); },
-  onGates: on => { void setGatesOn(on); },
+  onGates: on => { store.set('gates', on); void setGatesOn(on); },
   onCopyReport: () => {
     if (!city || !insights) return;
     const md = markdown(city, scene, insights, windowLabel() || 'all history');
@@ -870,6 +923,8 @@ canvas.addEventListener('pointermove', e => {
       scene.setHover(i);
       const extra: string[] = [`${b.lang}`, `${ui.fmt(v.loc)} LOC`, `complexity ${ui.fmt(v.complexity)}`];
       if (city.churn) extra.push(`${scene.churnAt(i).commits} commits`);
+      const gk = gatesOn ? (gateByBuilding.get(i) ?? []).flatMap(k => edgeGates[k].gates.filter(g => g.building === i)) : [];
+      if (gk.length) extra.push(`${gk.filter(g => g.dir === 'in').length} in · ${gk.filter(g => g.dir === 'out').length} out`);
       ui.showTip([b.path, extra.join(' · ')], p.x, p.y);
       canvas.style.cursor = 'pointer';
     } else {
@@ -1192,9 +1247,12 @@ let gatesOn = false;
 let edgeGates: EdgeGate[] = [];
 let gateByBuilding = new Map<number, number[]>(); // building → indices into edgeGates
 let selectedGate = -1;
+let gateGraph: FlowGraph | null = null;
+// a route through the code, one stop per file
+let route: { gate: number; title: string; steps: RouteStep[]; legs: { from: { gate?: number; building?: number }; to: { gate?: number; building?: number } }[]; at: number } | null = null;
 
 function clearGates() {
-  edgeGates = []; gateByBuilding = new Map(); selectedGate = -1;
+  edgeGates = []; gateByBuilding = new Map(); selectedGate = -1; gateGraph = null; route = null;
   scene.setGates([]);
   scene.setGatesVisible(false);
   ui.setGateCount('');
@@ -1211,12 +1269,13 @@ async function setGatesOn(on: boolean) {
   try {
     const g = await flowGraph();
     if (city !== c || !gatesOn) return;
+    gateGraph = g;
     const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
     const gates = buildGates(g, p => pathIndex.get(p) ?? -1);
     edgeGates = layoutGates(gates, b => c.buildings[b].repo ?? 0, r => scene.cityRect(r), b => c.buildings[b].x + c.buildings[b].w / 2, scene.gateWidth, scene.gateOffset);
     gateByBuilding = new Map();
     edgeGates.forEach((e, k) => { for (const g of e.gates) { const l = gateByBuilding.get(g.building); if (l) l.push(k); else gateByBuilding.set(g.building, [k]); } });
-    scene.setGates(edgeGates.map(e => ({ x: e.x, z: e.z, dir: e.dir })));
+    scene.setGates(edgeGates.map(e => ({ x: e.x, z: e.z, dir: e.dir, label: e.label })));
     scene.setGatesVisible(true);
     const ins = gates.filter(x => x.dir === 'in').length, outs = gates.length - ins;
     ui.setGateCount(`${ins} in · ${outs} out`);
@@ -1267,4 +1326,12 @@ addEventListener('keydown', e => {
   const t = e.target as HTMLElement;
   if (walk.active || flowView.open || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
   if (e.key === 'd' || e.key === 'D') openFlow();
+});
+
+addEventListener('keydown', e => {
+  if (!route || walk.active || flowView.open) return;
+  const t = e.target as HTMLElement;
+  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
+  if (e.key === 'ArrowRight') { void goStep(Math.min(route.steps.length - 1, route.at + 1)); e.preventDefault(); }
+  else if (e.key === 'ArrowLeft') { void goStep(Math.max(0, route.at - 1)); e.preventDefault(); }
 });

@@ -13,6 +13,8 @@ type Rect struct{ X, Y, W, H float64 }
 type Node struct {
 	Name     string
 	Weight   float64 // leaves only
+	Bias     float64 // leaves: -1 = belongs at the north edge … +1 = south edge (only when Signal)
+	Signal   bool    // Bias carries information
 	Children []*Node
 
 	Rect  Rect // the cell allotted to this node (before padding/gap)
@@ -22,6 +24,25 @@ type Node struct {
 
 // IsDir reports whether n has children.
 func (n *Node) IsDir() bool { return len(n.Children) > 0 }
+
+// bias is the weight-averaged bias of the nodes that carry a signal.
+func (n *Node) bias() (float64, bool) {
+	if !n.IsDir() {
+		return n.Bias, n.Signal
+	}
+	var sum, w float64
+	for _, c := range n.Children {
+		if b, ok := c.bias(); ok {
+			t := c.Total()
+			sum += b * t
+			w += t
+		}
+	}
+	if w == 0 {
+		return 0, false
+	}
+	return sum / w, true
+}
 
 // Total returns the summed weight of the subtree.
 func (n *Node) Total() float64 {
@@ -99,7 +120,19 @@ func squarify(children []*Node, r Rect) []placed {
 	if len(items) == 0 {
 		return nil
 	}
+	// when some of the siblings are entrances or exits, order them north → south by bias (rows are laid
+	// from the top), then by size and name; otherwise the classic largest-first squarified order
+	ordered := false
+	bias := map[*Node]float64{}
+	for _, c := range items {
+		b, ok := c.bias()
+		bias[c] = b
+		ordered = ordered || ok
+	}
 	sort.SliceStable(items, func(i, j int) bool {
+		if ordered && bias[items[i]] != bias[items[j]] {
+			return bias[items[i]] < bias[items[j]]
+		}
 		a, b := totals[items[i]], totals[items[j]]
 		if a != b {
 			return a > b
@@ -111,6 +144,9 @@ func squarify(children []*Node, r Rect) []placed {
 	rest := items
 	for len(rest) > 0 {
 		short := math.Min(r.W, r.H)
+		if ordered {
+			short = r.W // rows run along the top, so the order reads north → south
+		}
 		k := 1
 		best := worst(rest[:1], totals, scale, short)
 		for k < len(rest) {
@@ -126,7 +162,7 @@ func squarify(children []*Node, r Rect) []placed {
 		for _, c := range row {
 			area += totals[c] * scale
 		}
-		if r.W >= r.H { // lay the row as a column on the left
+		if !ordered && r.W >= r.H { // lay the row as a column on the left
 			cw := area / r.H
 			y := r.Y
 			for _, c := range row {
