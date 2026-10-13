@@ -1,4 +1,5 @@
 import { route } from './roads';
+import { GateMarks, type GateSpot } from './gatemarks';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
@@ -32,7 +33,7 @@ export const RISK = ['no history', '3+ authors', '2 authors', 'single author', '
 export const RISK_COLORS = ['#596277', '#51cf66', '#ffd43b', '#ff922b', '#ff4d4f'];
 export const INACTIVE_DAYS = 180;
 
-export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | { kind: 'link'; index: number } | null;
+export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | { kind: 'link'; index: number } | { kind: 'gate'; index: number } | null;
 
 /** A connection between two cities to draw (index into city.links). */
 export type LinkKind = 'dependency' | 'people' | 'api' | 'message' | 'data';
@@ -142,6 +143,7 @@ export class CityScene {
   private linkHi = -1;
   readonly codeLinks = new TraceLayer(true);
   private highwayGroup = new THREE.Group();
+  private gates = new GateMarks();
   private roadPaths: Road[] = [];
   private hackerFx = new HackerFx();
   codeLinkMode: 'off' | 'selection' | 'all' = 'selection';
@@ -217,7 +219,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.highwayGroup, this.hackerFx.group, this.roofs.group, this.ways.group);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.highwayGroup, this.gates.group, this.hackerFx.group, this.roofs.group, this.ways.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -264,6 +266,10 @@ export class CityScene {
     if (this.exploded) this.animateExplode(dt);
     if (this.onFrame) this.onFrame(dt);
     this.codeLinks.update(this.flowTime);
+    if (this.gates.group.visible) {
+      this.flowTime += dt;
+      this.gates.update(this.flowTime, i => (this.exists(i) && this.cur[i] > 0.02 ? this.baseY[i] + this.cur[i] : -1), i => this.city.buildings[i]);
+    }
     if (this.linkMeshes.length || this.highwayGroup.children.length || this.arcs.children.length || this.codeLinks.group.children.length) {
       this.flowTime += dt;
       for (const l of this.linkMeshes) { l.mat.uniforms.uTime.value = this.flowTime; for (const m of l.extra ?? []) m.uniforms.uTime.value = this.flowTime; }
@@ -1200,12 +1206,17 @@ export class CityScene {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
-    const objects: THREE.Object3D[] = [...this.solidMeshes(false), this.districtMesh, ...this.linkMeshes.map(l => l.pick)];
+    const objects: THREE.Object3D[] = [...this.solidMeshes(false), this.districtMesh, ...this.linkMeshes.map(l => l.pick), ...this.gates.meshes];
     if (this.exploded) objects.unshift(this.exploded.mesh);
     for (const hit of this.raycaster.intersectObjects(objects, false)) { // nearest first
       if (this.exploded && hit.object === this.exploded.mesh && hit.instanceId !== undefined) return { kind: 'floor', index: hit.instanceId };
       const lm = this.linkMeshes.find(l => l.pick === hit.object);
       if (lm) return { kind: 'link', index: lm.view.index };
+      if (hit.instanceId !== undefined && this.gates.meshes.includes(hit.object)) {
+        const gb = this.gates.buildingOf(hit.object, hit.instanceId);
+        if (gb >= 0 && this.exists(gb)) return { kind: 'gate', index: gb };
+        continue;
+      }
       const id = hit.instanceId ?? -1;
       if (id < 0) continue;
       if (hit.object === this.buildingMesh || hit.object === this.tierMesh) {
@@ -1419,6 +1430,10 @@ export class CityScene {
       if (l.label) l.label.visible = on;
     }
   }
+
+  /** Entrance / exit markers on the roofs (one spot per building with doors). */
+  setGates(spots: GateSpot[]) { this.gates.set(spots, this.cell, this.city ? this.size() : 1); }
+  setGatesVisible(on: boolean) { this.gates.group.visible = on && this.gates.count > 0; }
 
   /** Route of a highway from city A to city B around the other cities (see roads.ts). */
   private highwayRoute(from: number, to: number): [number, number][] {

@@ -145,6 +145,12 @@ export class FlowView {
     if (hit) this.focusNode(hit.id, 2);
   }
 
+  /** Open the view centred on a graph node (an entrance or exit chosen in the city). */
+  async focusId(id: number) {
+    await this.show();
+    if (this.model && this.model.nodes[id]) this.focusNode(id, 2);
+  }
+
   private setStatus(text: string, busy = false) {
     this.status.replaceChildren();
     this.status.hidden = !text;

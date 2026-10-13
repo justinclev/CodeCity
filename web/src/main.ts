@@ -9,6 +9,7 @@ import type { GameWorld } from './walk/game';
 import { buildTour, isTest, KIND_LABEL, type TourStop } from './tour';
 import { bindBranchRows, showSwitcher, type LoadedRepo } from './branches';
 import { FlowView } from './flow/view';
+import { buildGates, byBuilding, type Gate } from './gates';
 import type { FlowGraph } from './flow/model';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
@@ -287,6 +288,8 @@ function show(c: City) {
   selected = selectedDistrict = -1;
   tourAt = -1; tourBar(); historyCache.clear();
   flowView.reset();
+  flowGraphP = null;
+  clearGates();
   ui.setMessage('');
   ui.setPathResolver(i => c.buildings[i].path);
   ui.setChurnAvailable(c.churn === true);
@@ -489,8 +492,20 @@ const infoHandlers: ui.InfoHandlers = {
   onCode: () => openPiece(activePiece >= 0 ? activePiece : (floors[0]?.piece ?? 0)),
   onClose: () => closeInfo(),
   onPick: i => selectBuilding(i, true),
+  onGateFlow: id => openFlowAt(id),
+  onGateCode: line => openCodeAt(line),
   onZoomDistrict: () => { if (selectedDistrict >= 0) scene.focusDistrict(selectedDistrict); },
 };
+
+function openCodeAt(line: number | undefined) {
+  if (!file) return;
+  let k = floors[0]?.piece ?? 0;
+  if (line !== undefined) {
+    const inside = file.pieces.map((p, n) => ({ p, n })).filter(x => x.p.start <= line && line <= x.p.end).sort((a, b) => (a.p.end - a.p.start) - (b.p.end - b.p.start))[0];
+    if (inside) k = inside.n;
+  }
+  openPiece(k);
+}
 
 function buildingInfo(i: number): ui.BuildingInfo {
   const c = city!;
@@ -507,6 +522,7 @@ function buildingInfo(i: number): ui.BuildingInfo {
     owner: b.own && author ? { name: author.name, share: Math.round((b.own[1] / Math.max(1, scene.totalCommits(i))) * 100),
       authors: b.own[2], risk: scene.risk(i), lastActive: author.last } : undefined,
     coupled: (b.cpl ?? []).filter(([j]) => scene.exists(j)).map(([j, shared, degree]) => ({ index: j, path: c.buildings[j].path, shared, degree })),
+    gates: gatesOn ? (gateMap.get(i) ?? []).map(g => ({ id: g.id, dir: g.dir, kind: g.kind, label: g.label, line: g.line })) : undefined,
     links: links(b.path),
     pieces: piecesState(),
     looks: scene.whyLooks(i),
@@ -709,6 +725,7 @@ ui.bindControls({
   onLinksToggle: () => { scene.setLinks(linkViews()); },
   onBuildings: setBuildings,
   onCodeLinks: m => { scene.codeLinkMode = m; store.set('codelinks.' + scene.theme.name, m); scene.refreshCodeLinks(); },
+  onGates: on => { void setGatesOn(on); },
   onCopyReport: () => {
     if (!city || !insights) return;
     const md = markdown(city, scene, insights, windowLabel() || 'all history');
@@ -814,6 +831,11 @@ canvas.addEventListener('pointermove', e => {
       ui.showTip([linkTitle(l),
         (l.evidence ?? []).slice(0, 2).join(' · ') + ' · click for details'], p.x, p.y);
       canvas.style.cursor = 'pointer';
+    } else if (hit?.kind === 'gate') {
+      const gs = gateMap.get(hit.index) ?? [];
+      scene.setHover(-1);
+      ui.showTip([city.buildings[hit.index].path, `${gs.filter(x => x.dir === 'in').length} entrances · ${gs.filter(x => x.dir === 'out').length} exits · click to see where they lead`], p.x, p.y);
+      canvas.style.cursor = 'pointer';
     } else if (hit?.kind === 'floor') {
       const f = scene.floorAt(hit.index)!;
       scene.setHover(-1);
@@ -845,6 +867,7 @@ canvas.addEventListener('pointerup', e => {
   if (moved || e.button !== 0) return; // orbit / pan drag
   const hit = scene.pick(e.clientX, e.clientY);
   if (hit?.kind === 'link') selectLink(hit.index);
+  else if (hit?.kind === 'gate') selectBuilding(hit.index, false);
   else if (hit?.kind === 'floor') openPiece(scene.floorAt(hit.index)!.piece);
   else if (hit?.kind === 'building') selectBuilding(hit.index, false);
   else if (hit?.kind === 'district') selectDistrict(hit.index, false);
@@ -1130,12 +1153,56 @@ addEventListener('keydown', e => {
 // debug handle for automated checks (no behaviour change)
 (window as unknown as { __codecity: unknown }).__codecity = { scene, walk };
 
+// ---------------------------------------------------------------- entrances and exits (doors)
+let flowGraphP: Promise<FlowGraph> | null = null;
+function flowGraph(): Promise<FlowGraph> {
+  if (!apiAvailable) return Promise.reject(new Error('the flow view needs the server (codecity serve)'));
+  if (!flowGraphP) {
+    flowGraphP = api<FlowGraph>('/api/flow');
+    flowGraphP.catch(() => { flowGraphP = null; });
+  }
+  return flowGraphP;
+}
+
+let gatesOn = false;
+let gateMap = new Map<number, Gate[]>();
+
+function clearGates() {
+  gateMap = new Map();
+  scene.setGates([]);
+  scene.setGatesVisible(false);
+  ui.setGateCount('');
+}
+
+async function setGatesOn(on: boolean) {
+  gatesOn = on;
+  const box = document.getElementById('showgates') as HTMLInputElement;
+  box.checked = on;
+  if (!on) { scene.setGatesVisible(false); ui.setGateCount(''); refreshSelection(); return; }
+  const c = city;
+  if (!c) return;
+  ui.setGateCount('reading…');
+  try {
+    const g = await flowGraph();
+    if (city !== c || !gatesOn) return;
+    const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
+    const gates = buildGates(g, p => pathIndex.get(p) ?? -1);
+    gateMap = byBuilding(gates);
+    scene.setGates([...gateMap].map(([building, l]) => ({ building, ins: l.filter(x => x.dir === 'in').length, outs: l.filter(x => x.dir === 'out').length })));
+    scene.setGatesVisible(true);
+    const ins = gates.filter(x => x.dir === 'in').length, outs = gates.length - ins;
+    ui.setGateCount(`${ins} in · ${outs} out`);
+    refreshSelection();
+  } catch (e) {
+    box.checked = gatesOn = false;
+    ui.setGateCount(apiAvailable ? 'failed' : 'needs the server');
+    console.warn('doors:', (e as Error).message);
+  }
+}
+
 // ---------------------------------------------------------------- flow view (a diagram of how the code runs)
 const flowView = new FlowView({
-  load: async () => {
-    if (!apiAvailable) throw new Error('the flow view needs the server (codecity serve)');
-    return api<FlowGraph>('/api/flow');
-  },
+  load: () => flowGraph(),
   file: async (path, commit) => {
     const f = await fetchFile(path, commit);
     return { content: f.content, lang: f.lang };
@@ -1150,6 +1217,14 @@ const flowView = new FlowView({
     document.getElementById('flowbtn')!.classList.remove('on');
   },
 });
+
+function openFlowAt(id: number) {
+  if (!city || walk.active) return;
+  stopPlayback();
+  scene.paused = true;
+  document.getElementById('flowbtn')!.classList.add('on');
+  void flowView.focusId(id);
+}
 
 function openFlow() {
   if (!city || walk.active) return;

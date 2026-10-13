@@ -654,3 +654,13 @@ svg.hovering .fe:not(.hov):not(.hl):not(.sel) { stroke-opacity: 0.12; }
 .brand .logo { margin-right: auto; }
 .brand #repo { order: 10; flex-basis: 100%; }
 .brand button.walkbtn { padding: 0 7px; }
+
+.gates { margin: 10px 0; }
+.gatehead { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; margin: 8px 0 3px; }
+.gatehead.in { color: #2de2d0; } .gatehead.out { color: #ff6b5b; }
+.gate { display: grid; grid-template-columns: 74px 1fr auto auto; gap: 6px; align-items: center; padding: 2px 0; font-size: 12px; }
+.gate .gkind { color: var(--dim); font-size: 11px; }
+.gate .gname { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gate.in .gname { color: #2de2d0; } .gate.out .gname { color: #ff8a7c; }
+.gate button { font-size: 11px; padding: 1px 7px; }
+#gatecount { font-size: 11px; }

@@ -176,6 +176,8 @@ export interface BuildingInfo {
   history?: HistoryState;
   /** Reasons for the building's architecture (empty in classic mode). */
   looks: string[];
+  /** Entrances and exits in this file (when the doors are shown). */
+  gates?: { id: number; dir: 'in' | 'out'; kind: string; label: string; line?: number }[];
 }
 
 export interface FileCommit { hash: string; date: string; author: string; subject: string; body?: string }
@@ -194,6 +196,7 @@ export interface DistrictInfo {
 export interface InfoHandlers {
   onClose(): void; onPick(i: number): void; onZoomDistrict(): void; onDistrict(d: number): void;
   onPiece(k: number): void; onExplode(): void; onCode(): void;
+  onGateFlow(id: number): void; onGateCode(line: number | undefined): void;
 }
 
 function infoHead(title: string, h: InfoHandlers) {
@@ -216,6 +219,38 @@ function kv(rows: [string, string | Node][]) {
   for (const [k, v] of rows) { g.append(el('span', '', k)); const s = el('span'); s.append(v); g.append(s); }
   return g;
 }
+
+const GATE_NOUN: Record<string, string> = {
+  endpoint: 'route', command: 'command', flag: 'flag', event: 'event', entry: 'program entry', env: 'environment', args: 'arguments', stdin: 'stdin',
+  http: 'HTTP', db: 'database', storage: 'storage', process: 'process', file: 'file', network: 'network', request: 'service call',
+};
+
+/** Entrances and exits of a file; each leads to its place in the flow view or to the line in the code. */
+function gatesSection(gates: NonNullable<BuildingInfo['gates']>, h: InfoHandlers) {
+  const w = el('div', 'gates');
+  w.append(el('h4', '', 'Entrances & exits'));
+  for (const dir of ['in', 'out'] as const) {
+    const list = gates.filter(g => g.dir === dir);
+    if (!list.length) continue;
+    w.append(el('div', 'gatehead ' + dir, dir === 'in' ? `Ways in (${list.length})` : `Ways out (${list.length})`));
+    for (const g of list) {
+      const row = el('div', 'gate ' + dir);
+      const name = el('span', 'gname', g.label);
+      name.title = (GATE_NOUN[g.kind] ?? g.kind) + (g.line ? ` · line ${g.line}` : '');
+      const flow = el('button', 'icon', 'flow');
+      flow.title = 'open the flow view at this ' + (GATE_NOUN[g.kind] ?? 'door');
+      flow.onclick = () => h.onGateFlow(g.id);
+      const code = el('button', 'icon', 'code');
+      code.title = g.line ? `show the code (line ${g.line})` : 'show the code';
+      code.onclick = () => h.onGateCode(g.line);
+      row.append(el('span', 'gkind', GATE_NOUN[g.kind] ?? g.kind), name, flow, code);
+      w.append(row);
+    }
+  }
+  return w;
+}
+
+export function setGateCount(text: string) { $('gatecount').textContent = text; }
 
 export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
   const box = $('info');
@@ -261,6 +296,7 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     }
     box.append(list);
   }
+  if (d.gates?.length) box.append(gatesSection(d.gates, h));
   if (d.looks.length) {
     const w = el('div', 'looks');
     w.append(el('div', 'title', 'Why it looks like this'));
@@ -717,6 +753,7 @@ export interface Controls {
   onCopyReport(): void;
   onLinksToggle(): void;
   onCodeLinks(mode: 'off' | 'selection' | 'all'): void;
+  onGates(on: boolean): void;
   onBuildings(classic: boolean): void;
 }
 
@@ -745,6 +782,7 @@ export function bindControls(h: Controls) {
   requestAnimationFrame(autosize);
   src.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $<HTMLFormElement>('repoform').requestSubmit(); };
   $('showdeps').onchange = () => h.onLinksToggle();
+  $<HTMLInputElement>('showgates').onchange = e => h.onGates((e.target as HTMLInputElement).checked);
   $<HTMLSelectElement>('buildings').onchange = e => h.onBuildings((e.target as HTMLSelectElement).value === 'classic');
   $<HTMLSelectElement>('codelinks').onchange = e => h.onCodeLinks((e.target as HTMLSelectElement).value as 'off' | 'selection' | 'all');
   $('showpeople').onchange = () => h.onLinksToggle();
