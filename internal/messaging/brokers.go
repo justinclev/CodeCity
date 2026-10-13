@@ -104,3 +104,111 @@ func (s *scanner) others(path, lower string) {
 		}
 	}
 }
+
+// ---- Java, Kotlin and C#
+
+var (
+	jKafkaListener = regexp.MustCompile(`@KafkaListener\(([^)]*)\)`)
+	jRabbitListen  = regexp.MustCompile(`@RabbitListener\(([^)]*)\)`)
+	jSqsListener   = regexp.MustCompile(`@SqsListener\(\s*(?:(?:value|queueNames?)\s*=\s*)?(\{[^}]*\}|\[[^\]]*\]|` + expr + `)`)
+	jJmsListener   = regexp.MustCompile(`@JmsListener\([^)]*destination\s*=\s*(` + expr + `)`)
+	jListAttr      = regexp.MustCompile(`(?:topics|queues)\s*=\s*(\{[^}]*\}|\[[^\]]*\]|` + expr + `)`)
+	jKafkaSend     = regexp.MustCompile(`(?:kafkaTemplate|KafkaTemplate)\.(?:send|sendDefault)\(\s*(` + expr + `)`)
+	jProducerRec   = regexp.MustCompile(`ProducerRecord(?:<[^>]*>)?\(\s*(` + expr + `)`)
+	jSendTo        = regexp.MustCompile(`@SendTo\(\s*(` + expr + `)`)
+	jSubscribe     = regexp.MustCompile(`\.subscribe\(\s*(?:Arrays\.asList|List\.of|Collections\.singletonList|listOf|setOf|Set\.of|arrayListOf)\(([^)]*)\)`)
+	jRabbitSend    = regexp.MustCompile(`rabbitTemplate\.(?:convertAndSend|send)\(\s*(` + expr + `)\s*(?:,\s*(` + expr + `)\s*,)?`)
+	jBasicPublish  = regexp.MustCompile(`basicPublish\(\s*` + expr + `\s*,\s*(` + expr + `)`)
+	jBasicConsume  = regexp.MustCompile(`basicConsume\(\s*(` + expr + `)`)
+	jJmsSend       = regexp.MustCompile(`(?:jmsTemplate|queueMessagingTemplate|sqsTemplate)\.(?:convertAndSend|send)\(\s*(` + expr + `)`)
+	csProduce      = regexp.MustCompile(`\.Produce(?:Async)?\(\s*(` + expr + `)`)
+	csSubscribe    = regexp.MustCompile(`\.Subscribe\(\s*(?:new\s*(?:\[\]|List<string>)\s*\{([^}]*)\}|(` + expr + `))\s*\)`)
+	csBasicPublish = regexp.MustCompile(`BasicPublish\([^)]*routingKey\s*:\s*(` + expr + `)`)
+	csBasicConsume = regexp.MustCompile(`BasicConsume\([^)]*queue\s*:\s*(` + expr + `)`)
+	csSender       = regexp.MustCompile(`\.CreateSender\(\s*(` + expr + `)`)
+	csProcessor    = regexp.MustCompile(`\.CreateProcessor\(\s*(` + expr + `)`)
+)
+
+func (s *scanner) items(v string, dir string, off int) {
+	v = strings.Trim(strings.TrimSpace(v), "{}[]")
+	s.list(v, off, dir)
+}
+
+func (s *scanner) group(re *regexp.Regexp, g int, dir string, list bool) {
+	for _, m := range re.FindAllSubmatchIndex(s.src, -1) {
+		if 2*g+1 >= len(m) || m[2*g] < 0 {
+			continue
+		}
+		v, off := string(s.src[m[2*g]:m[2*g+1]]), m[2*g]
+		if list {
+			s.items(v, dir, off)
+		} else {
+			s.add(dir, v, off)
+		}
+	}
+}
+
+// attr applies a listener annotation: the arguments are searched for a topics / queues attribute.
+func (s *scanner) attr(re *regexp.Regexp, dir string) {
+	for _, m := range re.FindAllSubmatchIndex(s.src, -1) {
+		args := string(s.src[m[2]:m[3]])
+		if a := jListAttr.FindStringSubmatchIndex(args); a != nil {
+			s.items(args[a[2]:a[3]], dir, m[2]+a[2])
+		}
+	}
+}
+
+func (s *scanner) jvm(path, lower string) {
+	kt := strings.HasSuffix(path, ".java") || strings.HasSuffix(path, ".kt") || strings.HasSuffix(path, ".kts")
+	if kt {
+		if strings.Contains(lower, "kafka") {
+			s.broker = "kafka"
+			s.attr(jKafkaListener, Sub)
+			s.group(jKafkaSend, 1, Pub, false)
+			s.group(jProducerRec, 1, Pub, false)
+			s.group(jSendTo, 1, Pub, false)
+			s.group(jSubscribe, 1, Sub, true)
+		}
+		if strings.Contains(lower, "rabbit") || strings.Contains(lower, "amqp") {
+			s.broker = "amqp"
+			s.attr(jRabbitListen, Sub)
+			for _, m := range jRabbitSend.FindAllSubmatchIndex(s.src, -1) {
+				g := 1
+				if m[4] >= 0 {
+					g = 2
+				}
+				s.add(Pub, string(s.src[m[2*g]:m[2*g+1]]), m[2*g])
+			}
+			s.group(jBasicPublish, 1, Pub, false)
+			s.group(jBasicConsume, 1, Sub, false)
+		}
+		if strings.Contains(lower, "sqs") {
+			s.broker = "sqs"
+			s.group(jSqsListener, 1, Sub, true)
+			s.group(jJmsSend, 1, Pub, false)
+		}
+		if strings.Contains(lower, "jms") {
+			s.broker = "jms"
+			s.group(jJmsListener, 1, Sub, false)
+			s.group(jJmsSend, 1, Pub, false)
+		}
+	}
+	if strings.HasSuffix(path, ".cs") {
+		if strings.Contains(lower, "kafka") {
+			s.broker = "kafka"
+			s.group(csProduce, 1, Pub, false)
+			s.group(csSubscribe, 1, Sub, true)
+			s.group(csSubscribe, 2, Sub, false)
+		}
+		if strings.Contains(lower, "rabbitmq") {
+			s.broker = "amqp"
+			s.group(csBasicPublish, 1, Pub, false)
+			s.group(csBasicConsume, 1, Sub, false)
+		}
+		if strings.Contains(lower, "servicebus") {
+			s.broker = "servicebus"
+			s.group(csSender, 1, Pub, false)
+			s.group(csProcessor, 1, Sub, false)
+		}
+	}
+}

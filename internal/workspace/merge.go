@@ -32,6 +32,9 @@ func Build(cities []*city.City) *city.City {
 				links = append(links, *l)
 			}
 			if a < b {
+				if l := dataLinks(cities[a], cities[b], a, b, names); l != nil {
+					links = append(links, *l)
+				}
 				if l := peopleLink(cities[a], cities[b], a, b); l != nil {
 					links = append(links, *l)
 				}

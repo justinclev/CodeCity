@@ -204,7 +204,9 @@ type Facts struct {
 	Deps       []deps.Dep
 	Imports    map[int][]string // building index → import specs (see deps.Imports)
 	Authors    map[string]int   // every contributor (case-merged) → non-merge commits
-	Serves     []Served         // HTTP routes this repository serves
+	Serves     []Served         // network endpoints this repository serves (HTTP routes, gRPC services, GraphQL fields)
+	Aliases    []string         // network names its configuration gives services (docker-compose, Kubernetes)
+	DB         []DBUse          // database tables its code reads and writes
 	Calls      []Call           // HTTP requests it makes to a known target
 	Messages   []Msg            // topics it publishes to / consumes from
 }
@@ -214,6 +216,14 @@ type Served struct {
 	Building int
 	Method   string
 	Route    string
+	Weak     bool // from a file that may only be a copy (OpenAPI spec, GraphQL schema)
+}
+
+// DBUse is a database table a building reads or writes.
+type DBUse struct {
+	Building int
+	Table    string
+	Write    bool
 }
 
 // Call is an outgoing HTTP request with a known target.

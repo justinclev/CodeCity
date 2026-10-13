@@ -224,6 +224,8 @@ export function legend(): [string, string[]][] {
     ['Shape (what the file is made of)', (['tower', 'slab', 'types', 'data', 'doc', 'test', 'mixed'] as Archetype[]).map(k => KIND_LABEL[k])],
     ['Facade (language)', (['concrete', 'glass', 'brick', 'steel', 'storefront', 'library', 'utility', 'plain'] as Facade[]).map(f => FACADE_LABEL[f])],
     ['Roof (what the code does)', (Object.keys(ROOF_LABEL) as RoofKind[]).map(r => ROOF_LABEL[r]).concat(['columned lobby: imported by many files'])],
+    ['Walkways', ['skybridge: joins a test to the code it tests (walk across it)']],
+    ['Highways (several repos): road colour = what connects the cities', ['amber: API calls (HTTP, gRPC, GraphQL, WebSocket)', 'green: messages through a broker (Kafka, NATS, RabbitMQ, ...)', 'purple: the same database table', 'cars drive publisher → subscriber, caller ⇄ server']],
     ['Condition (history at this commit)', ['scaffolding / crane: recent heavy churn', 'irregular windows: complex code', 'weathering: long untouched']],
   ];
 }

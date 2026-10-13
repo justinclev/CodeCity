@@ -32,7 +32,21 @@ func hostWord(s string) string {
 }
 
 // hostNames: does the host of a request point at repository name?
-func hostNames(host, name string) bool {
+func hostNames(host, name string, aliases ...string) bool {
+	h0 := host
+	if i := strings.IndexByte(h0, ':'); i >= 0 {
+		h0 = h0[:i]
+	}
+	h0 = strings.SplitN(h0, ".", 2)[0]
+	for _, a := range aliases {
+		if a != "" && strings.EqualFold(a, h0) {
+			return true
+		}
+	}
+	return hostNamesPlain(host, name)
+}
+
+func hostNamesPlain(host, name string) bool {
 	h := host
 	if i := strings.IndexByte(h, ':'); i >= 0 {
 		h = h[:i]
@@ -54,47 +68,65 @@ func apiLinks(cities []*city.City, names []string) []city.Link {
 		n    map[string]bool
 	}
 	links := map[pair]*acc{}
+	matchers := make([]*flow.Matcher, len(cities))
+	for b, cb := range cities {
+		if cb.Facts == nil {
+			continue
+		}
+		rs := make([]flow.Route, len(cb.Facts.Serves))
+		for i, sv := range cb.Facts.Serves {
+			rs[i] = flow.Route{Method: sv.Method, Route: sv.Route}
+		}
+		matchers[b] = flow.NewMatcher(rs)
+	}
+	type cand struct {
+		repo, score int
+		s           city.Served
+	}
+	bestOf := func(cands []cand, weak bool) []cand {
+		top := -1
+		for _, c := range cands {
+			if c.s.Weak == weak && c.score > top {
+				top = c.score
+			}
+		}
+		var out []cand
+		for _, c := range cands {
+			if c.s.Weak == weak && c.score == top {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
 	for a, ca := range cities {
 		if ca.Facts == nil {
 			continue
 		}
 		for _, call := range ca.Facts.Calls {
 			bestScore := -1
-			var cands []struct {
-				repo, score int
-				s           city.Served
-			}
+			var cands []cand
 			host := ""
 			for b, cb := range cities {
-				if cb.Facts == nil {
+				if matchers[b] == nil {
 					continue
 				}
-				for _, sv := range cb.Facts.Serves {
-					score, h, ok := flow.Match(sv.Method, sv.Route, call.Method, call.URL)
-					if !ok || genericRoutes[strings.TrimRight(sv.Route, "/")] {
-						continue
-					}
-					host = h
-					if len(strings.TrimLeft(sv.Route, "/")) < 3 {
+				idx, score, h := matchers[b].Match(call.Method, call.URL)
+				host = h
+				for _, i := range idx {
+					sv := cb.Facts.Serves[i]
+					if genericRoutes[strings.TrimRight(sv.Route, "/")] || len(strings.TrimLeft(sv.Route, "/")) < 2 {
 						continue
 					}
 					if score > bestScore {
 						bestScore = score
 					}
-					cands = append(cands, struct {
-						repo, score int
-						s           city.Served
-					}{b, score, sv})
+					cands = append(cands, cand{b, score, sv})
 				}
 			}
-			var best []struct {
-				repo, score int
-				s           city.Served
-			}
-			for _, c := range cands {
-				if c.score == bestScore {
-					best = append(best, c)
-				}
+			// a route in a file that may only be a copy (spec, schema) counts only when no real handler matches
+			best := bestOf(cands, false)
+			if len(best) == 0 {
+				best = bestOf(cands, true)
 			}
 			if len(best) == 0 {
 				continue
@@ -104,24 +136,24 @@ func apiLinks(cities []*city.City, names []string) []city.Link {
 			repos := map[int]bool{}
 			for _, c := range best {
 				repos[c.repo] = true
-				if c.repo == a {
+				if c.repo == a && !c.s.Weak {
 					selfServes = true
 				}
 			}
-			if selfServes {
+			if selfServes && len(bestOf(cands, false)) > 0 {
 				continue
 			}
 			if !anonymousHost(host) {
 				// an explicit host must name the serving repository
 				keep := map[int]bool{}
 				for r := range repos {
-					if hostNames(host, names[r]) {
+					if hostNames(host, names[r], aliasesOf(cities[r])...) {
 						keep[r] = true
 					}
 				}
 				repos = keep
 			} else if len(repos) > 1 { // hostless and ambiguous
-				if hinted := hintRepos(call.URL, repos, names); len(hinted) == 1 {
+				if hinted := hintRepos(call.URL, repos, names, cities); len(hinted) == 1 {
 					repos = hinted
 				} else {
 					continue
@@ -140,7 +172,7 @@ func apiLinks(cities []*city.City, names []string) []city.Link {
 					x = &acc{l: city.Link{From: a, To: c.repo, Kind: "api"}, seen: map[city.Via]bool{}, n: map[string]bool{}}
 					links[k] = x
 				}
-				label := strings.TrimSpace(firstWord(call.Method, c.s.Method) + " " + c.s.Route)
+				label := routeLabel(call.Method, c.s)
 				v := city.Via{From: call.Building, To: c.s.Building, Label: label}
 				if !x.seen[v] && len(x.l.Via) < maxFileLinks {
 					x.seen[v] = true
@@ -187,12 +219,17 @@ func firstWord(a, b string) string {
 }
 
 // hintRepos keeps the repositories whose name appears in the URL's first path segments or host.
-func hintRepos(url string, repos map[int]bool, names []string) map[int]bool {
+func hintRepos(url string, repos map[int]bool, names []string, cities []*city.City) map[int]bool {
 	u := strings.ToLower(url)
 	out := map[int]bool{}
 	for r := range repos {
 		if w := hostWord(names[r]); len(w) >= 4 && strings.Contains(u, w) {
 			out[r] = true
+		}
+		for _, a := range aliasesOf(cities[r]) {
+			if len(a) >= 3 && strings.Contains(u, strings.ToLower(a)) {
+				out[r] = true
+			}
 		}
 	}
 	return out
@@ -250,10 +287,103 @@ func messageLinks(a, b *city.City, ai, bi int, names []string) *city.Link {
 	return l
 }
 
+func aliasesOf(c *city.City) []string {
+	if c.Facts == nil {
+		return nil
+	}
+	return c.Facts.Aliases
+}
+
 // anonymousHost: no host, this machine, or a host built from a variable: nothing names the target.
 func anonymousHost(h string) bool {
 	if i := strings.IndexByte(h, ':'); i >= 0 {
 		h = h[:i]
 	}
 	return h == "" || h == "localhost" || h == "0.0.0.0" || strings.HasPrefix(h, "127.") || h == "(dynamic host)"
+}
+
+// routeLabel names a call for people: "GET /api/orders", "gRPC Order", "GraphQL Query.users".
+func routeLabel(callMethod string, sv city.Served) string {
+	switch {
+	case strings.HasPrefix(sv.Route, "/grpc/"):
+		return "gRPC " + strings.TrimPrefix(sv.Route, "/grpc/")
+	case strings.HasPrefix(sv.Route, "/graphql/"):
+		return "GraphQL " + strings.TrimPrefix(sv.Route, "/graphql/")
+	}
+	return strings.TrimSpace(firstWord(callMethod, sv.Method) + " " + sv.Route)
+}
+
+// dataLinks: two repositories that use the same database table. The repository that writes it (and
+// the other only reads) is the source; when both write, the lower index is.
+func dataLinks(a, b *city.City, ai, bi int, names []string) *city.Link {
+	if a.Facts == nil || b.Facts == nil || len(a.Facts.DB) == 0 || len(b.Facts.DB) == 0 {
+		return nil
+	}
+	type use struct {
+		buildings []int
+		write     bool
+	}
+	collect := func(c *city.City) map[string]*use {
+		m := map[string]*use{}
+		for _, u := range c.Facts.DB {
+			x := m[u.Table]
+			if x == nil {
+				x = &use{}
+				m[u.Table] = x
+			}
+			x.write = x.write || u.Write
+			if len(x.buildings) < 3 {
+				x.buildings = append(x.buildings, u.Building)
+			}
+		}
+		return m
+	}
+	ta, tb := collect(a), collect(b)
+	var shared []string
+	aWrites, bWrites := 0, 0
+	for t, ua := range ta {
+		if ub, ok := tb[t]; ok && (ua.write || ub.write) { // two readers share nothing worth a road
+			shared = append(shared, t)
+			if ua.write && !ub.write {
+				aWrites++
+			}
+			if ub.write && !ua.write {
+				bWrites++
+			}
+		}
+	}
+	if len(shared) == 0 {
+		return nil
+	}
+	sort.Strings(shared)
+	ft, tt, fi, ti := ta, tb, ai, bi
+	if bWrites > aWrites {
+		ft, tt, fi, ti = tb, ta, bi, ai
+	}
+	l := &city.Link{From: fi, To: ti, Kind: "data"}
+	for _, t := range shared {
+		for _, x := range ft[t].buildings {
+			for _, y := range tt[t].buildings {
+				if len(l.Via) < maxFileLinks {
+					l.Via = append(l.Via, city.Via{From: x, To: y, Label: t})
+				}
+			}
+		}
+	}
+	l.Evidence = []string{fmt.Sprintf("%s and %s share %d database %s", names[fi], names[ti], len(shared), plural(len(shared), "table", "tables"))}
+	for i, t := range shared {
+		if i == 12 {
+			break
+		}
+		w := "reads"
+		if ft[t].write {
+			w = "writes"
+		}
+		o := "reads"
+		if tt[t].write {
+			o = "writes"
+		}
+		l.Evidence = append(l.Evidence, fmt.Sprintf("%s (%s %s, %s %s)", t, names[fi], w, names[ti], o))
+	}
+	return l
 }

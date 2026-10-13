@@ -278,6 +278,7 @@ func Scan(path string, src []byte, consts map[string]string) []Op {
 		each(rsSub, func(m []int) { l, off := grp(m, 1); s.list(l, off, Sub) })
 	}
 	s.others(path, lower)
+	s.jvm(path, lower)
 	return s.ops
 }
 

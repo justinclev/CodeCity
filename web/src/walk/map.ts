@@ -26,7 +26,7 @@ export class CityMap {
   private fullCanvas: HTMLCanvasElement | null = null;
   private hover = -1;
 
-  constructor(private boxes: MapBox[], private plates: MapPlate[], private labels: MapLabel[], private st: MapState, include: { x: number; z: number }[] = []) {
+  constructor(private boxes: MapBox[], private plates: MapPlate[], private labels: MapLabel[], private st: MapState, include: { x: number; z: number }[] = [], private roads: { kind: string; pts: [number, number][]; width: number }[] = []) {
     let x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
     for (const r of [...boxes, ...plates]) { x0 = Math.min(x0, r.x0); z0 = Math.min(z0, r.z0); x1 = Math.max(x1, r.x1); z1 = Math.max(z1, r.z1); }
     for (const p of include) { x0 = Math.min(x0, p.x); z0 = Math.min(z0, p.z); x1 = Math.max(x1, p.x); z1 = Math.max(z1, p.z); }
@@ -54,6 +54,17 @@ export class CityMap {
       c.strokeStyle = 'rgba(54, 224, 255, 0.22)';
       c.lineWidth = 1;
       c.strokeRect(X(p.x0) + 0.5, Z(p.z0) + 0.5, (p.x1 - p.x0) * s - 1, (p.z1 - p.z0) * s - 1);
+    }
+    const ROAD: Record<string, string> = { api: '#ff9f1c', message: '#2bffb0', data: '#b57cff' };
+    for (const r of this.roads) {
+      c.strokeStyle = ROAD[r.kind] ?? '#7fe3ff';
+      c.globalAlpha = 0.75;
+      c.lineWidth = Math.max(2, r.width * s);
+      c.lineJoin = 'round';
+      c.beginPath();
+      r.pts.forEach((p, k) => (k ? c.lineTo(X(p[0]), Z(p[1])) : c.moveTo(X(p[0]), Z(p[1]))));
+      c.stroke();
+      c.globalAlpha = 1;
     }
     for (const b of this.boxes) {
       const studied = this.st.studied(b.i), seen = studied || this.st.seen(b.i);

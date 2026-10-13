@@ -264,3 +264,93 @@ func TestExampleHighways(t *testing.T) {
 		t.Logf("found: %v", got)
 	}
 }
+
+// exampleWorld builds every directory under examples/<name> into a git repository named ex-<dir>.
+func exampleWorld(t *testing.T, name string) *city.City {
+	t.Helper()
+	root := filepath.Join("..", "..", "examples", name)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		files := map[string]string{}
+		filepath.Walk(filepath.Join(root, e.Name()), func(p string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				b, _ := os.ReadFile(p)
+				rel, _ := filepath.Rel(filepath.Join(root, e.Name()), p)
+				files[filepath.ToSlash(rel)] = string(b)
+			}
+			return nil
+		})
+		dir := mkrepo(t, "Dev", files)
+		named := filepath.Join(filepath.Dir(dir), "ex-"+e.Name())
+		if err := os.Rename(dir, named); err != nil {
+			t.Fatal(err)
+		}
+		dirs = append(dirs, named)
+	}
+	return Build(analyzeAll(t, dirs...))
+}
+
+func highways(w *city.City) map[string]bool {
+	got := map[string]bool{}
+	for _, l := range w.Links {
+		if l.Kind == "dependency" || l.Kind == "people" {
+			continue
+		}
+		for _, v := range l.Via {
+			got[l.Kind+" "+w.Repos[l.From].Name+"→"+w.Repos[l.To].Name+" "+v.Label] = true
+		}
+	}
+	return got
+}
+
+func TestExampleHighwaysMore(t *testing.T) {
+	got := highways(exampleWorld(t, "highways"))
+	for _, want := range []string{
+		"api ex-gateway→ex-partners GET /partners/{id}/offers",   // OpenAPI spec only
+		"api ex-dashboard→ex-reports /api/reports",               // URL from REPORTS_URL in docker-compose
+		"api ex-dashboard→ex-graphql-api GraphQL Query.products", // GraphQL
+		"api ex-dashboard→ex-notifications GET /ws",              // WebSocket
+		"message ex-orders→ex-inventory orders.created",          // Java @KafkaListener
+		"message ex-orders→ex-analytics orders.created",          // AsyncAPI v3 receive
+		"data ex-orders→ex-reports shop_orders",                  // shared table: orders writes, reports reads
+	} {
+		if !got[want] {
+			t.Errorf("missing highway %q", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("found: %v", got)
+	}
+}
+
+func TestExampleHighwaysLanguages(t *testing.T) {
+	got := highways(exampleWorld(t, "highways-lang"))
+	for _, want := range []string{
+		"api ex-search→ex-catalog GET /api/catalog/items", // host "catalog-api" is the compose service of ex-catalog; FastAPI route; Rust call
+		"api ex-legacy→ex-search GET /api/search",         // Flask → axum
+		"api ex-billing→ex-ledger gRPC Ledger",            // C# gRPC client → Go server
+	} {
+		if !got[want] {
+			t.Errorf("missing highway %q", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("found: %v", got)
+	}
+}
+
+func TestHostNamesAliases(t *testing.T) {
+	if hostNames("gw-internal:80", "edge") {
+		t.Fatal("unrelated host must not match")
+	}
+	if !hostNames("gw-internal:80", "edge", "gw-internal") {
+		t.Fatal("a compose / Kubernetes service alias names its repository")
+	}
+}

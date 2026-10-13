@@ -41,15 +41,16 @@ function repoCommitAt(k: number, c: number): string | null {
 }
 
 function linkShown(kind: string, t: ReturnType<typeof ui.linkToggles>): boolean {
-  return kind === 'dependency' ? t.deps : kind === 'people' ? t.people : kind === 'api' ? t.api : t.message;
+  return kind === 'dependency' ? t.deps : kind === 'people' ? t.people : kind === 'api' ? t.api : kind === 'message' ? t.message : t.data;
 }
-const LINK_CHECK: Record<string, string> = { dependency: 'showdeps', people: 'showpeople', api: 'showapi', message: 'showmsg' };
+const LINK_CHECK: Record<string, string> = { dependency: 'showdeps', people: 'showpeople', api: 'showapi', message: 'showmsg', data: 'showdb' };
 
 function linkLabel(l: NonNullable<City['links']>[number]): string {
   switch (l.kind) {
     case 'dependency': return `${repoName(l.from)} → ${repoName(l.to)}`;
     case 'api': return `API · ${l.via?.length ?? 0} ${(l.via?.length ?? 0) === 1 ? 'call' : 'calls'}`;
     case 'message': return `${(l.brokers ?? ['messages']).join('/')} · ${new Set((l.via ?? []).map(v => v.l)).size} topics`;
+    case 'data': return `database · ${new Set((l.via ?? []).map(v => v.l)).size} ${new Set((l.via ?? []).map(v => v.l)).size === 1 ? 'table' : 'tables'}`;
     default: return `${l.peopleCount ?? 0} shared`;
   }
 }
@@ -72,7 +73,7 @@ function linkViews(): LinkView[] {
   return out;
 }
 
-const ORDER = ['dependency', 'api', 'message', 'people'];
+const ORDER = ['dependency', 'api', 'message', 'data', 'people'];
 
 function linkRows(): ui.LinkRow[] {
   return (city?.links ?? []).map((l, index) => ({

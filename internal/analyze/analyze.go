@@ -218,6 +218,8 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 	var paths []string
 	local := map[int][]string{}
 	var flowFiles []flow.File
+	var netFiles []netFile
+	netBytes := 0
 	flowBytes := 0
 	for i, b := range c.Buildings {
 		oid, ok := tipOid[b.Path]
@@ -238,6 +240,10 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 		if roleWanted(b.Path, b.Lang) && flowBytes+len(content) <= maxRoleBytes && len(flowFiles) < maxRoleFiles {
 			flowFiles = append(flowFiles, flow.File{Path: b.Path, Lang: b.Lang, Content: content})
 			flowBytes += len(content)
+		}
+		if wantNet(b.Path) && len(content) <= 400<<10 && netBytes+len(content) <= maxRoleBytes {
+			netFiles = append(netFiles, netFile{b.Path, content})
+			netBytes += len(content)
 		}
 		if !manifest && !code {
 			continue
@@ -263,7 +269,7 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 	}
 
 	assignRoles(c, flowFiles, f)
-	messageFacts(c, f, flowFiles)
+	networkFacts(c, f, netFiles)
 
 	// resolve imports inside this repository
 	res := deps.NewResolver(paths, f.Identities)

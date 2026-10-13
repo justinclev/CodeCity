@@ -371,7 +371,7 @@ function piecesSection(st: PiecesState, h: InfoHandlers): HTMLElement {
 }
 
 export interface LinkInfo {
-  from: string; to: string; kind: 'dependency' | 'people' | 'api' | 'message';
+  from: string; to: string; kind: 'dependency' | 'people' | 'api' | 'message' | 'data';
   via: { from: number; to: number; label: string; fromPath: string; toPath: string }[]; brokers: string[];
   evidence: string[];
   files: { index: number; path: string; target: string }[];
@@ -384,9 +384,9 @@ export function showLink(d: LinkInfo | null, h: InfoHandlers) {
   const title = d.kind === 'people' ? `${d.from} ↔ ${d.to}` : `${d.from} → ${d.to}`;
   box.replaceChildren(infoHead(title, h));
   const head = el('div', 'linkhead');
-  const tag = { dependency: 'dependency', people: 'shared people', api: 'API highway', message: 'message highway' }[d.kind];
+  const tag = { dependency: 'dependency', people: 'shared people', api: 'API highway', message: 'message highway', data: 'database highway' }[d.kind];
   const what = { dependency: `${d.from} depends on ${d.to}`, people: `${fmt(d.peopleCount)} contributors work on both`, api: `${d.from} calls routes served by ${d.to}`,
-    message: `${d.from} publishes, ${d.to} consumes${d.brokers.length ? ' · ' + d.brokers.join(', ') : ''}` }[d.kind];
+    message: `${d.from} publishes, ${d.to} consumes${d.brokers.length ? ' · ' + d.brokers.join(', ') : ''}`, data: `${d.from} and ${d.to} use the same database tables` }[d.kind];
   head.append(el('span', 'kindtag ' + d.kind, tag), el('span', '', what));
   box.append(head);
   if (d.evidence.length) {
@@ -408,7 +408,7 @@ export function showLink(d: LinkInfo | null, h: InfoHandlers) {
     box.append(list);
   }
   if (d.via.length) {
-    box.append(el('h4', '', d.kind === 'api' ? `Calls (${fmt(d.via.length)})` : `Topics (${fmt(d.via.length)}): publisher → subscriber`));
+    box.append(el('h4', '', d.kind === 'api' ? `Calls (${fmt(d.via.length)})` : d.kind === 'data' ? `Tables (${fmt(d.via.length)})` : `Topics (${fmt(d.via.length)}): publisher → subscriber`));
     const list = el('div', 'list');
     for (const v of d.via.slice(0, 200)) {
       const b = el('button');
@@ -721,7 +721,7 @@ export interface Controls {
 }
 
 export function linkToggles() {
-  return { deps: $<HTMLInputElement>('showdeps').checked, people: $<HTMLInputElement>('showpeople').checked, api: $<HTMLInputElement>('showapi').checked, message: $<HTMLInputElement>('showmsg').checked };
+  return { deps: $<HTMLInputElement>('showdeps').checked, people: $<HTMLInputElement>('showpeople').checked, api: $<HTMLInputElement>('showapi').checked, message: $<HTMLInputElement>('showmsg').checked, data: $<HTMLInputElement>('showdb').checked };
 }
 
 function autosize() {
@@ -748,6 +748,7 @@ export function bindControls(h: Controls) {
   $('showpeople').onchange = () => h.onLinksToggle();
   $('showapi').onchange = () => h.onLinksToggle();
   $('showmsg').onchange = () => h.onLinksToggle();
+  $('showdb').onchange = () => h.onLinksToggle();
   $('repoform').onsubmit = e => {
     e.preventDefault();
     h.onSubmit(src.value.trim(), '',

@@ -401,7 +401,7 @@ export class WalkMode {
         }
         return { x: this.pos.x, z: this.pos.z, heading: this.avatar.group.rotation.y, yaw: this.yaw };
       },
-    }, [{ x: this.pos.x, z: this.pos.z }]);
+    }, [{ x: this.pos.x, z: this.pos.z }], this.scene.roads());
     this.status.update(this.game);
   }
 

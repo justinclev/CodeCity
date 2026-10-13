@@ -1,0 +1,5 @@
+services:
+  dashboard:
+    build: .
+    environment:
+      - REPORTS_URL=http://reports:8090
