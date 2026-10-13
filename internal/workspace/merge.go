@@ -96,11 +96,20 @@ func merge(cities []*city.City, names []string, links []city.Link, offsets [][2]
 	for k, c := range cities {
 		cmap[k] = make([]int, len(c.Commits))
 	}
-	for m, r := range all {
+	// distinct commits only: a monorepo split into project-cities gives every
+	// sub-city the same commit list (identical hashes), so they share one timeline.
+	seenC := map[string]int{}
+	for _, r := range all {
 		cm := cities[r.repo].Commits[r.idx]
+		if m, ok := seenC[cm.Hash]; ok {
+			cmap[r.repo][r.idx] = m
+			continue
+		}
+		m := len(out.Commits)
 		cm.Repo = r.repo
 		out.Commits = append(out.Commits, cm)
 		cmap[r.repo][r.idx] = m
+		seenC[cm.Hash] = m
 	}
 
 	// authors merged by case-insensitive name
@@ -179,7 +188,7 @@ func merge(cities []*city.City, names []string, links []city.Link, offsets [][2]
 			b.ImpD = offset(b.ImpD, dBase[k])
 			out.Buildings = append(out.Buildings, b)
 		}
-		out.Repos = append(out.Repos, city.RepoInfo{Name: name, Source: c.Repo.Source, Remote: c.Repo.Remote, Path: c.Repo.Path,
+		out.Repos = append(out.Repos, city.RepoInfo{Name: name, Source: c.Repo.Source, Remote: c.Repo.Remote, Path: c.Repo.Path, Base: c.Repo.Base,
 			Ref: c.Repo.Ref, Commit: c.Repo.Commit, District: dBase[k], HasChurn: c.HasChurn})
 		out.HasChurn = out.HasChurn || c.HasChurn
 		out.Stats.Files += c.Stats.Files

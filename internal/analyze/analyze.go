@@ -27,6 +27,7 @@ type Options struct {
 	IncludeGenerated bool
 	MinWeight        float64
 	NoChurn          bool // skip change-frequency analysis (allows a shallow clone for MaxCommits == 1)
+	Split            bool // split a monolithic repository into one city per project (manifest root)
 }
 
 // Progress reports coarse progress; total may be 0 when unknown.
@@ -49,16 +50,39 @@ type fileHist struct {
 
 // Run opens the source, scans the sampled commits and lays out the city.
 func Run(ctx context.Context, o Options, progress Progress) (*city.City, error) {
-	c, repo, err := RunRepo(ctx, o, progress)
+	cities, repo, err := RunRepoN(ctx, o, progress)
 	if repo != nil {
 		repo.Close()
 	}
-	return c, err
+	if err != nil {
+		return nil, err
+	}
+	if len(cities) == 1 {
+		return cities[0], nil
+	}
+	return nil, errors.New("source holds several projects; use RunAll and workspace.Build to combine them")
+}
+
+// RunAll is like Run but returns every city the source produces (a monorepo
+// split yields several), un-merged, so a caller combining multiple sources can
+// link them all in one workspace.
+func RunAll(ctx context.Context, o Options, progress Progress) ([]*city.City, error) {
+	cities, repo, err := RunRepoN(ctx, o, progress)
+	if repo != nil {
+		repo.Close()
+	}
+	return cities, err
 }
 
 // RunRepo is Run but hands back the open repository (for reading files later);
 // the caller must Close it. On error the repository is already closed.
-func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, repo *gitx.Repo, err error) {
+// RunRepoN is Run but hands back the open repository (for reading files later)
+// and may return more than one city: when Options.Split is set and the
+// repository holds several projects (directories with a build manifest), each
+// project becomes its own city and the leftover files become a "root" city, so
+// the projects link up as highways exactly like separate repositories. The
+// caller must Close the returned repository; on error it is already closed.
+func RunRepoN(ctx context.Context, o Options, progress Progress) (cities []*city.City, repo *gitx.Repo, err error) {
 	if progress == nil {
 		progress = func(string, int, int) {}
 	}
@@ -170,49 +194,154 @@ func RunRepo(ctx context.Context, o Options, progress Progress) (c *city.City, r
 		}
 	}
 
+	idxGlobal := make(map[string]int, len(order))
+	for i, p := range order {
+		idxGlobal[p] = i
+	}
 	var cd *churnData
 	if !o.NoChurn && !repo.IsShallow(ctx) {
-		idx := make(map[string]int, len(order))
-		for i, p := range order {
-			idx[p] = i
-		}
-		if cd, err = collectChurn(ctx, repo, commits, hist, idx, progress); err != nil {
+		if cd, err = collectChurn(ctx, repo, commits, hist, idxGlobal, progress); err != nil {
 			return nil, nil, err
 		}
 	}
 	progress("laying out", 0, 0)
 
-	files := make([]*fileHist, 0, len(order))
-	for _, p := range order {
-		files = append(files, hist[p])
-	}
-	pre, err := readFlow(ctx, br, files, tipOid)
-	if err != nil {
-		return nil, nil, err
-	}
-	c = build(files, o.MinWeight, pre.bias)
-	progress("reading dependencies", 0, 0)
-	if c.Facts, err = collectFacts(ctx, br, c, tipOid, repo.Remote(ctx), pre.g); err != nil {
-		return nil, nil, err
-	}
-	if cd != nil {
-		c.Facts.Authors = map[string]int{}
-		for a, st := range cd.authors {
-			c.Facts.Authors[a] = st.Commits
+	// decide the projects: the whole repo, unless splitting finds several
+	projs := []project{{dir: "", name: repo.Name()}}
+	if o.Split {
+		tipPaths := make([]string, 0, len(tipOid))
+		for p := range tipOid {
+			tipPaths = append(tipPaths, p)
 		}
+		projs = detectProjects(tipPaths, repo.Name())
+	}
+	groups := groupPaths(order, projs)
+	used := projs[:0:0]
+	for _, pr := range projs {
+		if len(groups[pr.dir]) > 0 {
+			used = append(used, pr)
+		}
+	}
+	if len(used) <= 1 { // not a monorepo (or splitting off): one city over everything
+		c, err := assembleCity(ctx, br, o, "", repo.Name(), order, hist, tipOid, cd, idxGlobal, commits, repo.Remote(ctx), repo.LocalPath(ctx), tip, label, skipped)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []*city.City{c}, repo, nil
+	}
+	for _, pr := range used {
+		sk := map[string]int(nil)
+		if pr.dir == "" {
+			sk = skipped // the repo-wide skip tally belongs to the root bucket, counted once
+		}
+		c, err := assembleCity(ctx, br, o, pr.dir, pr.name, groups[pr.dir], hist, tipOid, cd, idxGlobal, commits, repo.Remote(ctx), repo.LocalPath(ctx), tip, label, sk)
+		if err != nil {
+			return nil, nil, err
+		}
+		c.Repo.Base = pr.dir
+		cities = append(cities, c)
+	}
+	return cities, repo, nil
+}
+
+// assembleCity lays out one city from a subset of the repository's files
+// (members, repo-relative paths). When subdir != "" the paths are rebased to
+// the project root so the city stands on its own and churn/flow/facts are
+// scoped to the project — the basis for linking monorepo projects like repos.
+func assembleCity(ctx context.Context, br *gitx.BlobReader, o Options, subdir, name string, members []string,
+	hist map[string]*fileHist, tipOid map[string]string, cd *churnData, idxGlobal map[string]int,
+	commits []gitx.Commit, remote, localPath, tip, label string, skipped map[string]int) (*city.City, error) {
+	strip := func(p string) string {
+		if subdir == "" {
+			return p
+		}
+		return strings.TrimPrefix(p, subdir+"/")
+	}
+	inGroup := make(map[string]bool, len(members))
+	for _, p := range members {
+		inGroup[p] = true
+	}
+	// rebased file history + tip blobs for this project
+	rhist := make(map[string]*fileHist, len(members))
+	rtip := make(map[string]string, len(members))
+	files := make([]*fileHist, 0, len(members))
+	for _, p := range membersInScanOrder(members, idxGlobal) {
+		h := hist[p]
+		nh := *h
+		nh.path = strip(p)
+		rhist[nh.path] = &nh
+		files = append(files, &nh)
+		if oid, ok := tipOid[p]; ok {
+			rtip[nh.path] = oid
+		}
+	}
+	pre, err := readFlow(ctx, br, files, rtip)
+	if err != nil {
+		return nil, err
+	}
+	c := build(files, o.MinWeight, pre.bias)
+	if c.Facts, err = collectFacts(ctx, br, c, rtip, remote, pre.g); err != nil {
+		return nil, err
 	}
 	if cd != nil {
 		c.HasChurn = true
-		assignOwners(c, hist, cd.authors)
-		assignCoupling(c, order, cd)
+		// contributors scoped to this project's files (so people-links mean something)
+		c.Facts.Authors = map[string]int{}
+		for _, h := range rhist {
+			for a, k := range h.authors {
+				c.Facts.Authors[a] += k
+			}
+		}
+		assignOwners(c, rhist, cd.authors)
+		// coupling re-indexed onto this project's local file order
+		localOrder := make([]string, 0, len(files))
+		g2l := make(map[int]int, len(files))
+		for _, f := range files {
+			g2l[idxGlobal[joinSub(subdir, f.path)]] = len(localOrder)
+			localOrder = append(localOrder, f.path)
+		}
+		scd := &churnData{authors: cd.authors, pairs: map[[2]int]int{}, revs: map[int]int{}}
+		for gi, li := range g2l {
+			scd.revs[li] = cd.revs[gi]
+		}
+		for pr, k := range cd.pairs {
+			a, oka := g2l[pr[0]]
+			b, okb := g2l[pr[1]]
+			if oka && okb {
+				if a > b {
+					a, b = b, a
+				}
+				scd.pairs[[2]int{a, b}] = k
+			}
+		}
+		assignCoupling(c, localOrder, scd)
+	}
+	if skipped == nil {
+		skipped = map[string]int{}
 	}
 	c.Stats.Skipped = skipped
 	for _, k := range commits {
 		c.Commits = append(c.Commits, city.Commit{Hash: k.Hash, Date: k.Date, Author: k.Author, Subject: k.Subject})
 	}
-	c.Repo = city.Repo{Name: repo.Name(), Source: o.Source, Remote: repo.Remote(ctx), Path: repo.LocalPath(ctx), Ref: label, Commit: tip,
+	c.Repo = city.Repo{Name: name, Source: o.Source, Remote: remote, Path: localPath, Base: subdir, Ref: label, Commit: tip,
 		AnalyzedAt: time.Now().UTC().Format(time.RFC3339)}
-	return c, repo, nil
+	_ = inGroup
+	return c, nil
+}
+
+// order returns the members sorted by their global scan order, for stable layout.
+func membersInScanOrder(members []string, idxGlobal map[string]int) []string {
+	out := append([]string(nil), members...)
+	sort.Slice(out, func(i, j int) bool { return idxGlobal[out[i]] < idxGlobal[out[j]] })
+	return out
+}
+
+// joinSub re-prefixes a project-relative path with its subdir (inverse of strip).
+func joinSub(subdir, rel string) string {
+	if subdir == "" {
+		return rel
+	}
+	return subdir + "/" + rel
 }
 
 // collectFacts reads manifests and import statements at the newest commit,

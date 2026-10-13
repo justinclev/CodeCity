@@ -333,7 +333,7 @@ async function loadFile(f: File) {
 }
 
 // ---------------------------------------------------------------- analysis jobs
-interface JobInfo { id: number; state: string; stage: string; done: number; total: number; error?: string; source: string; request: { source?: string; sources?: string[]; ref: string; maxCommits: number; noChurn?: boolean } }
+interface JobInfo { id: number; state: string; stage: string; done: number; total: number; error?: string; source: string; request: { source?: string; sources?: string[]; ref: string; maxCommits: number; noChurn?: boolean; split?: boolean } }
 interface Status { hasCity: boolean; allowLocal: boolean; maxCommitsLimit: number; job?: JobInfo }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -374,13 +374,14 @@ async function watchJob() {
 }
 
 async function submit(source: string, ref: string, commits: number, churn: boolean) {
-  store.set('form', { source, ref, commits, churn });
+  const split = (document.getElementById('split') as HTMLInputElement).checked;
+  store.set('form', { source, ref, commits, churn, split });
   const sources = source.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   ui.setJobStatus('starting…');
   ui.setProgress({ done: 0, total: 0 });
   try {
     await api('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sources, ref, maxCommits: commits, noChurn: !churn }) });
+      body: JSON.stringify({ sources, ref, maxCommits: commits, noChurn: !churn, split }) });
     void watchJob();
   } catch (e) {
     ui.setProgress(null);
@@ -977,8 +978,8 @@ addEventListener('drop', e => {
 
 // ---------------------------------------------------------------- startup
 async function start() {
-  const saved = store.get<{ source: string; ref: string; commits: number; churn?: boolean }>('form');
-  if (saved) ui.setForm(saved.source, saved.ref, saved.commits, saved.churn ?? true);
+  const saved = store.get<{ source: string; ref: string; commits: number; churn?: boolean; split?: boolean }>('form');
+  if (saved) ui.setForm(saved.source, saved.ref, saved.commits, saved.churn ?? true, saved.split ?? true);
 
   const src = new URLSearchParams(location.search).get('src');
   if (src) {
@@ -995,7 +996,7 @@ async function start() {
   }
   if (st.job?.request && !saved) {
     const r = st.job.request;
-    ui.setForm((r.sources?.length ? r.sources : [r.source ?? '']).join('\n'), r.ref, r.maxCommits, !r.noChurn);
+    ui.setForm((r.sources?.length ? r.sources : [r.source ?? '']).join('\n'), r.ref, r.maxCommits, !r.noChurn, r.split ?? true);
   }
   renderBranches();
   if (st.job?.state === 'running') { void watchJob(); return; }

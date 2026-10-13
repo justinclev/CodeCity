@@ -118,6 +118,7 @@ func run(cmd string, args []string) error {
 	minW := fs.Float64("min-weight", 8, "")
 	maxC := fs.Int("max-commits", 100, "")
 	noChurn := fs.Bool("no-churn", false, "")
+	split := fs.Bool("split", false, "split a monolithic repo into one city per project (manifest root)")
 	out := fs.String("o", "city.json", "")
 	addr := fs.String("addr", "127.0.0.1:8080", "")
 	webDir := fs.String("web-dir", "", "")
@@ -146,7 +147,7 @@ func run(cmd string, args []string) error {
 		}
 	}
 	base := analyze.Options{Ref: *ref, Excludes: excludes, IncludeVendored: *incV, IncludeGenerated: *incG,
-		MinWeight: *minW, MaxCommits: *maxC, NoChurn: *noChurn}
+		MinWeight: *minW, MaxCommits: *maxC, NoChurn: *noChurn, Split: *split}
 
 	if cmd == "analyze" || cmd == "report" {
 		var cities []*city.City
@@ -154,7 +155,7 @@ func run(cmd string, args []string) error {
 			o := base
 			o.Source = src
 			stage := ""
-			c, err := analyze.Run(context.Background(), o, func(st string, done, total int) {
+			cs, err := analyze.RunAll(context.Background(), o, func(st string, done, total int) {
 				if st != stage {
 					stage = st
 					logf("%s: %s ...", src, st)
@@ -163,8 +164,10 @@ func run(cmd string, args []string) error {
 			if err != nil {
 				return fmt.Errorf("%s: %w", src, err)
 			}
-			logf("%s @ %s: %d commits, %d files, %d LOC (skipped %v)", c.Repo.Name, c.Repo.Commit[:8], len(c.Commits), c.Stats.Files, c.Stats.LOC, c.Stats.Skipped)
-			cities = append(cities, c)
+			for _, c := range cs {
+				logf("%s @ %s: %d commits, %d files, %d LOC (skipped %v)", c.Repo.Name, c.Repo.Commit[:8], len(c.Commits), c.Stats.Files, c.Stats.LOC, c.Stats.Skipped)
+			}
+			cities = append(cities, cs...)
 		}
 		c := workspace.Build(cities)
 		for _, l := range c.Links {
@@ -202,7 +205,7 @@ func run(cmd string, args []string) error {
 	}()
 	logf("serving on http://%s  (ctrl-c to stop)", ln.Addr())
 	if len(pos) > 0 {
-		if _, err := srv.Start(server.Request{Sources: pos, Ref: *ref, MaxCommits: *maxC, NoChurn: *noChurn}); err != nil {
+		if _, err := srv.Start(server.Request{Sources: pos, Ref: *ref, MaxCommits: *maxC, NoChurn: *noChurn, Split: *split}); err != nil {
 			return err
 		}
 		logf("analyzing %s in the background ...", strings.Join(pos, ", "))

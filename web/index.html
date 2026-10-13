@@ -26,15 +26,16 @@
 
     <div id="branchpop" hidden></div>
     <details id="repobox" open>
-      <summary>Repository</summary>
+      <summary>Repositories</summary>
       <form id="repoform">
-        <textarea id="source" rows="2" placeholder="local path or git URL&#10;one repo per line (optional ref after a space)" autocomplete="off" spellcheck="false" required></textarea>
+        <textarea id="source" rows="2" placeholder="one repository per line — local path or git URL (optional ref after a space)&#10;a monorepo is split into a city per project" autocomplete="off" spellcheck="false" required></textarea>
         <div id="branches"></div>
         <div class="row">
           <span class="lbl">history samples</span>
           <input id="commits" type="number" min="1" max="1000" value="100" title="history samples (1 = snapshot only)" />
         </div>
         <label class="chk" title="change frequency, coupling and ownership from git log (needs a full clone)"><input id="churn" type="checkbox" checked /> history analysis (churn, coupling, owners)</label>
+        <label class="chk" title="detect a monolithic repo that holds several projects (each with its own build manifest) and render each project as its own city, linked like separate repositories"><input id="split" type="checkbox" checked /> split monorepos into projects</label>
         <div class="row">
           <button id="go" type="submit" class="primary">Analyze</button>
           <button id="cancel" type="button" hidden>Cancel</button>

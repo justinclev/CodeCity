@@ -894,13 +894,14 @@ export function setBaselineRow(visible: boolean, label: string) {
   $('cwinrow').hidden = visible;
 }
 
-export function setForm(source: string, ref: string, commits: number, churn = true) {
+export function setForm(source: string, ref: string, commits: number, churn = true, split = true) {
   // an old-style default ref folds into the lines that do not name one
   if (ref) source = source.split('\n').map(l => (l.trim() && !l.trim().startsWith('#') && l.trim().split(/\s+/).length === 1 ? `${l.trim()} ${ref}` : l)).join('\n');
   $<HTMLTextAreaElement>('source').value = source;
   autosize();
   $<HTMLInputElement>('commits').value = String(commits);
   $<HTMLInputElement>('churn').checked = churn;
+  $<HTMLInputElement>('split').checked = split;
 }
 
 export function flashCopied(text: string) {

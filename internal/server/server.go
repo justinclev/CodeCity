@@ -37,6 +37,7 @@ type Request struct {
 	Ref        string   `json:"ref"` // default ref for entries without one
 	MaxCommits int      `json:"maxCommits"`
 	NoChurn    bool     `json:"noChurn"`
+	Split      bool     `json:"split"` // split a monolithic repo into one city per project
 }
 
 // MaxRepos caps how many repositories one analysis may combine.
@@ -178,13 +179,14 @@ func (s *Server) Start(req Request) (int, error) {
 		for k, t := range targets {
 			opts := s.Base
 			opts.Source, opts.Ref, opts.MaxCommits, opts.NoChurn = t.source, t.ref, req.MaxCommits, req.NoChurn || s.Base.NoChurn
+			opts.Split = req.Split || s.Base.Split
 			prefix := ""
 			if len(targets) > 1 {
 				prefix = fmt.Sprintf("[%d/%d] %s: ", k+1, len(targets), shortName(t.source))
 			}
-			var c *city.City
+			var cs []*city.City
 			var repo *gitx.Repo
-			c, repo, err = analyze.RunRepo(ctx, opts, func(stage string, done, total int) {
+			cs, repo, err = analyze.RunRepoN(ctx, opts, func(stage string, done, total int) {
 				s.mu.Lock()
 				if s.job == j {
 					j.Stage, j.Done, j.Total = prefix+stage, done, total
@@ -197,8 +199,10 @@ func (s *Server) Start(req Request) (int, error) {
 				}
 				break
 			}
-			cities = append(cities, c)
-			repos = append(repos, repo)
+			cities = append(cities, cs...)
+			for range cs { // one city per project shares the repo's single clone
+				repos = append(repos, repo)
+			}
 		}
 		var world *city.City
 		if err == nil {
@@ -238,22 +242,34 @@ func (s *Server) finish(j *Job, c *city.City, repos []*gitx.Repo, err error, ctx
 		s.paths = make(map[string]fileRef, len(c.Buildings))
 		for _, b := range c.Buildings {
 			orig := b.Path
+			base := ""
 			if len(c.Repos) > 0 {
 				orig = strings.TrimPrefix(b.Path, c.Repos[b.Repo].Name+"/")
+				base = c.Repos[b.Repo].Base
+			} else {
+				base = c.Repo.Base
+			}
+			if base != "" { // a monorepo project: the blob lives under its subdir
+				orig = base + "/" + orig
 			}
 			s.paths[b.Path] = fileRef{repo: b.Repo, path: orig, lang: b.Lang}
 		}
 		if old := s.repos; len(old) > 0 { // let in-flight file reads finish before removing temp clones
-			time.AfterFunc(30*time.Second, func() {
-				for _, r := range old {
-					r.Close()
-				}
-			})
+			time.AfterFunc(30*time.Second, func() { closeRepos(old) })
 		}
 		s.repos, repos = repos, nil
 	}
+	closeRepos(repos)
+}
+
+// closeRepos closes each distinct repository once (monorepo projects share one clone).
+func closeRepos(repos []*gitx.Repo) {
+	seen := map[*gitx.Repo]bool{}
 	for _, r := range repos {
-		r.Close()
+		if r != nil && !seen[r] {
+			seen[r] = true
+			r.Close()
+		}
 	}
 }
 
@@ -297,10 +313,11 @@ func (s *Server) Symbols(ctx context.Context) ([]byte, error) {
 	var out []sym
 	for k, repo := range repos {
 		commit := c.Repo.Commit
-		prefix := ""
+		prefix, base := "", ""
 		if len(c.Repos) > 0 {
 			commit = c.Repos[k].Commit
 			prefix = c.Repos[k].Name + "/"
+			base = c.Repos[k].Base
 		}
 		entries, err := repo.ListFiles(ctx, commit)
 		if err != nil {
@@ -318,7 +335,11 @@ func (s *Server) Symbols(ctx context.Context) ([]byte, error) {
 			if b.Repo != k || !outline.Supported(b.Lang) || len(out) >= maxSymbols {
 				continue
 			}
-			o, ok := oid[strings.TrimPrefix(b.Path, prefix)]
+			gp := strings.TrimPrefix(b.Path, prefix)
+			if base != "" {
+				gp = base + "/" + gp
+			}
+			o, ok := oid[gp]
 			if !ok {
 				continue
 			}
@@ -376,11 +397,16 @@ func (s *Server) File(ctx context.Context, path, commit string) (*FileResponse, 
 	lang := ref.lang
 	// the commit must be one of this repository's analyzed commits
 	hash := ""
-	if i, err := strconv.Atoi(commit); err == nil && i >= 0 && i < len(c.Commits) && c.Commits[i].Repo == ref.repo {
+	// a commit belongs to ref.repo, or to any city sharing the same underlying
+	// clone (a monorepo split into project-cities shares one timeline).
+	sameClone := func(r int) bool {
+		return r == ref.repo || (r >= 0 && r < len(repos) && ref.repo < len(repos) && repos[r] == repos[ref.repo])
+	}
+	if i, err := strconv.Atoi(commit); err == nil && i >= 0 && i < len(c.Commits) && sameClone(c.Commits[i].Repo) {
 		hash = c.Commits[i].Hash
 	} else if len(commit) >= 4 {
 		for _, k := range c.Commits {
-			if k.Repo == ref.repo && strings.HasPrefix(k.Hash, commit) {
+			if sameClone(k.Repo) && strings.HasPrefix(k.Hash, commit) {
 				hash = k.Hash
 				break
 			}
@@ -499,11 +525,9 @@ func (s *Server) History(ctx context.Context, path string, n int) (*HistoryRespo
 	if !ok {
 		return nil, errBad("unknown path")
 	}
-	tip := ""
-	for _, k := range c.Commits {
-		if k.Repo == ref.repo {
-			tip = k.Hash // commits are oldest first: the last one wins
-		}
+	tip := c.Repo.Commit // the analyzed newest commit of this (sub-)repo
+	if len(c.Repos) > 0 && ref.repo < len(c.Repos) {
+		tip = c.Repos[ref.repo].Commit
 	}
 	if tip == "" {
 		return nil, errBad("no commits for this repository")

@@ -3,7 +3,7 @@ package city
 
 import "github.com/justinclev/codecity/internal/deps"
 
-const Version = 7
+const Version = 8
 
 type City struct {
 	// Facts is what the repo provides and uses, for linking repositories; not sent to the viewer.
@@ -29,6 +29,7 @@ type Repo struct {
 	Source     string `json:"source"`
 	Remote     string `json:"remote,omitempty"`
 	Path       string `json:"path,omitempty"` // absolute work tree of a local repo (for editor links)
+	Base       string `json:"base,omitempty"` // git-relative project dir when this city is one project of a monorepo ("" = whole repo)
 	Ref        string `json:"ref"`
 	Commit     string `json:"commit"`
 	AnalyzedAt string `json:"analyzedAt"`
@@ -49,6 +50,7 @@ type RepoInfo struct {
 	Source   string `json:"source"`
 	Remote   string `json:"remote,omitempty"`
 	Path     string `json:"path,omitempty"`
+	Base     string `json:"base,omitempty"` // git-relative project dir for a monorepo project
 	Ref      string `json:"ref"`
 	Commit   string `json:"commit"`
 	District int    `json:"district"` // its root district
