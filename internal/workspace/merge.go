@@ -42,7 +42,7 @@ func Build(cities []*city.City) *city.City {
 		}
 	}
 	links = append(links, apiLinks(cities, names)...)
-	offsets, w, d := arrange(cities, links)
+	offsets, w, d := arrange(cities, names, links)
 	return merge(cities, names, links, offsets, w, d)
 }
 
@@ -66,89 +66,6 @@ func uniqueNames(cities []*city.City) []string {
 
 // arrange places cities in rows (connected cities next to each other) and
 // returns each city's offset plus the world size.
-func arrange(cities []*city.City, links []city.Link) (offsets [][2]float64, worldW, worldD float64) {
-	n := len(cities)
-	// order: start from the largest city, then breadth-first along dependency links
-	weight := make([]float64, n)
-	adj := make([][]int, n)
-	for _, l := range links {
-		if l.Kind != "people" {
-			adj[l.From] = append(adj[l.From], l.To)
-			adj[l.To] = append(adj[l.To], l.From)
-		}
-	}
-	for i, c := range cities {
-		weight[i] = c.Bounds.W * c.Bounds.D
-	}
-	byWeight := make([]int, n)
-	for i := range byWeight {
-		byWeight[i] = i
-	}
-	sort.SliceStable(byWeight, func(x, y int) bool { return weight[byWeight[x]] > weight[byWeight[y]] })
-	var order []int
-	placed := make([]bool, n)
-	for _, start := range byWeight {
-		if placed[start] {
-			continue
-		}
-		queue := []int{start}
-		placed[start] = true
-		for len(queue) > 0 {
-			c := queue[0]
-			queue = queue[1:]
-			order = append(order, c)
-			nb := append([]int(nil), adj[c]...)
-			sort.SliceStable(nb, func(x, y int) bool { return weight[nb[x]] > weight[nb[y]] })
-			for _, x := range nb {
-				if !placed[x] {
-					placed[x] = true
-					queue = append(queue, x)
-				}
-			}
-		}
-	}
-
-	maxSide, area := 0.0, 0.0
-	for _, c := range cities {
-		maxSide = math.Max(maxSide, math.Max(c.Bounds.W, c.Bounds.D))
-		area += c.Bounds.W * c.Bounds.D
-	}
-	gap := math.Max(12, maxSide*0.3)
-	rowW := math.Max(maxSide, math.Sqrt(area)*1.6)
-
-	offsets = make([][2]float64, n)
-	type row struct {
-		items []int
-		h     float64
-	}
-	var rows []row
-	cur, x := row{}, 0.0
-	for _, i := range order {
-		c := cities[i]
-		if len(cur.items) > 0 && x+c.Bounds.W > rowW {
-			rows = append(rows, cur)
-			cur, x = row{}, 0
-		}
-		cur.items = append(cur.items, i)
-		cur.h = math.Max(cur.h, c.Bounds.D)
-		x += c.Bounds.W + gap
-	}
-	rows = append(rows, cur)
-
-	z := gap
-	for _, r := range rows {
-		x := gap
-		for _, i := range r.items {
-			c := cities[i]
-			offsets[i] = [2]float64{x, z + (r.h-c.Bounds.D)/2}
-			x += c.Bounds.W + gap
-			worldW = math.Max(worldW, x)
-		}
-		z += r.h + gap
-	}
-	return offsets, worldW, z
-}
-
 func merge(cities []*city.City, names []string, links []city.Link, offsets [][2]float64, worldW, worldD float64) *city.City {
 	out := &city.City{Version: city.Version, Bounds: city.Bounds{W: r3(worldW), D: r3(worldD)}}
 	out.Stats = city.Stats{Languages: map[string]city.LangStat{}, Skipped: map[string]int{}}
