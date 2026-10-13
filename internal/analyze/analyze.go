@@ -262,7 +262,8 @@ func collectFacts(ctx context.Context, br *gitx.BlobReader, c *city.City, tipOid
 		f.Identities = append(f.Identities, deps.Identity{Kind: deps.Git, Name: f.Remote})
 	}
 
-	assignRoles(c, flowFiles)
+	assignRoles(c, flowFiles, f)
+	messageFacts(c, f, flowFiles)
 
 	// resolve imports inside this repository
 	res := deps.NewResolver(paths, f.Identities)

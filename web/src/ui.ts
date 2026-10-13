@@ -371,7 +371,8 @@ function piecesSection(st: PiecesState, h: InfoHandlers): HTMLElement {
 }
 
 export interface LinkInfo {
-  from: string; to: string; kind: 'dependency' | 'people';
+  from: string; to: string; kind: 'dependency' | 'people' | 'api' | 'message';
+  via: { from: number; to: number; label: string; fromPath: string; toPath: string }[]; brokers: string[];
   evidence: string[];
   files: { index: number; path: string; target: string }[];
   people: string[]; peopleCount: number;
@@ -383,8 +384,10 @@ export function showLink(d: LinkInfo | null, h: InfoHandlers) {
   const title = d.kind === 'people' ? `${d.from} ↔ ${d.to}` : `${d.from} → ${d.to}`;
   box.replaceChildren(infoHead(title, h));
   const head = el('div', 'linkhead');
-  head.append(el('span', 'kindtag' + (d.kind === 'people' ? ' people' : ''), d.kind === 'people' ? 'shared people' : 'dependency'));
-  head.append(el('span', '', d.kind === 'people' ? `${fmt(d.peopleCount)} contributors work on both` : `${d.from} depends on ${d.to}`));
+  const tag = { dependency: 'dependency', people: 'shared people', api: 'API highway', message: 'message highway' }[d.kind];
+  const what = { dependency: `${d.from} depends on ${d.to}`, people: `${fmt(d.peopleCount)} contributors work on both`, api: `${d.from} calls routes served by ${d.to}`,
+    message: `${d.from} publishes, ${d.to} consumes${d.brokers.length ? ' · ' + d.brokers.join(', ') : ''}` }[d.kind];
+  head.append(el('span', 'kindtag ' + d.kind, tag), el('span', '', what));
   box.append(head);
   if (d.evidence.length) {
     box.append(el('h4', '', 'Evidence'));
@@ -400,6 +403,18 @@ export function showLink(d: LinkInfo | null, h: InfoHandlers) {
       b.title = `${f.path}\n→ ${f.target}`;
       b.append(el('span', 'path', '\u200E' + f.path), el('span', 'num', '→ ' + f.target.split('/').slice(-1)[0]));
       b.onclick = () => h.onPick(f.index);
+      list.append(b);
+    }
+    box.append(list);
+  }
+  if (d.via.length) {
+    box.append(el('h4', '', d.kind === 'api' ? `Calls (${fmt(d.via.length)})` : `Topics (${fmt(d.via.length)}): publisher → subscriber`));
+    const list = el('div', 'list');
+    for (const v of d.via.slice(0, 200)) {
+      const b = el('button');
+      b.title = `${v.fromPath}\n→ ${v.toPath}`;
+      b.append(el('span', 'path', '\u200E' + v.fromPath), el('span', 'num', v.label));
+      b.onclick = () => h.onPick(v.from);
       list.append(b);
     }
     box.append(list);
@@ -706,7 +721,7 @@ export interface Controls {
 }
 
 export function linkToggles() {
-  return { deps: $<HTMLInputElement>('showdeps').checked, people: $<HTMLInputElement>('showpeople').checked };
+  return { deps: $<HTMLInputElement>('showdeps').checked, people: $<HTMLInputElement>('showpeople').checked, api: $<HTMLInputElement>('showapi').checked, message: $<HTMLInputElement>('showmsg').checked };
 }
 
 function autosize() {
@@ -731,6 +746,8 @@ export function bindControls(h: Controls) {
   $<HTMLSelectElement>('buildings').onchange = e => h.onBuildings((e.target as HTMLSelectElement).value === 'classic');
   $<HTMLSelectElement>('codelinks').onchange = e => h.onCodeLinks((e.target as HTMLSelectElement).value as 'off' | 'selection' | 'all');
   $('showpeople').onchange = () => h.onLinksToggle();
+  $('showapi').onchange = () => h.onLinksToggle();
+  $('showmsg').onchange = () => h.onLinksToggle();
   $('repoform').onsubmit = e => {
     e.preventDefault();
     h.onSubmit(src.value.trim(), '',

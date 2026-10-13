@@ -28,6 +28,9 @@ func Build(cities []*city.City) *city.City {
 			if l := link(cities[a], cities[b], a, b); l != nil {
 				links = append(links, *l)
 			}
+			if l := messageLinks(cities[a], cities[b], a, b, names); l != nil {
+				links = append(links, *l)
+			}
 			if a < b {
 				if l := peopleLink(cities[a], cities[b], a, b); l != nil {
 					links = append(links, *l)
@@ -35,6 +38,7 @@ func Build(cities []*city.City) *city.City {
 			}
 		}
 	}
+	links = append(links, apiLinks(cities, names)...)
 	offsets, w, d := arrange(cities, links)
 	return merge(cities, names, links, offsets, w, d)
 }
@@ -65,7 +69,7 @@ func arrange(cities []*city.City, links []city.Link) (offsets [][2]float64, worl
 	weight := make([]float64, n)
 	adj := make([][]int, n)
 	for _, l := range links {
-		if l.Kind == "dependency" {
+		if l.Kind != "people" {
 			adj[l.From] = append(adj[l.From], l.To)
 			adj[l.To] = append(adj[l.To], l.From)
 		}
@@ -275,6 +279,9 @@ func merge(cities []*city.City, names []string, links []city.Link, offsets [][2]
 	out.Stats.Dirs = len(out.Districts)
 
 	for _, l := range links {
+		for i, v := range l.Via {
+			l.Via[i] = city.Via{From: v.From + bBase[l.From], To: v.To + bBase[l.To], Label: v.Label}
+		}
 		for i, f := range l.Files {
 			l.Files[i] = [2]int{f[0] + bBase[l.From], f[1] + dBase[l.To]}
 		}

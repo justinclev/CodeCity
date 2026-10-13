@@ -86,6 +86,8 @@
       <div id="connrow" class="row connrow" hidden>
         <span>Links</span>
         <label class="chk" title="dependencies declared in manifests or imported in code"><input id="showdeps" type="checkbox" checked /> dependencies</label>
+        <label class="chk" title="highways where a service calls routes another repository serves"><input id="showapi" type="checkbox" checked /> API calls</label>
+        <label class="chk" title="highways where one repository publishes to a topic or queue another consumes (Kafka, NATS, RabbitMQ, Redis, MQTT, SQS/SNS)"><input id="showmsg" type="checkbox" checked /> messages</label>
         <label class="chk" title="contributors who committed to both repositories"><input id="showpeople" type="checkbox" /> shared people</label>
       </div>
       <div id="baserow" class="row baserow" hidden>

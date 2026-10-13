@@ -20,7 +20,7 @@ export interface City {
 export interface Commit { hash: string; date: string; author: string; subject: string; repo?: number }
 export interface RepoInfo { name: string; source: string; remote?: string; path?: string; ref: string; commit: string; district: number; churn: boolean }
 /** dependency: from depends on to (evidence, importing files → imported directory); people: shared contributors. */
-export interface Link { from: number; to: number; kind: 'dependency' | 'people'; evidence?: string[]; files?: [number, number][]; people?: string[]; peopleCount?: number }
+export interface Link { from: number; to: number; kind: 'dependency' | 'people' | 'api' | 'message'; evidence?: string[]; files?: [number, number][]; via?: { a: number; b: number; l: string }[]; brokers?: string[]; people?: string[]; peopleCount?: number }
 export interface Author { name: string; commits: number; files: number; last: number }
 
 export interface District {
@@ -68,4 +68,4 @@ export type Metric = 'loc' | 'lines' | 'bytes' | 'complexity';
 export type ScaleMode = 'sqrt' | 'linear' | 'log';
 export type ColorMode = 'language' | 'hotspot' | 'churn' | 'complexity' | 'age' | 'owner' | 'knowledge' | 'compare' | 'depth' | 'dependents';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;

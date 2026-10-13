@@ -204,7 +204,7 @@ func roleWanted(p, lang string) bool { return flow.Wanted(p, lang) }
 
 // assignRoles runs the flow analysis over the newest commit's files and marks
 // each building with the roles its code plays.
-func assignRoles(c *city.City, files []flow.File) {
+func assignRoles(c *city.City, files []flow.File, f *city.Facts) {
 	if len(files) == 0 {
 		return
 	}
@@ -249,6 +249,9 @@ func assignRoles(c *city.City, files []flow.File) {
 		case from.Kind == flow.KIO && e.Kind == flow.EFeeds:
 			ioRole(to, from.Sub, mark)
 		}
+	}
+	if f != nil {
+		linkFacts(f, byPath, g)
 	}
 	order := []string{city.RoleEntry, city.RoleServe, city.RoleDB, city.RoleExec, city.RoleFiles, city.RoleCall}
 	for i, rs := range roles {

@@ -100,6 +100,67 @@ type Graph struct {
 	Stats   Stats   `json:"stats"`
 	// Commits: the commit each repository was analyzed at (by path prefix; "" for a single repository)
 	Commits map[string]string `json:"commits,omitempty"`
+	// Requests: every HTTP request whose target is a string (not sent to the viewer).
+	Requests []Request `json:"-"`
+}
+
+// Request is an outgoing HTTP call with a known target.
+type Request struct {
+	Path   string // file the call is in
+	Method string
+	URL    string
+	Line   int
+}
+
+// Route is an HTTP route served by a handler in Path.
+type Route struct {
+	Path   string
+	Method string
+	Route  string
+}
+
+// Routes lists the HTTP routes the graph serves and the file of the handler.
+func (g *Graph) Routes() []Route {
+	byID := make(map[int]*Node, len(g.Nodes))
+	for _, n := range g.Nodes {
+		byID[n.ID] = n
+	}
+	var out []Route
+	seen := map[Route]bool{}
+	for _, e := range g.Edges {
+		from, to := byID[e.From], byID[e.To]
+		if e.Kind != EHandles || from == nil || to == nil || from.Kind != KEndpoint || to.Path == "" {
+			continue
+		}
+		route := from.Name
+		if from.Sub != "" && from.Sub != "ANY" {
+			route = strings.TrimSpace(strings.TrimPrefix(route, from.Sub))
+		}
+		r := Route{Path: to.Path, Method: from.Sub, Route: route}
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// Match reports how specifically a request (method, url) matches a served route (higher = more
+// specific; ok = false when it does not match), and the host part of the request URL.
+func Match(method, route, reqMethod, url string) (score int, host string, ok bool) {
+	re := routeRegexp(route)
+	if re == nil {
+		return 0, "", false
+	}
+	p, host := normURL(url)
+	if method != "" && method != "ANY" && reqMethod != "" && method != reqMethod {
+		return 0, host, false
+	}
+	if !re.MatchString(strings.ReplaceAll(p, "\x00", "x")) {
+		return 0, host, false
+	}
+	score = len(routeParam.ReplaceAllString(route, ""))*2 + map[bool]int{true: 1}[method != "" && method == reqMethod]
+	return score, host, true
 }
 
 // Repo is one repository's files (multi-repo worlds prefix paths with "name/").
@@ -375,6 +436,7 @@ func (b *builder) finish() *Graph {
 		}
 	}
 	for _, r := range b.requests {
+		b.g.Requests = append(b.g.Requests, Request{Path: firstNonEmpty(r.file, r.from.Path), Method: r.method, URL: r.url, Line: r.line})
 		p, host := normURL(r.url)
 		probe := strings.ReplaceAll(p, "\x00", "x") // template holes
 		matched := false

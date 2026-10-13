@@ -40,28 +40,47 @@ function repoCommitAt(k: number, c: number): string | null {
   return null;
 }
 
+function linkShown(kind: string, t: ReturnType<typeof ui.linkToggles>): boolean {
+  return kind === 'dependency' ? t.deps : kind === 'people' ? t.people : kind === 'api' ? t.api : t.message;
+}
+const LINK_CHECK: Record<string, string> = { dependency: 'showdeps', people: 'showpeople', api: 'showapi', message: 'showmsg' };
+
+function linkLabel(l: NonNullable<City['links']>[number]): string {
+  switch (l.kind) {
+    case 'dependency': return `${repoName(l.from)} → ${repoName(l.to)}`;
+    case 'api': return `API · ${l.via?.length ?? 0} ${(l.via?.length ?? 0) === 1 ? 'call' : 'calls'}`;
+    case 'message': return `${(l.brokers ?? ['messages']).join('/')} · ${new Set((l.via ?? []).map(v => v.l)).size} topics`;
+    default: return `${l.peopleCount ?? 0} shared`;
+  }
+}
+
+function linkTitle(l: NonNullable<City['links']>[number]): string {
+  return l.kind === 'people' ? `${repoName(l.from)} ↔ ${repoName(l.to)}` : `${repoName(l.from)} → ${repoName(l.to)}`;
+}
+
 function linkViews(): LinkView[] {
   if (!city?.links?.length) return [];
   const t = ui.linkToggles();
   const out: LinkView[] = [];
   city.links.forEach((l, index) => {
-    if (l.kind === 'dependency' && !t.deps) return;
-    if (l.kind === 'people' && !t.people) return;
+    if (!linkShown(l.kind, t)) return;
     const files = l.files?.length ?? 0;
     out.push({ index, from: l.from, to: l.to, kind: l.kind,
       strength: l.kind === 'dependency' ? Math.min(1, Math.log1p(files + 1) / Math.log(60)) : 0,
-      label: l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${l.peopleCount ?? 0} shared` });
+      label: linkLabel(l) });
   });
   return out;
 }
 
+const ORDER = ['dependency', 'api', 'message', 'people'];
+
 function linkRows(): ui.LinkRow[] {
   return (city?.links ?? []).map((l, index) => ({
     index, kind: l.kind,
-    title: l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${repoName(l.from)} ↔ ${repoName(l.to)}`,
-    summary: l.kind === 'dependency' ? (l.evidence ?? []).slice(0, 2).join('; ') : `${l.peopleCount ?? 0} shared contributors`,
+    title: linkTitle(l),
+    summary: l.kind === 'people' ? `${l.peopleCount ?? 0} shared contributors` : (l.evidence ?? []).slice(0, 2).join('; '),
     evidence: l.evidence ?? [],
-  })).sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'dependency' ? -1 : 1));
+  })).sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
 }
 
 function selectLink(index: number) {
@@ -76,14 +95,15 @@ function selectLink(index: number) {
   scene.highlightLink(index);
   // make sure the link is drawn even if its kind is toggled off
   const t = ui.linkToggles();
-  if ((l.kind === 'people' && !t.people) || (l.kind === 'dependency' && !t.deps)) {
-    (document.getElementById(l.kind === 'people' ? 'showpeople' : 'showdeps') as HTMLInputElement).checked = true;
+  if (!linkShown(l.kind, t)) {
+    (document.getElementById(LINK_CHECK[l.kind]) as HTMLInputElement).checked = true;
     scene.setLinks(linkViews());
   }
   ui.showLink({
     from: repoName(l.from), to: repoName(l.to), kind: l.kind, evidence: l.evidence ?? [],
     files: (l.files ?? []).map(([b, d]) => ({ index: b, path: city!.buildings[b].path, target: city!.districts[d].path })),
     people: l.people ?? [], peopleCount: l.peopleCount ?? 0,
+    via: (l.via ?? []).map(v => ({ from: v.a, to: v.b, label: v.l, fromPath: city!.buildings[v.a].path, toPath: city!.buildings[v.b].path })), brokers: l.brokers ?? [],
   }, infoHandlers);
 }
 
@@ -790,7 +810,7 @@ canvas.addEventListener('pointermove', e => {
     if (hit?.kind === 'link') {
       const l = city.links![hit.index];
       scene.setHover(-1);
-      ui.showTip([l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${repoName(l.from)} ↔ ${repoName(l.to)}`,
+      ui.showTip([linkTitle(l),
         (l.evidence ?? []).slice(0, 2).join(' · ') + ' · click for details'], p.x, p.y);
       canvas.style.cursor = 'pointer';
     } else if (hit?.kind === 'floor') {

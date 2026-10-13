@@ -241,6 +241,8 @@ body.hacker::after { content: ''; position: fixed; inset: 0; pointer-events: non
 .linkhead .arrow { color: var(--accent); }
 .kindtag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 6px; background: rgba(122, 162, 255, 0.16); color: var(--accent); }
 .kindtag.people { background: rgba(255, 181, 71, 0.16); color: var(--warn); }
+.kindtag.api { background: rgba(255, 159, 28, 0.18); color: #ff9f1c; }
+.kindtag.message { background: rgba(43, 255, 176, 0.16); color: #2bffb0; }
 
 .archrow { color: var(--dim); font-size: 12px; line-height: 1.45; padding: 1px 0; }
 #archlegend { margin-top: 10px; font-size: 12px; }

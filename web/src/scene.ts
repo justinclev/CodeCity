@@ -33,7 +33,8 @@ export const INACTIVE_DAYS = 180;
 export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | { kind: 'link'; index: number } | null;
 
 /** A connection between two cities to draw (index into city.links). */
-export interface LinkView { index: number; from: number; to: number; kind: 'dependency' | 'people'; strength: number; label: string }
+export type LinkKind = 'dependency' | 'people' | 'api' | 'message';
+export interface LinkView { index: number; from: number; to: number; kind: LinkKind; strength: number; label: string }
 
 interface LinkMesh { view: LinkView; mesh: THREE.Mesh; pick: THREE.Mesh; mat: THREE.ShaderMaterial; label?: THREE.Sprite }
 
@@ -52,6 +53,34 @@ function flowMaterial(a: THREE.Color, b: THREE.Color, count: number, speed: numb
       }`,
     transparent: true, depthWrite: false, toneMapped: false,
     blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+  });
+}
+
+/**
+ * A highway between two cities: dark asphalt with lit edges, a dashed centre line and "cars"
+ * (light pulses) in each lane. u.x runs from the first city to the second. Requests (api) travel
+ * both ways (the way back is dimmer: responses); messages only go from publisher to subscriber.
+ */
+function highwayMaterial(color: THREE.Color, len: number, twoWay: boolean, day: boolean): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uHi: { value: 0 }, uColor: { value: color }, uLen: { value: len }, uTwo: { value: twoWay ? 1 : 0 }, uDay: { value: day ? 1 : 0 } },
+    vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform float uTime; uniform float uHi; uniform vec3 uColor; uniform float uLen; uniform float uTwo; uniform float uDay; varying vec2 vUv;
+      void main() {
+        float y = vUv.y, x = vUv.x * uLen;
+        float edge = smoothstep(0.09, 0.0, y) + smoothstep(0.91, 1.0, y);
+        float centre = (1.0 - smoothstep(0.0, 0.025, abs(y - 0.5))) * step(0.5, fract(x / (uLen * 0.012 + 1.0) * 0.5));
+        float lane = y < 0.5 ? 1.0 : -1.0;
+        float dir = uTwo > 0.5 ? lane : 1.0;
+        float laneMask = 1.0 - smoothstep(0.1, 0.16, abs(y - (y < 0.5 ? 0.27 : 0.73)));
+        float f = fract((x - dir * uTime * uLen * 0.05) / (uLen * 0.07 + 1.0));
+        float car = smoothstep(0.0, 0.05, f) * (1.0 - smoothstep(0.05, 0.16, f)) * laneMask;
+        float dim = (uTwo > 0.5 && lane < 0.0) ? 0.55 : 1.0;
+        vec3 road = mix(vec3(0.015, 0.02, 0.04), vec3(0.2, 0.21, 0.24), uDay);
+        vec3 c = road + uColor * (edge * (0.8 + 0.8 * uHi) + centre * 0.35 + car * 2.2 * dim);
+        gl_FragColor = vec4(c, 0.96);
+      }`,
+    transparent: true, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
   });
 }
 
@@ -109,6 +138,7 @@ export class CityScene {
   private linkMeshes: LinkMesh[] = [];
   private linkHi = -1;
   readonly codeLinks = new TraceLayer(true);
+  private highwayGroup = new THREE.Group();
   private hackerFx = new HackerFx();
   codeLinkMode: 'off' | 'selection' | 'all' = 'selection';
   private importers: number[][] = []; // building → buildings that import it
@@ -183,7 +213,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.hackerFx.group, this.roofs.group, this.ways.group);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.highwayGroup, this.hackerFx.group, this.roofs.group, this.ways.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -230,7 +260,7 @@ export class CityScene {
     if (this.exploded) this.animateExplode(dt);
     if (this.onFrame) this.onFrame(dt);
     this.codeLinks.update(this.flowTime);
-    if (this.linkMeshes.length || this.arcs.children.length || this.codeLinks.group.children.length) {
+    if (this.linkMeshes.length || this.highwayGroup.children.length || this.arcs.children.length || this.codeLinks.group.children.length) {
       this.flowTime += dt;
       for (const l of this.linkMeshes) l.mat.uniforms.uTime.value = this.flowTime;
       for (const o of this.arcs.children) {
@@ -1312,8 +1342,10 @@ export class CityScene {
     return new THREE.Vector3(x.x + x.w / 2, this.districtTop(Math.max(0, x.depth)) + lift, x.z + x.d / 2);
   }
 
-  private linkColors(kind: 'dependency' | 'people'): [THREE.Color, THREE.Color] {
+  private linkColors(kind: LinkKind): [THREE.Color, THREE.Color] {
     const t = this.theme.name;
+    if (kind === 'api') return t === 'day' ? [new THREE.Color('#d9480f'), new THREE.Color('#f59f00')] : [new THREE.Color('#ff9f1c'), new THREE.Color('#ffd166')];
+    if (kind === 'message') return t === 'day' ? [new THREE.Color('#087f5b'), new THREE.Color('#0ca678')] : [new THREE.Color('#2bffb0'), new THREE.Color('#7dffe0')];
     if (kind === 'people') return t === 'day' ? [new THREE.Color('#e8590c'), new THREE.Color('#f08c00')] : [new THREE.Color('#ffb547'), new THREE.Color('#ff7ad9')];
     if (t === 'hacker') return [new THREE.Color('#d23cff'), new THREE.Color('#36e0ff')];
     if (t === 'day') return [new THREE.Color('#1c7ed6'), new THREE.Color('#7048e8')];
@@ -1328,11 +1360,14 @@ export class CityScene {
       if (l.label) { this.linkGroup.remove(l.label); l.label.material.map?.dispose(); l.label.material.dispose(); }
     }
     this.linkMeshes = [];
+    for (const o of [...this.highwayGroup.children]) { this.highwayGroup.remove(o); (o as THREE.Mesh).geometry?.dispose(); }
     if (!this.city?.repos) return;
     const s = this.size();
     const additive = this.theme.name !== 'day';
     const pickMat = new THREE.MeshBasicMaterial({ visible: false });
+    this.buildHighways(views.filter(v => v.kind === 'api' || v.kind === 'message'));
     for (const v of views) {
+      if (v.kind === 'api' || v.kind === 'message') continue;
       const from = this.districtCenter(this.city.repos[v.from].district, 0.05);
       const to = this.districtCenter(this.city.repos[v.to].district, 0.05);
       const dist = from.distanceTo(to);
@@ -1359,7 +1394,78 @@ export class CityScene {
     this.highlightLink(this.linkHi);
   }
 
+  /** Where the straight line from rect r's centre towards (px, pz) leaves the rect. */
+  private rim(r: { x: number; z: number; w: number; d: number }, px: number, pz: number): [number, number] {
+    const cx = r.x + r.w / 2, cz = r.z + r.d / 2, dx = px - cx, dz = pz - cz;
+    const t = Math.min(dx !== 0 ? r.w / 2 / Math.abs(dx) : Infinity, dz !== 0 ? r.d / 2 / Math.abs(dz) : Infinity);
+    return [cx + dx * Math.min(1, t), cz + dz * Math.min(1, t)];
+  }
+
+  /** Highways between cities: asphalt strips from the rim of one city to the rim of the other. */
+  private buildHighways(views: LinkView[]) {
+    const rs = this.city.repos!;
+    const width = Math.max(this.cell * 1.5, this.size() * 0.006);
+    const dark = this.theme.name === 'day';
+    const lanes = new Map<string, number>(); // lateral slot per city pair, so highways side by side do not overlap
+    const total = new Map<string, number>();
+    for (const v of views) { const k = Math.min(v.from, v.to) + ':' + Math.max(v.from, v.to); total.set(k, (total.get(k) ?? 0) + 1); }
+    for (const v of views) {
+      const A = this.city.districts[rs[v.from].district], B = this.city.districts[rs[v.to].district];
+      const ac: [number, number] = [A.x + A.w / 2, A.z + A.d / 2], bc: [number, number] = [B.x + B.w / 2, B.z + B.d / 2];
+      let p0 = this.rim(A, bc[0], bc[1]), p1 = this.rim(B, ac[0], ac[1]);
+      const k = Math.min(v.from, v.to) + ':' + Math.max(v.from, v.to);
+      const slot = lanes.get(k) ?? 0; lanes.set(k, slot + 1);
+      let dx = p1[0] - p0[0], dz = p1[1] - p0[1];
+      let len = Math.hypot(dx, dz);
+      if (len < 1e-3) continue;
+      const nx = -dz / len, nz = dx / len, off = (slot - ((total.get(k) ?? 1) - 1) / 2) * width * 1.35;
+      p0 = [p0[0] + nx * off, p0[1] + nz * off]; p1 = [p1[0] + nx * off, p1[1] + nz * off];
+      dx = p1[0] - p0[0]; dz = p1[1] - p0[1]; len = Math.hypot(dx, dz);
+      const [c1] = this.linkColors(v.kind);
+      const mat = highwayMaterial(c1.clone(), len, v.kind === 'api', dark);
+      const geo = new THREE.PlaneGeometry(len, width).rotateX(-Math.PI / 2);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set((p0[0] + p1[0]) / 2, 0.06, (p0[1] + p1[1]) / 2);
+      mesh.rotation.y = -Math.atan2(dz, dx);
+      mesh.renderOrder = 4;
+      const pick = new THREE.Mesh(new THREE.BoxGeometry(len, Math.max(width, this.size() * 0.01), Math.max(width * 2, this.size() * 0.01)), new THREE.MeshBasicMaterial({ visible: false }));
+      pick.position.copy(mesh.position); pick.rotation.y = mesh.rotation.y;
+      this.highwayGroup.add(mesh);
+      this.linkGroup.add(pick);
+      const lm: LinkMesh = { view: v, mesh, pick, mat };
+      if (v.label) {
+        const h = Math.max(0.8, this.size() * 0.016);
+        lm.label = this.textSprite(v.label, h);
+        lm.label.position.set(mesh.position.x, h * 0.9, mesh.position.z);
+        this.linkGroup.add(lm.label);
+      }
+      this.linkMeshes.push(lm);
+    }
+  }
+
+  /** Arcs between the buildings behind one highway (calls and the routes they reach, publishers and subscribers). */
+  private viaArcs(vias: { a: number; b: number }[], kind: LinkKind, from?: number) {
+    const s = this.size();
+    const top = (k: number) => {
+      const x = this.city.buildings[k];
+      return new THREE.Vector3(x.x + x.w / 2, this.baseY[k] + Math.max(this.target[k], MIN_H), x.z + x.d / 2);
+    };
+    const [ca, cb] = this.linkColors(kind);
+    for (const v of vias.slice(0, 120)) {
+      if (!this.exists(v.a) || !this.exists(v.b) || (from !== undefined && v.a !== from && v.b !== from)) continue;
+      const a = top(v.a), b = top(v.b), dist = a.distanceTo(b);
+      const mid = a.clone().add(b).multiplyScalar(0.5);
+      mid.y = Math.max(a.y, b.y) + dist * 0.3 + s * 0.01;
+      const mat = flowMaterial(ca.clone().lerp(new THREE.Color('#ffffff'), 0.25), cb, Math.max(4, Math.round(dist / (s * 0.04))), 0.6, this.theme.name !== 'day');
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(a, mid, b), 64, s * 0.0022, 6), mat);
+      tube.renderOrder = 7;
+      this.arcs.add(tube);
+    }
+  }
+
   highlightLink(index: number) {
+    const l = index >= 0 ? this.city?.links?.[index] : undefined;
+    if (l && (l.kind === 'api' || l.kind === 'message') && l.via) { this.clearArcs(); this.viaArcs(l.via.map(v => ({ a: v.a, b: v.b })), l.kind); }
     this.linkHi = index;
     for (const l of this.linkMeshes) {
       const on = l.view.index === index;
@@ -1411,6 +1517,7 @@ export class CityScene {
         this.arcs.add(tube);
       }
     }
+    for (const l of links) if ((l.kind === 'api' || l.kind === 'message') && l.via) this.viaArcs(l.via, l.kind, i);
   }
 
   // ------------------------------------------------------------------ hacker mode

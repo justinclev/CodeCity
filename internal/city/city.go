@@ -3,7 +3,7 @@ package city
 
 import "github.com/justinclev/codecity/internal/deps"
 
-const Version = 6
+const Version = 7
 
 type City struct {
 	// Facts is what the repo provides and uses, for linking repositories; not sent to the viewer.
@@ -64,9 +64,22 @@ type Link struct {
 	Evidence []string `json:"evidence,omitempty"` // human-readable reasons
 	// Files: [importing building, imported district] pairs (dependency links).
 	Files [][2]int `json:"files,omitempty"`
+	// Via: building pairs behind an "api" or "message" link — [from, to] are buildings of
+	// the From and To repository (merged indices); Label is "POST /orders" or the topic.
+	Via []Via `json:"via,omitempty"`
+	// Broker: for "message" links the brokers involved (kafka, nats, ...).
+	Brokers []string `json:"brokers,omitempty"`
 	// People: shared contributors (people links), most active first.
 	People      []string `json:"people,omitempty"`
 	PeopleCount int      `json:"peopleCount,omitempty"`
+}
+
+// Via is one concrete connection of a link: an HTTP call to a served route, or a
+// message published to a topic and consumed by the other repository.
+type Via struct {
+	From  int    `json:"a"`
+	To    int    `json:"b"`
+	Label string `json:"l"`
 }
 
 // Point is one change in a file's size history: [commit index, loc, lines, bytes, complexity].
@@ -191,4 +204,29 @@ type Facts struct {
 	Deps       []deps.Dep
 	Imports    map[int][]string // building index → import specs (see deps.Imports)
 	Authors    map[string]int   // every contributor (case-merged) → non-merge commits
+	Serves     []Served         // HTTP routes this repository serves
+	Calls      []Call           // HTTP requests it makes to a known target
+	Messages   []Msg            // topics it publishes to / consumes from
+}
+
+// Served is an HTTP route and the building that handles it.
+type Served struct {
+	Building int
+	Method   string
+	Route    string
+}
+
+// Call is an outgoing HTTP request with a known target.
+type Call struct {
+	Building int
+	Method   string
+	URL      string
+}
+
+// Msg is a publish or subscribe site.
+type Msg struct {
+	Building int
+	Dir      string // "pub" | "sub"
+	Broker   string
+	Topic    string
 }

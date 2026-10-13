@@ -131,3 +131,79 @@ func TestBuildLinksAndMerge(t *testing.T) {
 		t.Error("single repo should pass through")
 	}
 }
+
+func TestHighways(t *testing.T) {
+	orders := mkrepo(t, "Ann", map[string]string{
+		"go.mod": "module example.com/acme/orders\n\ngo 1.22\n",
+		"main.go": `package main
+
+import "net/http"
+
+func main() {
+	http.HandleFunc("/api/orders", list)
+	http.HandleFunc("/health", list)
+	http.ListenAndServe(":80", nil)
+}
+
+func list(w http.ResponseWriter, r *http.Request) {}
+`,
+		"pub.go": `package main
+
+import "github.com/segmentio/kafka-go"
+
+const TopicCreated = "orders.created"
+
+func publish() { w := &kafka.Writer{Topic: TopicCreated}; _ = w }
+`,
+	})
+	web := mkrepo(t, "Ann", map[string]string{
+		"go.mod": "module example.com/acme/web\n\ngo 1.22\n",
+		"call.go": `package main
+
+import "net/http"
+
+func fetch() { http.Get("http://localhost:8080/api/orders"); http.Get("http://other/health") }
+`,
+		"sub.go": `package main
+
+import "github.com/segmentio/kafka-go"
+
+func consume() { _ = kafka.NewReader(kafka.ReaderConfig{Topic: "orders.created"}) }
+`,
+	})
+	cs := analyzeAll(t, orders, web)
+	w := Build(cs)
+	kinds := map[string]city.Link{}
+	for _, l := range w.Links {
+		kinds[l.Kind] = l
+	}
+	api, ok := kinds["api"]
+	if !ok || len(api.Via) != 1 || api.Via[0].Label != "GET /api/orders" && api.Via[0].Label != "/api/orders" {
+		t.Fatalf("api link: %+v (links %+v)", api, w.Links)
+	}
+	msg, ok := kinds["message"]
+	if !ok || len(msg.Via) != 1 || msg.Via[0].Label != "orders.created" || msg.Brokers[0] != "kafka" {
+		t.Fatalf("message link: %+v", msg)
+	}
+	// message flows publisher → subscriber; indices point at the right files in the merged city
+	if got := w.Buildings[msg.Via[0].From].Path; !strings.HasSuffix(got, "pub.go") {
+		t.Fatalf("publisher building = %s", got)
+	}
+	if got := w.Buildings[msg.Via[0].To].Path; !strings.HasSuffix(got, "sub.go") {
+		t.Fatalf("subscriber building = %s", got)
+	}
+	if got := w.Buildings[api.Via[0].To].Path; !strings.HasSuffix(got, "main.go") {
+		t.Fatalf("serving building = %s", got)
+	}
+}
+
+func TestHostNames(t *testing.T) {
+	for _, c := range []struct {
+		host, repo string
+		want       bool
+	}{{"orders-service:8080", "orders", true}, {"orders.internal.corp", "orders-service", true}, {"api.stripe.com", "orders", false}, {"db", "dashboard", false}} {
+		if got := hostNames(c.host, c.repo); got != c.want {
+			t.Errorf("hostNames(%q,%q)=%v", c.host, c.repo, got)
+		}
+	}
+}
