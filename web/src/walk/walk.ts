@@ -37,9 +37,13 @@ export interface WalkHost {
   topDistricts(): { path: string; name: string; x: number; z: number; w: number; d: number }[];
   mapLabels(): MapLabel[];
   searchFiles(q: string): number[];
+  /** Entrances and exits on the city edge (the door list shared with the city view). */
+  doors(): { k: number; dir: 'in' | 'out'; label: string; leads: number }[];
+  /** The code route behind a door: gate, then spot by spot through the functionality. */
+  doorRoute(k: number, doorAt?: number): { title: string; steps: { kind: 'enter' | 'code' | 'out'; label: string; detail: string; building: number; line?: number }[] } | null;
 }
 
-const HELP = 'WASD move · Space jump (double-tap: fly) · Shift run / descend · double-tap W sprint · M map · P music · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
+const HELP = 'WASD move · Space jump (double-tap: fly) · Shift run / descend · double-tap W sprint · M map · P music · R routes · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
 
 const keyDown = new Set<string>();
 
@@ -105,6 +109,9 @@ export class WalkMode {
   private search = new SearchBox(q => this.find(q), () => this.search.hide());
   private tour: TourStop[] = [];
   private tourK = -1;
+  private routeSteps: { kind: 'enter' | 'code' | 'out'; label: string; detail: string; building: number; line?: number }[] = [];
+  private routeTitle = '';
+  private routeK = -1;
   private props: Props | null = null;
   private music = new Music();
   private symList: Sym[] = [];
@@ -270,6 +277,7 @@ export class WalkMode {
       else if (this.log.open) this.log.hide();
       else if (this.map?.full) this.toggleMap();
       else if (this.card.open) this.closeCard();
+      else if (this.routeK >= 0) this.endRoute();
       else if (this.tourK >= 0) this.endTour();
       return;
     }
@@ -282,8 +290,9 @@ export class WalkMode {
     if (e.code === 'KeyI') { this.toggleCard(); return; }
     if (e.code === 'KeyJ') { if (this.log.open) this.log.hide(); else { this.log.show(this.game!, () => this.resetGame()); this.freeMouse(); } return; }
     if (e.code === 'KeyT') { if (this.tourK >= 0) this.endTour(); else this.startTour(); return; }
-    if (e.code === 'KeyN') { if (this.tourK >= 0) this.goStop(this.tourK + 1); return; }
-    if (e.code === 'KeyB') { if (this.tourK > 0) this.goStop(this.tourK - 1); return; }
+    if (e.code === 'KeyR') { if (this.routeK >= 0) this.endRoute(); else this.pickRoute(); return; }
+    if (e.code === 'KeyN') { if (this.routeK >= 0) this.goRoute(this.routeK + 1); else if (this.tourK >= 0) this.goStop(this.tourK + 1); return; }
+    if (e.code === 'KeyB') { if (this.routeK > 0) this.goRoute(this.routeK - 1); else if (this.tourK > 0) this.goStop(this.tourK - 1); return; }
     if (e.code === 'KeyH') { this.toast(HELP, 10); return; }
     if (e.code === 'Slash') { e.preventDefault(); this.search.show(); this.freeMouse(); return; }
     if (e.code === 'Space' && !e.repeat) {
@@ -418,6 +427,7 @@ export class WalkMode {
     const q = this.game?.activeQuest();
     for (const i of q?.pins?.() ?? []) { if (this.game!.isStudied(i) && q!.id !== 'entry' && q!.id !== 'wiring') continue; const c = center(i); if (c) out.push({ ...c, kind: 'quest' }); }
     if (this.tourK >= 0) this.tour.forEach((st, k) => { const c = center(st.building); if (c) out.push({ ...c, kind: 'tour', label: String(k + 1) }); });
+    if (this.routeK >= 0) this.routeSteps.forEach((st, k) => { const c = center(st.building); if (c) out.push({ ...c, kind: 'tour', label: String(k + 1) }); });
     return out;
   }
 
@@ -921,6 +931,37 @@ export class WalkMode {
   private startTour() {
     if (!this.tour.length) { this.toast('No tour for this city (it needs entry points, imports or docs)'); return; }
     this.goStop(0);
+  }
+
+  /** R: choose an entrance or exit, then follow its route spot by spot (N / B), landing at the line in each file. */
+  private pickRoute() {
+    const doors = this.host.doors().filter(d => d.dir === 'in').slice(0, 9);
+    if (!doors.length) { this.toast('No doors in this city (they need the server and a Go/JS/TS/Python/Rust flow)'); return; }
+    this.openMenu('ROUTES — pick an entrance', doors.map(d => ({ label: d.label, sub: d.leads > 1 ? `${d.leads} leads` : undefined, go: () => this.startRoute(d.k) })));
+  }
+
+  private startRoute(k: number) {
+    const r = this.host.doorRoute(k);
+    if (!r) { this.toast('No route found behind that door'); return; }
+    if (this.tourK >= 0) this.endTour();
+    this.routeSteps = r.steps; this.routeTitle = r.title;
+    this.goRoute(0);
+  }
+
+  private endRoute() {
+    this.routeK = -1; this.routeSteps = [];
+    this.tourCard.hide();
+  }
+
+  private goRoute(k: number) {
+    if (k >= this.routeSteps.length) { this.toast('End of the route.', 4); this.endRoute(); return; }
+    if (k < 0 || this.busy) return;
+    this.routeK = k; this.mapDirty = true;
+    const s = this.routeSteps[k];
+    const kind = s.kind === 'enter' ? 'ENTRANCE' : s.kind === 'out' ? 'EXIT' : 'CODE';
+    this.tourCard.show(k, this.routeSteps.length, `${this.routeTitle} · ${kind}`, this.host.buildingName(s.building), [s.label, s.detail], 'N next · B back · E go inside · R end route');
+    if (s.line !== undefined) this.teleport({ building: s.building, line: s.line, label: `${s.label}:${s.line}` });
+    else this.travel(s.building, () => void this.openCard(s.building, [s.label, s.detail]));
   }
 
   private endTour() {

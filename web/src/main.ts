@@ -1161,6 +1161,14 @@ const walk = new WalkMode(scene, {
     return lab.map(d => ({ text: (d.name || d.path) + '/', x: d.x + d.w / 2, z: d.z + d.d / 2 }));
   },
   searchFiles: q => scene.search(q),
+  doors: () => edgeGates.map((e, k) => ({ k, dir: e.dir, label: e.label, leads: e.gates.length })),
+  doorRoute: (k, doorAt = 0) => {
+    const c = city, e = edgeGates[k];
+    if (!c || !e || !gateGraph) return null;
+    const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
+    const steps = traceRoute(gateGraph, e.gates[doorAt] ?? e.gates[0], p => pathIndex.get(p) ?? -1);
+    return steps.length < 2 ? null : { title: e.label, steps };
+  },
 });
 
 let walkTour: TourStop[] = [];
