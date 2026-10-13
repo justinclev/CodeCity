@@ -45,7 +45,7 @@ export interface WalkHost {
   doorRoute(k: number, doorAt?: number): { title: string; steps: { kind: 'enter' | 'code' | 'out'; label: string; detail: string; building: number; line?: number }[] } | null;
 }
 
-const HELP = 'WASD move · Space jump (double-tap: fly) · Shift run / descend · double-tap W sprint · M map · P music · R routes · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
+const HELP = 'WASD move · Space jump · F or double-tap Space: fly (W goes where you look) · Shift run / descend · double-tap W sprint · M map · P music · R routes · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
 
 const keyDown = new Set<string>();
 
@@ -92,6 +92,8 @@ export class WalkMode {
   private lastSpace = -1;
   private lastW = -1;
   private sprint = false;
+  private flyBoost = 1;
+  private flySpeed = 0;
   private velH = new THREE.Vector3();
   // taking a building apart
   private explodeFloors: Floor[] = [];
@@ -287,6 +289,7 @@ export class WalkMode {
     if (e.code === 'KeyV') { this.firstPerson = !this.firstPerson; return; }
     if (e.code === 'KeyE') { this.use(); return; }
     if (e.code === 'KeyM') { this.toggleMap(); return; }
+    if (e.code === 'KeyF' && !e.repeat) { this.toggleFly(); return; }
     if (e.code === 'KeyP') { this.music.toggle(); return; }
     if (e.code === 'KeyX') { void this.toggleExplode(); return; }
     if (e.code === 'KeyI') { this.toggleCard(); return; }
@@ -1212,8 +1215,11 @@ export class WalkMode {
     let v: THREE.Vector3;
     if (this.flying) {
       // creative-mode flight: faster than walking, with a little glide (inertia)
-      const speed = this.h * (this.sprint ? 14 : 6.5);
-      this.velH.lerp(dir.clone().multiplyScalar(speed), Math.min(1, dt * 5));
+      // cruise speed climbs the longer you hold a direction (x1 -> x3 over ~1.5 s); double-tap W is a further x2.5
+      this.flyBoost = dir.lengthSq() > 0 ? Math.min(3, this.flyBoost + dt * 1.4) : 1;
+      const speed = this.h * 16 * this.flyBoost * (this.sprint ? 2.5 : 1);
+      this.flySpeed = speed;
+      this.velH.lerp(dir.clone().multiplyScalar(speed), Math.min(1, dt * 7));
       v = this.velH.clone().multiplyScalar(dt);
     } else {
       const run = shift || this.sprint;
@@ -1244,7 +1250,10 @@ export class WalkMode {
     let ny: number;
     if (this.flying) {
       const up = (key('Space') ? 1 : 0) - (shift && !typing ? 1 : 0);
-      this.velY += (up * this.h * 5.5 - this.velY) * Math.min(1, dt * 8);
+      // W/S also follow where you look (a dead zone keeps level flight level): look up and fly up
+      const tilt = Math.abs(this.pitch) > 0.25 ? Math.sign(this.pitch) * (Math.abs(this.pitch) - 0.25) / 0.9 : 0;
+      const climb = f !== 0 ? tilt * f * this.flySpeed : 0;
+      this.velY += (up * this.h * 14 + climb - this.velY) * Math.min(1, dt * 9);
       ny = this.pos.y + this.velY * dt;
       const ceiling = this.scene.skyline() * 2 + this.scene.worldSize * 0.6;
       if (ny > ceiling) { ny = ceiling; this.velY = 0; }
@@ -1282,10 +1291,11 @@ export class WalkMode {
     if (this.busy) return;
     if (this.where === 'inside') { this.toast('No flying indoors — take the stairs or the elevator'); return; }
     this.flying = !this.flying;
-    this.velY = this.flying ? this.h * 2.5 : 0; // a little hop into the air
+    this.velY = this.flying ? this.h * 6 : 0; // a hop into the air
+    this.flyBoost = 1;
     this.grounded = false;
     this.velH.set(0, 0, 0);
-    if (this.flying) this.toast('FLYING · Space up · Shift down · double-tap W fast · double-tap Space to drop', 4);
+    if (this.flying) this.toast('FLYING · W/S go where you look · Space up · Shift down · hold to speed up · double-tap W boost · F to drop', 4);
   }
 
   /** Building tiers (setbacks are terraces) plus the floors of a taken-apart building (which replace its tiers). */
