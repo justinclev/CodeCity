@@ -15,13 +15,26 @@ export class GateMarks {
   private spots: GateSpot[] = [];
   private selected = -1;
   private labels: THREE.Sprite[] = [];
+  private hit: THREE.InstancedMesh | null = null;   // invisible block filling each arch, so the whole opening is clickable
+  private portal: THREE.Mesh;                       // glowing sheet that fills the selected arch
+  private portalMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, toneMapped: false });
+  private pulseAt = -1e9;
   width = 1;
 
-  constructor() { this.group.visible = false; }
+  constructor() {
+    this.group.visible = false;
+    this.portal = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.portalMat);
+    this.portal.visible = false;
+    this.portal.renderOrder = 5;
+    this.group.add(this.portal);
+  }
 
   clear() {
     if (this.mesh) { this.group.remove(this.mesh); this.mesh.geometry.dispose(); (this.mesh.material as THREE.Material).dispose(); }
     this.mesh = null;
+    if (this.hit) { this.group.remove(this.hit); this.hit.geometry.dispose(); (this.hit.material as THREE.Material).dispose(); }
+    this.hit = null;
+    this.portal.visible = false;
     for (const s of this.labels) { this.group.remove(s); (s.material as THREE.SpriteMaterial).map?.dispose(); s.material.dispose(); }
     this.labels = [];
     this.spots = [];
@@ -49,6 +62,12 @@ export class GateMarks {
     if (m.instanceColor) m.instanceColor.needsUpdate = true;
     this.mesh = m;
     this.group.add(m);
+    const hm = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ visible: false }), spots.length);
+    hm.frustumCulled = false;
+    spots.forEach((g, k) => { p.set(g.x, h / 2, g.z); s.set(width * 1.1, h * 1.1, Math.max(t * 4, width * 0.3)); hm.setMatrixAt(k, mat.compose(p, q, s)); });
+    hm.instanceMatrix.needsUpdate = true;
+    this.hit = hm;
+    this.group.add(hm);
     // a name above each gate (alternating heights so neighbours do not hide each other)
     spots.forEach((g, k) => {
       const sp = textSprite(g.label, g.dir === 'in' ? '#7ff3e8' : '#ff9a8c');
@@ -61,10 +80,33 @@ export class GateMarks {
   }
 
   get count() { return this.spots.length; }
-  get meshes(): THREE.Object3D[] { return this.group.visible && this.mesh ? [this.mesh] : []; }
+  get meshes(): THREE.Object3D[] { return this.group.visible && this.mesh && this.hit ? [this.mesh, this.hit] : []; }
 
   /** Gate index behind a ray hit. */
-  gateOf(mesh: THREE.Object3D, instance: number): number { return mesh === this.mesh ? Math.floor(instance / 3) : -1; }
+  gateOf(mesh: THREE.Object3D, instance: number): number { return mesh === this.mesh ? Math.floor(instance / 3) : mesh === this.hit ? instance : -1; }
+
+  /** Start the glow: the arch flares and its opening fills with light, then settles to a steady shimmer while selected. */
+  pulse() { this.pulseAt = performance.now(); }
+
+  /** Per frame: animate the selected gate. */
+  update() {
+    const m = this.mesh, k = this.selected;
+    if (!m?.instanceColor || k < 0 || k >= this.spots.length || !this.group.visible) { this.portal.visible = false; return; }
+    const now = performance.now(), age = (now - this.pulseAt) / 1000;
+    const base = this.spots[k].dir === 'in' ? TEAL : CORAL;
+    // flare: 0 → 1 → settle at 0.35 with a slow shimmer
+    const flare = age < 0.7 ? Math.sin((age / 0.7) * Math.PI * 0.5) : 0.35 + 0.12 * Math.sin(now / 260) + 0.65 * Math.exp(-(age - 0.7) * 2.5);
+    const gain = 1 + flare * 2.2;
+    const c = base.clone().lerp(new THREE.Color(1, 1, 1), 0.35 * flare).multiplyScalar(gain);
+    for (let j = 0; j < 3; j++) m.setColorAt(k * 3 + j, c);
+    m.instanceColor.needsUpdate = true;
+    const g = this.spots[k], w = this.width, h = w * 1.15;
+    this.portal.visible = true;
+    this.portal.position.set(g.x, h * 0.5, g.z);
+    this.portal.scale.set(w * 0.84, h * 0.95, 1);
+    this.portalMat.color.copy(base);
+    this.portalMat.opacity = Math.min(0.3, flare * 0.3);
+  }
 
   /** Make one gate brighter (selected / hovered); -1 for none. */
   highlight(k: number) {
@@ -77,8 +119,10 @@ export class GateMarks {
       for (let j = 0; j < 3; j++) m.setColorAt(i * 3 + j, c);
     };
     paint(this.selected, false);
+    if (k !== this.selected) this.pulse();
     this.selected = k;
     paint(k, true);
+    if (k < 0) this.portal.visible = false;
     m.instanceColor.needsUpdate = true;
   }
 }

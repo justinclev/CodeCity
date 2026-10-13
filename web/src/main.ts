@@ -511,14 +511,20 @@ function selectGate(k: number) {
   scene.setSelected(-1);
   scene.setSelectedDistrict(-1);
   scene.highlightGate(k);
-  scene.showGateStreets(e.gates.filter(g => scene.exists(g.building)).map(g => ({ gate: k, building: g.building })));
-  ui.showGate({
-    label: e.label, dir: e.dir, kind: e.kind, id: e.id, index: k,
-    repo: c.repos?.[e.repo]?.name ?? c.repo?.name ?? '',
-    leads: e.gates.map(g => ({ building: g.building, path: c.buildings[g.building].path, line: g.line, code: g.code })),
-  }, infoHandlers);
-  const first = e.gates.find(g => scene.exists(g.building));
-  if (first) scene.focus(first.building);
+  ui.showBuilding(null, infoHandlers);
+  scene.showGateStreets([]);
+  // the arch flares first; then the streets light up and the routes popup opens
+  setTimeout(() => {
+    if (selectedGate !== k || city !== c) return;
+    scene.showGateStreets(e.gates.filter(g => scene.exists(g.building)).map(g => ({ gate: k, building: g.building })));
+    ui.showGate({
+      label: e.label, dir: e.dir, kind: e.kind, id: e.id, index: k,
+      repo: c.repos?.[e.repo]?.name ?? c.repo?.name ?? '',
+      leads: e.gates.map(g => ({ building: g.building, path: c.buildings[g.building].path, line: g.line, code: g.code })),
+    }, infoHandlers);
+    const first = e.gates.find(g => scene.exists(g.building));
+    if (first) scene.focus(first.building);
+  }, 700);
 }
 
 /** Start a route at an entrance: the handler, what it calls, each way out. */

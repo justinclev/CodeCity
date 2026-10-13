@@ -269,6 +269,7 @@ export class CityScene {
     if (this.onFrame) this.onFrame(dt);
     this.codeLinks.update(this.flowTime);
     this.streets.update(this.flowTime);
+    this.gates.update();
     if (this.streets.group.children.length || this.linkMeshes.length || this.highwayGroup.children.length || this.arcs.children.length || this.codeLinks.group.children.length) {
       this.flowTime += dt;
       for (const l of this.linkMeshes) { l.mat.uniforms.uTime.value = this.flowTime; for (const m of l.extra ?? []) m.uniforms.uTime.value = this.flowTime; }
