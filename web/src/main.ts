@@ -154,6 +154,8 @@ async function loadPieces(i: number) {
   const path = city.buildings[i].path, commit = scene.commit;
   file = null; fileError = ''; activePiece = -1; floors = [];
   scene.setSkin(-1, '');
+  if (city.buildings[i].docs?.length) { refreshSelection(); return; } // a library: documents listed, no single source
+
   if (!apiAvailable) { fileError = 'Pieces and source need the server (codecity serve).'; return; }
   const hash = repoCommitAt(repoOf(i), commit);
   if (!hash) { fileError = 'This file does not exist at this commit.'; return; }
@@ -487,6 +489,23 @@ function links(path: string): { label: string; href: string }[] {
   return out;
 }
 
+async function openDoc(path: string, name: string) {
+  if (!city || selected < 0) return;
+  const hash = repoCommitAt(repoOf(selected), scene.commit);
+  if (!hash) return;
+  try {
+    const f = await fetchFile(path, hash);
+    if (selected < 0) return;
+    file = { ...f, path };
+    activePiece = 0; codeOpen = true;
+    showCode(file, 0, codeHandlers);
+    refreshSelection();
+  } catch (e) {
+    fileError = `Could not open ${name}: ${(e as Error).message}`;
+    refreshSelection();
+  }
+}
+
 const infoHandlers: ui.InfoHandlers = {
   onDistrict: d => selectDistrict(d, true),
   onPiece: k => openPiece(k),
@@ -500,6 +519,7 @@ const infoHandlers: ui.InfoHandlers = {
   onRouteStep: k => { void goStep(k); },
   onRouteStop: () => stopRoute(),
   onGateCode: line => openCodeAt(line),
+  onDoc: (path, name) => void openDoc(path, name),
   onZoomDistrict: () => { if (selectedDistrict >= 0) scene.focusDistrict(selectedDistrict); },
 };
 
@@ -604,6 +624,7 @@ function buildingInfo(i: number): ui.BuildingInfo {
     gates: gatesOn ? (gateByBuilding.get(i) ?? []).flatMap(k => edgeGates[k].gates.filter(g => g.building === i).map(g => ({ id: g.id, dir: g.dir, kind: g.kind, label: g.label, line: g.line, edge: k }))) : undefined,
     links: links(b.path),
     pieces: piecesState(),
+    docs: b.docs?.map(df => ({ name: df.name, path: df.path, lang: df.lang })),
     looks: scene.whyLooks(i),
     deps: {
       imports: (b.imp ?? []).filter(j => scene.exists(j)).map(j => ({ index: j, path: c.buildings[j].path })),
@@ -1031,6 +1052,29 @@ const walk = new WalkMode(scene, {
     const c = city!;
     const hash = repoCommitAt(repoOf(i), scene.commit);
     if (!hash) throw new Error('file does not exist at this commit');
+    const lib = c.buildings[i].docs;
+    if (lib?.length) { // a library: one floor listing the documents, each opening its markdown
+      const b = c.buildings[i];
+      const open = async (path: string) => {
+        try { const fd = await fetchFile(path, hash); file = { ...fd, path }; activePiece = 0; codeOpen = true; showCode(file, 0, codeHandlers); }
+        catch (e) { ui.setJobStatus(`Could not open ${path}: ${(e as Error).message}`, true); }
+      };
+      const lobby: PanelRow[] = [
+        { text: b.path, color: '#bff8ff', size: 30 },
+        { text: `Library · ${lib.length} ${lib.length === 1 ? 'document' : 'documents'} (click to read)`, color: '#ffe08a', size: 28 },
+        { text: '' },
+        ...lib.map(df => ({ text: df.name, hint: df.lang, color: '#8fd9a8', size: 28, action: () => void open(df.path) })),
+      ];
+      const floor: InteriorFloor = { name: 'Documents', kind: 'library', start: 1, end: Math.max(1, lib.length), loc: scene.valuesAt(i).loc, complexity: 0, piece: 0 };
+      const sp = scene.specOf(i);
+      const arch: InteriorArch | undefined = scene.classicBoxes ? undefined : {
+        facade: sp.facade, finish: FINISH_COLOR[sp.facade],
+        tiers: sp.tiers.map((t, k) => ({ name: t.name, s: t.s, color: TIER_COLORS[k % TIER_COLORS.length] })),
+        tierOf: [0], roof: scene.whyLooks(i).filter(l => l.startsWith('Roof:')).map(l => l.slice(6)),
+      };
+      return { path: b.path, lang: b.lang, lines: lib.map(df => df.name), floors: [floor],
+        lobby, directory: [{ text: 'L1  Documents', size: 30, action: () => {} }], references: () => [], glyphs: scene.glyphTexture, circuit: scene.circuitTexture, arch };
+    }
     const f = await fetchFile(c.buildings[i].path, hash);
     // storeys follow the building's tiers, as seen outside: the podium's pieces first, then each tier's (file order within)
     const sp0 = scene.specOf(i);

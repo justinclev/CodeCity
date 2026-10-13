@@ -677,3 +677,9 @@ svg.hovering .fe:not(.hov):not(.hl):not(.sel) { stroke-opacity: 0.12; }
 .routelist li.past { opacity: 0.55; } .routelist li.now button { background: rgba(45, 226, 208, 0.14); }
 .routelist .rlabel { font-family: var(--mono); font-size: 12px; } .routelist .rdetail { color: var(--dim); font-size: 11px; } .routelist .rpath { color: var(--dim); font-size: 11px; font-family: var(--mono); }
 .leadrow { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; } .leadrow .icon { font-size: 11px; padding: 1px 7px; }
+
+/* library building: the documents it holds */
+.docs { margin: 10px 0; }
+.docs .docrow { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; text-align: left; }
+.docs .docrow .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.docs .docrow .kind { color: var(--dim); font-size: 11px; flex: none; }

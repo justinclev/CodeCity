@@ -178,6 +178,8 @@ export interface BuildingInfo {
   looks: string[];
   /** Entrances and exits in this file (when the doors are shown). */
   gates?: { id: number; dir: 'in' | 'out'; kind: string; label: string; line?: number; edge: number }[];
+  /** A library building: the documents it holds (markdown / text). */
+  docs?: { name: string; path: string; lang: string }[];
 }
 
 export interface FileCommit { hash: string; date: string; author: string; subject: string; body?: string }
@@ -197,6 +199,7 @@ export interface InfoHandlers {
   onClose(): void; onPick(i: number): void; onZoomDistrict(): void; onDistrict(d: number): void;
   onPiece(k: number): void; onExplode(): void; onCode(): void;
   onGateFlow(id: number): void; onGateCode(line: number | undefined): void; onGate(k: number): void;
+  onDoc(path: string, name: string): void;
   onRoute(k: number, door: number): void; onRouteStep(k: number): void; onRouteStop(): void;
 }
 
@@ -377,7 +380,7 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     box.append(w);
   }
   box.append(depsSection(d.deps, h));
-  box.append(piecesSection(d.pieces, h));
+  if (d.docs?.length) box.append(docsSection(d.docs, h)); else box.append(piecesSection(d.pieces, h));
   if (d.links.length) {
     const links = el('div', 'links');
     for (const l of d.links) {
@@ -441,6 +444,21 @@ function depsSection(d: BuildingInfo['deps'], h: InfoHandlers): HTMLElement {
     ...d.importDirs.map(x => ({ label: x.path + '/', on: () => h.onDistrict(x.district), cls: 'out' })),
   ]);
   list('Imported by', d.importedBy.map(x => ({ label: x.path, on: () => h.onPick(x.index), cls: 'in' })));
+  return wrap;
+}
+
+function docsSection(docs: NonNullable<BuildingInfo['docs']>, h: InfoHandlers): HTMLElement {
+  const wrap = el('div', 'docs');
+  wrap.append(el('h4', '', `Library · ${docs.length} ${docs.length === 1 ? 'document' : 'documents'}`));
+  const list = el('div', 'list');
+  for (const df of docs) {
+    const b = el('button', 'docrow');
+    b.title = `open ${df.path}`;
+    b.append(el('span', 'nm', df.name), el('span', 'kind', df.lang));
+    b.onclick = () => h.onDoc(df.path, df.name);
+    list.append(b);
+  }
+  wrap.append(list);
   return wrap;
 }
 

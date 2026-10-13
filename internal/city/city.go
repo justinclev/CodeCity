@@ -164,6 +164,16 @@ type Building struct {
 	// Shape is the building's architecture, derived from its code at the newest
 	// commit (nil when the file is absent then). It never changes between commits.
 	Shape *Shape `json:"shape,omitempty"`
+	// Docs lists the documents inside a collapsed docs folder (a "library"
+	// building: a directory of prose shown as one building, not a district).
+	Docs []DocFile `json:"docs,omitempty"`
+}
+
+// DocFile is one document inside a library building.
+type DocFile struct {
+	Name string `json:"name"` // path relative to the library folder
+	Path string `json:"path"` // full building-style path (repo-prefixed after merge)
+	Lang string `json:"lang"`
 }
 
 // Shape kinds (archetypes).

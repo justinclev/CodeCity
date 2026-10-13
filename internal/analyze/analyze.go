@@ -46,6 +46,7 @@ type fileHist struct {
 	last    city.Point
 	churn   [][4]int64
 	authors map[string]int
+	docs    []city.DocFile // non-nil: this node is a collapsed docs folder (library building)
 }
 
 // Run opens the source, scans the sampled commits and lays out the city.
@@ -512,6 +513,90 @@ type dirNode struct {
 }
 
 // bias (optional) pulls entrance files toward the north edge of their district and exit files toward the south.
+// docsDir reports whether a directory subtree is prose-only (Markdown/Text) with
+// at least one file; such a folder is shown as a single "library" building.
+func docsDir(d *dirNode) bool {
+	any := false
+	var walk func(*dirNode) bool
+	walk = func(n *dirNode) bool {
+		for _, f := range n.files {
+			if !docLangs[f.lang] {
+				return false
+			}
+			any = true
+		}
+		for _, sub := range n.dirs {
+			if !walk(sub) {
+				return false
+			}
+		}
+		return true
+	}
+	return walk(d) && any
+}
+
+// collectDocFiles returns every file in a subtree, sorted by path.
+func collectDocFiles(d *dirNode) []*fileHist {
+	var out []*fileHist
+	var walk func(*dirNode)
+	walk = func(n *dirNode) {
+		out = append(out, n.files...)
+		keys := make([]string, 0, len(n.dirs))
+		for k := range n.dirs {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			walk(n.dirs[k])
+		}
+	}
+	walk(d)
+	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
+	return out
+}
+
+// locAt returns the LOC/lines/bytes of a file at commit ci and whether it was
+// present then (its change points are sparse: the last point at or before ci wins).
+func locAt(f *fileHist, ci int) (loc, lines, bytes int, present bool) {
+	cur := city.Point{-1, city.Absent, 0, 0, 0}
+	for _, p := range f.pts {
+		if p[0] > ci {
+			break
+		}
+		cur = p
+	}
+	if cur[1] == city.Absent {
+		return 0, 0, 0, false
+	}
+	return cur[1], cur[2], cur[3], true
+}
+
+// docFolder builds the synthetic history of a collapsed docs folder: its size at
+// each commit is the sum of its documents, and it carries the document list.
+func docFolder(dir string, docs []*fileHist, nCommits int) *fileHist {
+	h := &fileHist{path: dir, lang: "Markdown", last: city.Point{-1, city.Absent, 0, 0, 0}}
+	for ci := 0; ci < nCommits; ci++ {
+		loc, lines, bytes, present := 0, 0, 0, false
+		for _, f := range docs {
+			if l, ln, by, ok := locAt(f, ci); ok {
+				loc += l
+				lines += ln
+				bytes += by
+				present = true
+			}
+		}
+		if present {
+			record(h, city.Point{ci, loc, lines, bytes, 0})
+		} else {
+			record(h, city.Point{ci, city.Absent, 0, 0, 0})
+		}
+	}
+	for _, f := range docs {
+		h.docs = append(h.docs, city.DocFile{Name: strings.TrimPrefix(f.path, dir+"/"), Path: f.path, Lang: f.lang})
+	}
+	return h
+}
+
 func build(files []*fileHist, minWeight float64, bias map[string]float64) *city.City {
 	if minWeight <= 0 {
 		minWeight = 8
@@ -529,6 +614,15 @@ func build(files []*fileHist, minWeight float64, bias map[string]float64) *city.
 			d = nd
 		}
 		d.files = append(d.files, f)
+	}
+
+	nCommits := 0
+	for _, f := range files {
+		for _, p := range f.pts {
+			if p[0]+1 > nCommits {
+				nCommits = p[0] + 1
+			}
+		}
 	}
 
 	dirOf := map[*layout.Node]*dirNode{}
@@ -558,6 +652,14 @@ func build(files []*fileHist, minWeight float64, bias map[string]float64) *city.
 				}
 				disp += "/" + sub.name
 			}
+			if docsDir(sub) { // a prose-only folder becomes one library building
+				docs := collectDocFiles(sub)
+				fh := docFolder(sub.path, docs, nCommits)
+				ln := &layout.Node{Name: disp, Weight: float64(fh.weight) + minWeight}
+				fileOf[ln] = fh
+				n.Children = append(n.Children, ln)
+				continue
+			}
 			n.Children = append(n.Children, mk(sub, disp))
 		}
 		return n
@@ -581,8 +683,13 @@ func build(files []*fileHist, minWeight float64, bias map[string]float64) *city.
 				emit(ch, idx)
 				continue
 			}
-			c.Buildings = append(c.Buildings, city.Building{Path: f.path, Name: ch.Name, District: idx, Lang: f.lang,
-				X: r3(ch.Inner.X), Z: r3(ch.Inner.Y), W: r3(ch.Inner.W), D: r3(ch.Inner.H), H: f.pts, Churn: f.churn})
+			nb := city.Building{Path: f.path, Name: ch.Name, District: idx, Lang: f.lang,
+				X: r3(ch.Inner.X), Z: r3(ch.Inner.Y), W: r3(ch.Inner.W), D: r3(ch.Inner.H), H: f.pts, Churn: f.churn}
+			if f.docs != nil { // a library building: force the docs archetype and carry its documents
+				nb.Docs = f.docs
+				nb.Shape = &city.Shape{Kind: city.ShapeDoc, Tiers: []int{f.weight}}
+			}
+			c.Buildings = append(c.Buildings, nb)
 			if f.last[1] != city.Absent { // present at the newest commit
 				c.Stats.Files++
 				c.Stats.LOC += f.last[1]

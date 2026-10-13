@@ -253,6 +253,16 @@ func (s *Server) finish(j *Job, c *city.City, repos []*gitx.Repo, err error, ctx
 				orig = base + "/" + orig
 			}
 			s.paths[b.Path] = fileRef{repo: b.Repo, path: orig, lang: b.Lang}
+			for _, df := range b.Docs { // documents inside a library building are not buildings themselves
+				dorig := df.Path
+				if len(c.Repos) > 0 {
+					dorig = strings.TrimPrefix(df.Path, c.Repos[b.Repo].Name+"/")
+				}
+				if base != "" {
+					dorig = base + "/" + dorig
+				}
+				s.paths[df.Path] = fileRef{repo: b.Repo, path: dorig, lang: df.Lang}
+			}
 		}
 		if old := s.repos; len(old) > 0 { // let in-flight file reads finish before removing temp clones
 			time.AfterFunc(30*time.Second, func() { closeRepos(old) })

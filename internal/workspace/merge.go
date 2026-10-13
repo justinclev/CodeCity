@@ -165,6 +165,14 @@ func merge(cities []*city.City, names []string, links []city.Link, offsets [][2]
 			b.Repo = k
 			b.District += dBase[k]
 			b.Path = joinPath(name, b.Path)
+			if len(b.Docs) > 0 {
+				docs := make([]city.DocFile, len(b.Docs))
+				for i, df := range b.Docs {
+					df.Path = joinPath(name, df.Path)
+					docs[i] = df
+				}
+				b.Docs = docs
+			}
 			b.X, b.Z = r3(b.X+ox), r3(b.Z+oz)
 			b.H = append([]city.Point(nil), b.H...)
 			for i := range b.H {

@@ -45,7 +45,11 @@ export interface Building {
   impd?: number[];
   /** Architecture from the code at the newest commit (absent if the file is gone by then). */
   shape?: Shape;
+  /** Documents inside a collapsed docs folder (a "library" building). */
+  docs?: DocFile[];
 }
+
+export interface DocFile { name: string; path: string; lang: string }
 
 export type ShapeKind = 'tower' | 'slab' | 'types' | 'data' | 'doc' | 'test';
 export type Role = 'entry' | 'serve' | 'db' | 'exec' | 'files' | 'call';
