@@ -1168,6 +1168,7 @@ const walk = new WalkMode(scene, {
   },
   searchFiles: q => scene.search(q),
   doors: () => edgeGates.map((e, k) => ({ k, dir: e.dir, label: e.label, leads: e.gates.length })),
+  leadsOf: k => (edgeGates[k]?.gates ?? []).map(g => ({ label: g.label, building: g.building, line: g.line, path: city!.buildings[g.building].path })),
   doorRoute: (k, doorAt = 0) => {
     const c = city, e = edgeGates[k];
     if (!c || !e || !gateGraph) return null;

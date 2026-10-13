@@ -39,6 +39,8 @@ export interface WalkHost {
   searchFiles(q: string): number[];
   /** Entrances and exits on the city edge (the door list shared with the city view). */
   doors(): { k: number; dir: 'in' | 'out'; label: string; leads: number }[];
+  /** Every door behind one edge gate (a collapsed "7 routes" gate lists each route with the file and line of its definition). */
+  leadsOf(k: number): { label: string; building: number; line?: number; path: string }[];
   /** The code route behind a door: gate, then spot by spot through the functionality. */
   doorRoute(k: number, doorAt?: number): { title: string; steps: { kind: 'enter' | 'code' | 'out'; label: string; detail: string; building: number; line?: number }[] } | null;
 }
@@ -76,7 +78,7 @@ export class WalkMode {
   private locked = false;
   private drag: { x: number; y: number } | null = null;
   private aim: { kind: 'code'; wall: CodeWall; token: string | null; line: number } | { kind: 'panel'; panel: TextPanel; row: PanelRow | null }
-    | { kind: 'elevator' } | { kind: 'exit' } | { kind: 'building'; i: number } | { kind: 'floor'; k: number } | null = null;
+    | { kind: 'elevator' } | { kind: 'exit' } | { kind: 'building'; i: number } | { kind: 'floor'; k: number } | { kind: 'gate'; k: number } | null = null;
   private busy = false; // teleporting / entering
   private savedCam = { pos: new THREE.Vector3(), target: new THREE.Vector3(), fov: 45, near: 0.1, far: 20000 };
   private tracer: { mesh: THREE.Mesh; head: THREE.Mesh; mat: THREE.ShaderMaterial; curve: THREE.CurvePath<THREE.Vector3>; t: number; dur: number; done: () => void } | null = null;
@@ -490,6 +492,7 @@ export class WalkMode {
     else if (a.kind === 'panel' && a.row?.action) a.row.action();
     else if (a.kind === 'building') this.enter(a.i);
     else if (a.kind === 'floor') this.enterFloor(a.k);
+    else if (a.kind === 'gate') this.openGate(a.k);
     else if (a.kind === 'elevator') this.use();
     else if (a.kind === 'exit') this.exitBuilding();
   }
@@ -503,6 +506,7 @@ export class WalkMode {
       const roof = this.roofUnderfoot();
       if (roof >= 0) { this.useRoof(roof); return; }
       if (this.aim?.kind === 'floor') { this.enterFloor(this.aim.k); return; }
+      if (this.aim?.kind === 'gate') { this.openGate(this.aim.k); return; }
       const landed = this.landed.i >= 0 && Math.hypot(this.pos.x - this.landed.x, this.pos.z - this.landed.z) < this.u * 2 ? this.landed.i : -1;
       const i = this.aim?.kind === 'building' ? this.aim.i : landed >= 0 ? landed : this.nearestFacade();
       if (i >= 0) this.enter(i);
@@ -933,15 +937,48 @@ export class WalkMode {
     this.goStop(0);
   }
 
-  /** R: choose an entrance or exit, then follow its route spot by spot (N / B), landing at the line in each file. */
+  /** R: every entrance (paged), then each route behind it; the route goes spot by spot (N / B) from its definition. */
   private pickRoute() {
-    const doors = this.host.doors().filter(d => d.dir === 'in').slice(0, 9);
+    const doors = this.host.doors().filter(d => d.dir === 'in');
     if (!doors.length) { this.toast('No doors in this city (they need the server and a Go/JS/TS/Python/Rust flow)'); return; }
-    this.openMenu('ROUTES — pick an entrance', doors.map(d => ({ label: d.label, sub: d.leads > 1 ? `${d.leads} leads` : undefined, go: () => this.startRoute(d.k) })));
+    this.pagedMenu('ROUTES — pick an entrance', doors.map(d => ({ label: d.label, sub: d.leads > 1 ? `${d.leads} routes` : undefined, go: () => this.chooseLead(d.k) })));
   }
 
-  private startRoute(k: number) {
-    const r = this.host.doorRoute(k);
+  /** Click / E on an arch: it flares, then its options appear. */
+  private openGate(k: number) {
+    const d = this.host.doors().find(x => x.k === k);
+    if (!d || this.busy) return;
+    this.closeMenu();
+    this.scene.highlightGate(-1);
+    this.scene.highlightGate(k); // restarts the glow
+    this.toast(`${d.dir === 'in' ? 'ENTRANCE' : 'EXIT'} · ${d.label}`, 1.2);
+    window.setTimeout(() => { if (this.active && !this.busy) this.chooseLead(k); }, 700);
+  }
+
+  /** The doors behind one edge gate: one entry per route / table / host, each with its file and line. */
+  private chooseLead(k: number) {
+    const d = this.host.doors().find(x => x.k === k);
+    const leads = this.host.leadsOf(k);
+    if (!d || !leads.length) return;
+    if (d.dir === 'in' && leads.length === 1) { this.startRoute(k, 0); return; }
+    this.pagedMenu(`${d.dir === 'in' ? 'ENTRANCE' : 'EXIT'} — ${d.label}`, leads.map((l, j) => ({
+      label: l.label, sub: `${l.path.split('/').slice(-2).join('/')}${l.line ? ':' + l.line : ''}`,
+      go: () => d.dir === 'in' ? this.startRoute(k, j) : this.teleport({ building: l.building, line: l.line, label: `${l.label} — ${l.path}${l.line ? ':' + l.line : ''}` }),
+    })));
+  }
+
+  /** Menu with more than nine entries: eight per page, the ninth turns the page. */
+  private pagedMenu(title: string, items: { label: string; sub?: string; go: () => void }[], page = 0) {
+    this.freeMouse();
+    const per = items.length > 9 ? 8 : 9, pages = Math.ceil(items.length / per);
+    const here = items.slice(page * per, page * per + per);
+    const list = [...here];
+    if (pages > 1) list.push({ label: page + 1 < pages ? 'more ▸' : '◂ first page', sub: `page ${page + 1}/${pages}`, go: () => this.pagedMenu(title, items, (page + 1) % pages) });
+    this.openMenu(title, list);
+  }
+
+  private startRoute(k: number, doorAt = 0) {
+    const r = this.host.doorRoute(k, doorAt);
     if (!r) { this.toast('No route found behind that door'); return; }
     if (this.tourK >= 0) this.endTour();
     this.routeSteps = r.steps; this.routeTitle = r.title;
@@ -1334,9 +1371,11 @@ export class WalkMode {
         else if (o.userData.exit) aim = { kind: 'exit' };
       }
     } else {
-      const k = this.scene.rayFloor(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 60);
-      const i = k >= 0 ? -1 : this.scene.rayBuilding(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 30);
-      if (k >= 0) aim = { kind: 'floor', k };
+      const gk = this.scene.rayGate(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 120);
+      const k = gk >= 0 ? -1 : this.scene.rayFloor(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 60);
+      const i = gk >= 0 || k >= 0 ? -1 : this.scene.rayBuilding(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 30);
+      if (gk >= 0) aim = { kind: 'gate', k: gk };
+      else if (k >= 0) aim = { kind: 'floor', k };
       else if (i >= 0) aim = { kind: 'building', i };
     }
     if (this.aim?.kind === 'panel' && (aim?.kind !== 'panel' || aim.panel !== this.aim.panel)) this.aim.panel.clearHover();
@@ -1348,6 +1387,11 @@ export class WalkMode {
       case 'panel': this.showPrompt(aim.row?.action ? `click: ${aim.row.text}` : ''); break;
       case 'elevator': this.showPrompt(this.interior!.inShaft(this.pos.x, this.pos.z) ? '[E] choose floor' : '[E] call elevator'); break;
       case 'exit': this.showPrompt('click / walk through: back to the city'); break;
+      case 'gate': {
+        const d = this.host.doors().find(x => x.k === aim.k);
+        this.showPrompt(d ? `[E] / click: ${d.dir === 'in' ? 'entrance' : 'exit'} ${d.label} · pick a route` : '');
+        break;
+      }
       case 'building': this.showPrompt(`[E] / click: enter ${this.host.buildingName(aim.i)} · [X] take apart · [I] info`); break;
       case 'floor': {
         const f = this.explodeFloors[aim.k];

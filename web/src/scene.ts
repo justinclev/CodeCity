@@ -412,6 +412,23 @@ export class CityScene {
     return -1;
   }
 
+  /** Edge gate (index into the gates passed to setGates) under a ray, or -1. Gates hidden behind a nearer building do not count. */
+  rayGate(origin: THREE.Vector3, dir: THREE.Vector3, far: number): number {
+    const ms = this.gates.meshes;
+    if (!ms.length) return -1;
+    this.raycaster.set(origin, dir);
+    this.raycaster.far = far;
+    const hit = this.raycaster.intersectObjects(ms, false)[0];
+    let k = -1;
+    if (hit && hit.instanceId !== undefined) {
+      k = this.gates.gateOf(hit.object, hit.instanceId);
+      const b = this.raycaster.intersectObjects(this.solidMeshes(false), false)[0];
+      if (b && b.distance < hit.distance) k = -1;
+    }
+    this.raycaster.far = Infinity;
+    return k;
+  }
+
   /** Meshes making up the buildings (plus the floors of an exploded one). */
   private solidMeshes(withExploded: boolean): THREE.Object3D[] {
     const out: THREE.Object3D[] = [];
