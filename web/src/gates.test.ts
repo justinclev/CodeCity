@@ -26,3 +26,21 @@ assert.deepEqual(gates.map(x => `${x.dir}:${x.kind}:${x.label}@${x.building}`).s
 assert.equal(gates.find(x => x.kind === 'db')!.line, 20);
 assert.equal(byBuilding(gates).get(7)!.length, 3);
 console.log('gates: ok');
+
+import { layoutGates } from './gates.ts';
+{
+  const mk = (id: number, dir: 'in' | 'out', building: number) => ({ id, dir, kind: 'x', label: 'g' + id, building, code: 0 });
+  const gs = [mk(1, 'in', 0), mk(2, 'in', 1), mk(2, 'in', 2), mk(3, 'out', 2), mk(4, 'in', 3)];
+  const cx = [10, 30, 50, 90];
+  const eg = layoutGates(gs, () => 0, () => ({ x: 0, z: 100, w: 100, d: 60 }), b => cx[b], 6, 4);
+  assert.equal(eg.length, 4); // node 2 is one gate with two doors
+  assert.equal(eg.find(e => e.id === 2)!.gates.length, 2);
+  for (const e of eg) assert.ok(e.x >= 3 && e.x <= 97);
+  const ins = eg.filter(e => e.dir === 'in').sort((a, b) => a.x - b.x);
+  for (let k = 1; k < ins.length; k++) assert.ok(ins[k].x - ins[k - 1].x >= 9 - 1e-9);
+  assert.ok(eg.filter(e => e.dir === 'in').every(e => e.z === 96));
+  assert.ok(eg.filter(e => e.dir === 'out').every(e => e.z === 164));
+  const again = layoutGates([...gs].reverse(), () => 0, () => ({ x: 0, z: 100, w: 100, d: 60 }), b => cx[b], 6, 4);
+  assert.deepEqual(again.map(e => [e.id, e.x, e.z]), eg.map(e => [e.id, e.x, e.z]));
+  console.log('layoutGates: ok');
+}

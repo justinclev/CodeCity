@@ -9,7 +9,7 @@ import type { GameWorld } from './walk/game';
 import { buildTour, isTest, KIND_LABEL, type TourStop } from './tour';
 import { bindBranchRows, showSwitcher, type LoadedRepo } from './branches';
 import { FlowView } from './flow/view';
-import { buildGates, byBuilding, type Gate } from './gates';
+import { buildGates, layoutGates, type EdgeGate } from './gates';
 import type { FlowGraph } from './flow/model';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
@@ -493,9 +493,29 @@ const infoHandlers: ui.InfoHandlers = {
   onClose: () => closeInfo(),
   onPick: i => selectBuilding(i, true),
   onGateFlow: id => openFlowAt(id),
+  onGate: k => selectGate(k),
   onGateCode: line => openCodeAt(line),
   onZoomDistrict: () => { if (selectedDistrict >= 0) scene.focusDistrict(selectedDistrict); },
 };
+
+/** A gate on the edge of a city: highlight it, draw its streets to the files behind it and list them. */
+function selectGate(k: number) {
+  const c = city, e = edgeGates[k];
+  if (!c || !e) return;
+  if (codeOpen) closeCode();
+  selected = -1; selectedDistrict = -1; selectedGate = k;
+  scene.setSelected(-1);
+  scene.setSelectedDistrict(-1);
+  scene.highlightGate(k);
+  scene.showGateStreets(e.gates.filter(g => scene.exists(g.building)).map(g => ({ gate: k, building: g.building })));
+  ui.showGate({
+    label: e.label, dir: e.dir, kind: e.kind, id: e.id,
+    repo: c.repos?.[e.repo]?.name ?? c.repo?.name ?? '',
+    leads: e.gates.map(g => ({ building: g.building, path: c.buildings[g.building].path, line: g.line, code: g.code })),
+  }, infoHandlers);
+  const first = e.gates.find(g => scene.exists(g.building));
+  if (first) scene.focus(first.building);
+}
 
 function openCodeAt(line: number | undefined) {
   if (!file) return;
@@ -522,7 +542,7 @@ function buildingInfo(i: number): ui.BuildingInfo {
     owner: b.own && author ? { name: author.name, share: Math.round((b.own[1] / Math.max(1, scene.totalCommits(i))) * 100),
       authors: b.own[2], risk: scene.risk(i), lastActive: author.last } : undefined,
     coupled: (b.cpl ?? []).filter(([j]) => scene.exists(j)).map(([j, shared, degree]) => ({ index: j, path: c.buildings[j].path, shared, degree })),
-    gates: gatesOn ? (gateMap.get(i) ?? []).map(g => ({ id: g.id, dir: g.dir, kind: g.kind, label: g.label, line: g.line })) : undefined,
+    gates: gatesOn ? (gateByBuilding.get(i) ?? []).flatMap(k => edgeGates[k].gates.filter(g => g.building === i).map(g => ({ id: g.id, dir: g.dir, kind: g.kind, label: g.label, line: g.line, edge: k }))) : undefined,
     links: links(b.path),
     pieces: piecesState(),
     looks: scene.whyLooks(i),
@@ -549,6 +569,8 @@ function selectBuilding(i: number, fly: boolean) {
   selectedDistrict = -1;
   scene.setSelectedDistrict(-1);
   scene.setSelected(i);
+  selectedGate = -1; scene.highlightGate(-1);
+  scene.showGateStreets(gatesOn ? (gateByBuilding.get(i) ?? []).map(k => ({ gate: k, building: i })) : []);
   ui.showBuilding(buildingInfo(i), infoHandlers);
   if (fly) scene.focus(i);
   writeHash();
@@ -597,6 +619,8 @@ function closeInfo() {
   selected = selectedDistrict = -1;
   scene.setSelected(-1);
   scene.setSelectedDistrict(-1);
+  if (selectedGate >= 0) { selectedGate = -1; scene.highlightGate(-1); }
+  scene.showGateStreets([]);
   ui.showBuilding(null, infoHandlers);
   writeHash();
 }
@@ -832,9 +856,9 @@ canvas.addEventListener('pointermove', e => {
         (l.evidence ?? []).slice(0, 2).join(' · ') + ' · click for details'], p.x, p.y);
       canvas.style.cursor = 'pointer';
     } else if (hit?.kind === 'gate') {
-      const gs = gateMap.get(hit.index) ?? [];
+      const e = edgeGates[hit.index];
       scene.setHover(-1);
-      ui.showTip([city.buildings[hit.index].path, `${gs.filter(x => x.dir === 'in').length} entrances · ${gs.filter(x => x.dir === 'out').length} exits · click to see where they lead`], p.x, p.y);
+      ui.showTip([`${e.dir === 'in' ? 'Entrance' : 'Exit'} · ${e.label}`, `${e.gates.length} ${e.gates.length === 1 ? 'file' : 'files'} behind it · click to follow the street`], p.x, p.y);
       canvas.style.cursor = 'pointer';
     } else if (hit?.kind === 'floor') {
       const f = scene.floorAt(hit.index)!;
@@ -867,7 +891,7 @@ canvas.addEventListener('pointerup', e => {
   if (moved || e.button !== 0) return; // orbit / pan drag
   const hit = scene.pick(e.clientX, e.clientY);
   if (hit?.kind === 'link') selectLink(hit.index);
-  else if (hit?.kind === 'gate') selectBuilding(hit.index, false);
+  else if (hit?.kind === 'gate') selectGate(hit.index);
   else if (hit?.kind === 'floor') openPiece(scene.floorAt(hit.index)!.piece);
   else if (hit?.kind === 'building') selectBuilding(hit.index, false);
   else if (hit?.kind === 'district') selectDistrict(hit.index, false);
@@ -1165,10 +1189,12 @@ function flowGraph(): Promise<FlowGraph> {
 }
 
 let gatesOn = false;
-let gateMap = new Map<number, Gate[]>();
+let edgeGates: EdgeGate[] = [];
+let gateByBuilding = new Map<number, number[]>(); // building → indices into edgeGates
+let selectedGate = -1;
 
 function clearGates() {
-  gateMap = new Map();
+  edgeGates = []; gateByBuilding = new Map(); selectedGate = -1;
   scene.setGates([]);
   scene.setGatesVisible(false);
   ui.setGateCount('');
@@ -1178,7 +1204,7 @@ async function setGatesOn(on: boolean) {
   gatesOn = on;
   const box = document.getElementById('showgates') as HTMLInputElement;
   box.checked = on;
-  if (!on) { scene.setGatesVisible(false); ui.setGateCount(''); refreshSelection(); return; }
+  if (!on) { scene.setGatesVisible(false); selectedGate = -1; ui.setGateCount(''); refreshSelection(); return; }
   const c = city;
   if (!c) return;
   ui.setGateCount('reading…');
@@ -1187,8 +1213,10 @@ async function setGatesOn(on: boolean) {
     if (city !== c || !gatesOn) return;
     const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
     const gates = buildGates(g, p => pathIndex.get(p) ?? -1);
-    gateMap = byBuilding(gates);
-    scene.setGates([...gateMap].map(([building, l]) => ({ building, ins: l.filter(x => x.dir === 'in').length, outs: l.filter(x => x.dir === 'out').length })));
+    edgeGates = layoutGates(gates, b => c.buildings[b].repo ?? 0, r => scene.cityRect(r), b => c.buildings[b].x + c.buildings[b].w / 2, scene.gateWidth, scene.gateOffset);
+    gateByBuilding = new Map();
+    edgeGates.forEach((e, k) => { for (const g of e.gates) { const l = gateByBuilding.get(g.building); if (l) l.push(k); else gateByBuilding.set(g.building, [k]); } });
+    scene.setGates(edgeGates.map(e => ({ x: e.x, z: e.z, dir: e.dir })));
     scene.setGatesVisible(true);
     const ins = gates.filter(x => x.dir === 'in').length, outs = gates.length - ins;
     ui.setGateCount(`${ins} in · ${outs} out`);

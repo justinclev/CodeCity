@@ -144,6 +144,8 @@ export class CityScene {
   readonly codeLinks = new TraceLayer(true);
   private highwayGroup = new THREE.Group();
   private gates = new GateMarks();
+  private gateSpots: GateSpot[] = [];
+  private streets = new TraceLayer(true);
   private roadPaths: Road[] = [];
   private hackerFx = new HackerFx();
   codeLinkMode: 'off' | 'selection' | 'all' = 'selection';
@@ -219,7 +221,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.highwayGroup, this.gates.group, this.hackerFx.group, this.roofs.group, this.ways.group);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.highwayGroup, this.gates.group, this.streets.group, this.hackerFx.group, this.roofs.group, this.ways.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -266,11 +268,8 @@ export class CityScene {
     if (this.exploded) this.animateExplode(dt);
     if (this.onFrame) this.onFrame(dt);
     this.codeLinks.update(this.flowTime);
-    if (this.gates.group.visible) {
-      this.flowTime += dt;
-      this.gates.update(this.flowTime, i => (this.exists(i) && this.cur[i] > 0.02 ? this.baseY[i] + this.cur[i] : -1), i => this.city.buildings[i]);
-    }
-    if (this.linkMeshes.length || this.highwayGroup.children.length || this.arcs.children.length || this.codeLinks.group.children.length) {
+    this.streets.update(this.flowTime);
+    if (this.streets.group.children.length || this.linkMeshes.length || this.highwayGroup.children.length || this.arcs.children.length || this.codeLinks.group.children.length) {
       this.flowTime += dt;
       for (const l of this.linkMeshes) { l.mat.uniforms.uTime.value = this.flowTime; for (const m of l.extra ?? []) m.uniforms.uTime.value = this.flowTime; }
       for (const o of this.arcs.children) {
@@ -836,6 +835,7 @@ export class CityScene {
   refreshCodeLinks() {
     if (!this.city) return;
     this.codeLinks.setAdditive(this.theme.name !== 'day');
+    this.streets.setAdditive(this.theme.name !== 'day');
     const s = this.size();
     this.codeLinks.spacing = s * 0.05;
     this.codeLinks.base = this.theme.name === 'day' ? 0.55 : 0.3;
@@ -1213,8 +1213,8 @@ export class CityScene {
       const lm = this.linkMeshes.find(l => l.pick === hit.object);
       if (lm) return { kind: 'link', index: lm.view.index };
       if (hit.instanceId !== undefined && this.gates.meshes.includes(hit.object)) {
-        const gb = this.gates.buildingOf(hit.object, hit.instanceId);
-        if (gb >= 0 && this.exists(gb)) return { kind: 'gate', index: gb };
+        const gk = this.gates.gateOf(hit.object, hit.instanceId);
+        if (gk >= 0) return { kind: 'gate', index: gk };
         continue;
       }
       const id = hit.instanceId ?? -1;
@@ -1431,9 +1431,41 @@ export class CityScene {
     }
   }
 
-  /** Entrance / exit markers on the roofs (one spot per building with doors). */
-  setGates(spots: GateSpot[]) { this.gates.set(spots, this.cell, this.city ? this.size() : 1); }
-  setGatesVisible(on: boolean) { this.gates.group.visible = on && this.gates.count > 0; }
+  /** Gates on the city edges (positions come from layoutGates). */
+  setGates(spots: GateSpot[]) { this.gates.set(spots, Math.max(this.cell * 3.2, (this.city ? this.size() : 1) * 0.011)); this.gateSpots = spots; this.clearStreets(); }
+  setGatesVisible(on: boolean) { this.gates.group.visible = on && this.gates.count > 0; if (!on) this.clearStreets(); }
+  highlightGate(k: number) { this.gates.highlight(k); }
+
+  /**
+   * Streets from a gate to the files behind it: up a ramp at the gate, across above the skyline, down onto
+   * the roof. Entrances flow gate → file, exits file → gate.
+   */
+  showGateStreets(targets: { gate: number; building: number }[]) {
+    this.clearStreets();
+    if (!this.gates.group.visible) return;
+    const traces: Trace[] = [];
+    const w = Math.max(this.cell * 0.55, this.size() * 0.0022);
+    for (const t of targets.slice(0, 40)) {
+      const g = this.gateSpots[t.gate];
+      if (!g || !this.exists(t.building)) continue;
+      const from = new THREE.Vector3(g.x, 0.05, g.z), to = this.buildingAnchor(t.building);
+      const pts = busRoute(from, to, this.busLayer(t.building + t.gate), t.building + t.gate);
+      if (g.dir === 'out') pts.reverse();
+      traces.push({ points: pts, color: new THREE.Color(g.dir === 'in' ? 0x2de2d0 : 0xff6b5b), width: w * 2, speed: this.size() * 0.05 });
+    }
+    this.streets.set(traces);
+  }
+
+  clearStreets() { this.streets.clear(); }
+
+  /** Footprint of a city's districts root (repo r, or the only city) and the offset gates stand outside it. */
+  cityRect(repo: number): { x: number; z: number; w: number; d: number } {
+    const d = this.city.repos?.[repo]?.district ?? 0;
+    const r = this.city.districts[d];
+    return { x: r.x, z: r.z, w: r.w, d: r.d };
+  }
+  get gateWidth() { return Math.max(this.cell * 3.2, this.size() * 0.011); }
+  get gateOffset() { return this.cell * 2.5; }
 
   /** Route of a highway from city A to city B around the other cities (see roads.ts). */
   private highwayRoute(from: number, to: number): [number, number][] {

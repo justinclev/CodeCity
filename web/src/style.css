@@ -664,3 +664,7 @@ svg.hovering .fe:not(.hov):not(.hl):not(.sel) { stroke-opacity: 0.12; }
 .gate.in .gname { color: #2de2d0; } .gate.out .gname { color: #ff8a7c; }
 .gate button { font-size: 11px; padding: 1px 7px; }
 #gatecount { font-size: 11px; }
+
+.gate .gname { text-align: left; background: none; border: 0; padding: 0; cursor: pointer; }
+.gate .gname:hover { text-decoration: underline; }
+#info button.wide { width: 100%; margin: 8px 0 4px; }

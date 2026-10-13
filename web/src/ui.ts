@@ -177,7 +177,7 @@ export interface BuildingInfo {
   /** Reasons for the building's architecture (empty in classic mode). */
   looks: string[];
   /** Entrances and exits in this file (when the doors are shown). */
-  gates?: { id: number; dir: 'in' | 'out'; kind: string; label: string; line?: number }[];
+  gates?: { id: number; dir: 'in' | 'out'; kind: string; label: string; line?: number; edge: number }[];
 }
 
 export interface FileCommit { hash: string; date: string; author: string; subject: string; body?: string }
@@ -196,7 +196,7 @@ export interface DistrictInfo {
 export interface InfoHandlers {
   onClose(): void; onPick(i: number): void; onZoomDistrict(): void; onDistrict(d: number): void;
   onPiece(k: number): void; onExplode(): void; onCode(): void;
-  onGateFlow(id: number): void; onGateCode(line: number | undefined): void;
+  onGateFlow(id: number): void; onGateCode(line: number | undefined): void; onGate(k: number): void;
 }
 
 function infoHead(title: string, h: InfoHandlers) {
@@ -235,8 +235,9 @@ function gatesSection(gates: NonNullable<BuildingInfo['gates']>, h: InfoHandlers
     w.append(el('div', 'gatehead ' + dir, dir === 'in' ? `Ways in (${list.length})` : `Ways out (${list.length})`));
     for (const g of list) {
       const row = el('div', 'gate ' + dir);
-      const name = el('span', 'gname', g.label);
-      name.title = (GATE_NOUN[g.kind] ?? g.kind) + (g.line ? ` · line ${g.line}` : '');
+      const name = el('button', 'gname', g.label);
+      name.title = (GATE_NOUN[g.kind] ?? g.kind) + (g.line ? ` · line ${g.line}` : '') + ' · show its street';
+      name.onclick = () => h.onGate(g.edge);
       const flow = el('button', 'icon', 'flow');
       flow.title = 'open the flow view at this ' + (GATE_NOUN[g.kind] ?? 'door');
       flow.onclick = () => h.onGateFlow(g.id);
@@ -248,6 +249,30 @@ function gatesSection(gates: NonNullable<BuildingInfo['gates']>, h: InfoHandlers
     }
   }
   return w;
+}
+
+export interface GateInfo {
+  label: string; dir: 'in' | 'out'; kind: string; id: number; repo: string;
+  leads: { building: number; path: string; line?: number; code?: number }[];
+}
+
+/** A gate on the city edge: what it is and the files its street leads to. */
+export function showGate(d: GateInfo, h: InfoHandlers) {
+  const box = $('info');
+  box.replaceChildren(infoHead(d.label, h), el('div', 'p', `${d.dir === 'in' ? 'Entrance' : 'Exit'} · ${GATE_NOUN[d.kind] ?? d.kind}${d.repo ? ' · ' + d.repo : ''}`));
+  const open = el('button', 'wide', 'Open in flow view');
+  open.onclick = () => h.onGateFlow(d.id);
+  box.append(open, el('h4', '', d.dir === 'in' ? 'The street leads to' : 'Reached from'));
+  const list = el('div', 'list');
+  for (const l of d.leads) {
+    const b = el('button');
+    b.title = l.line ? `${l.path}:${l.line}` : l.path;
+    b.append(el('span', 'path', '‎' + l.path + (l.line ? ':' + l.line : '')));
+    b.onclick = () => { h.onPick(l.building); if (l.line) setTimeout(() => h.onGateCode(l.line), 400); };
+    list.append(b);
+  }
+  box.append(list);
+  box.hidden = false;
 }
 
 export function setGateCount(text: string) { $('gatecount').textContent = text; }

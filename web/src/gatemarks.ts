@@ -1,80 +1,72 @@
 import * as THREE from 'three';
 
-export interface GateSpot { building: number; ins: number; outs: number }
+const TEAL = new THREE.Color(0x2de2d0), CORAL = new THREE.Color(0xff6b5b);
 
-const TEAL = 0x2de2d0, CORAL = 0xff6b5b;
+export interface GateSpot { x: number; z: number; dir: 'in' | 'out' }
 
 /**
- * Door markers on the roofs: a teal pyramid pointing down into a building where requests, commands or
- * events enter; a coral one pointing up where the code reaches out (database, network, files, processes).
+ * Gates on the edge of a city: an arch (two posts and a lintel) standing on the ground, teal where
+ * requests, commands and events enter, coral where the code reaches out. A street leads from a gate
+ * to the files behind it (see CityScene.showGateStreets).
  */
 export class GateMarks {
   readonly group = new THREE.Group();
-  private ins: THREE.InstancedMesh | null = null;
-  private outs: THREE.InstancedMesh | null = null;
-  private inSpot: number[] = [];  // instance → index in spots
-  private outSpot: number[] = [];
+  private mesh: THREE.InstancedMesh | null = null;
   private spots: GateSpot[] = [];
-  private size = 1;
+  private selected = -1;
+  width = 1;
 
   constructor() { this.group.visible = false; }
 
-  private make(color: number, up: boolean, n: number) {
-    const geo = new THREE.ConeGeometry(0.5, 1, 4);
-    geo.rotateY(Math.PI / 4);
-    if (!up) geo.rotateX(Math.PI);
-    const mat = new THREE.MeshBasicMaterial({ color, toneMapped: false });
-    const m = new THREE.InstancedMesh(geo, mat, Math.max(1, n));
-    m.count = n;
-    m.frustumCulled = false;
-    this.group.add(m);
-    return m;
-  }
-
   clear() {
-    for (const m of [this.ins, this.outs]) if (m) { this.group.remove(m); m.geometry.dispose(); (m.material as THREE.Material).dispose(); }
-    this.ins = this.outs = null;
-    this.inSpot = []; this.outSpot = []; this.spots = [];
+    if (this.mesh) { this.group.remove(this.mesh); this.mesh.geometry.dispose(); (this.mesh.material as THREE.Material).dispose(); }
+    this.mesh = null;
+    this.spots = [];
+    this.selected = -1;
   }
 
-  set(spots: GateSpot[], cell: number, world: number) {
+  /** width = how wide one gate stands (world units). */
+  set(spots: GateSpot[], width: number) {
     this.clear();
     this.spots = spots;
-    this.size = Math.max(cell * 2.2, world * 0.014); // readable from the overview, not just up close
-    spots.forEach((s, k) => { if (s.ins) this.inSpot.push(k); if (s.outs) this.outSpot.push(k); });
-    this.ins = this.make(TEAL, false, this.inSpot.length);
-    this.outs = this.make(CORAL, true, this.outSpot.length);
+    this.width = width;
+    if (!spots.length) return;
+    const m = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ toneMapped: false }), spots.length * 3);
+    m.frustumCulled = false;
+    const mat = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3();
+    const h = width * 1.15, t = width * 0.16;
+    spots.forEach((g, k) => {
+      const c = g.dir === 'in' ? TEAL : CORAL;
+      p.set(g.x - width / 2 + t / 2, h / 2, g.z); s.set(t, h, t); m.setMatrixAt(k * 3, mat.compose(p, q, s));
+      p.set(g.x + width / 2 - t / 2, h / 2, g.z); m.setMatrixAt(k * 3 + 1, mat.compose(p, q, s));
+      p.set(g.x, h - t / 2, g.z); s.set(width, t, t * 1.4); m.setMatrixAt(k * 3 + 2, mat.compose(p, q, s));
+      for (let j = 0; j < 3; j++) m.setColorAt(k * 3 + j, c);
+    });
+    m.instanceMatrix.needsUpdate = true;
+    if (m.instanceColor) m.instanceColor.needsUpdate = true;
+    this.mesh = m;
+    this.group.add(m);
   }
 
   get count() { return this.spots.length; }
-  get meshes(): THREE.Object3D[] { return this.group.visible ? [this.ins, this.outs].filter((m): m is THREE.InstancedMesh => !!m && m.count > 0) : []; }
+  get meshes(): THREE.Object3D[] { return this.group.visible && this.mesh ? [this.mesh] : []; }
 
-  /** Building behind the marker the ray hit. */
-  buildingOf(mesh: THREE.Object3D, instance: number): number {
-    const k = mesh === this.ins ? this.inSpot[instance] : mesh === this.outs ? this.outSpot[instance] : undefined;
-    return k === undefined ? -1 : this.spots[k].building;
-  }
+  /** Gate index behind a ray hit. */
+  gateOf(mesh: THREE.Object3D, instance: number): number { return mesh === this.mesh ? Math.floor(instance / 3) : -1; }
 
-  /** top(i) = y of the roof (or -1 when the building is absent); rect(i) = centre x, z and footprint. */
-  update(time: number, top: (i: number) => number, rect: (i: number) => { x: number; z: number; w: number; d: number }) {
-    if (!this.group.visible) return;
-    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), sc = new THREE.Vector3();
-    const place = (mesh: THREE.InstancedMesh | null, idx: number[], side: number, phase: number) => {
-      if (!mesh) return;
-      idx.forEach((k, n) => {
-        const s = this.spots[k], y = top(s.building);
-        if (y < 0) { sc.set(0, 0, 0); p.set(0, -1000, 0); } else {
-          const r = rect(s.building);
-          const sz = this.size;
-          sc.set(sz, sz * 1.4, sz);
-          p.set(r.x + r.w / 2 + side * r.w * 0.22, y + sz * 1.2 + Math.sin(time * 2 + phase + k) * sz * 0.2, r.z + r.d / 2);
-        }
-        m.compose(p, q, sc);
-        mesh.setMatrixAt(n, m);
-      });
-      mesh.instanceMatrix.needsUpdate = true;
+  /** Make one gate brighter (selected / hovered); -1 for none. */
+  highlight(k: number) {
+    const m = this.mesh;
+    if (!m?.instanceColor) return;
+    const paint = (i: number, on: boolean) => {
+      if (i < 0 || i >= this.spots.length) return;
+      const c = (this.spots[i].dir === 'in' ? TEAL : CORAL).clone();
+      if (on) c.lerp(new THREE.Color(1, 1, 1), 0.65);
+      for (let j = 0; j < 3; j++) m.setColorAt(i * 3 + j, c);
     };
-    place(this.ins, this.inSpot, -1, 0);
-    place(this.outs, this.outSpot, 1, 2);
+    paint(this.selected, false);
+    this.selected = k;
+    paint(k, true);
+    m.instanceColor.needsUpdate = true;
   }
 }
