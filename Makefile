@@ -18,3 +18,7 @@ dev:
 clean:
 	rm -rf bin web/dist
 	find internal/web/dist -mindepth 1 ! -name .gitkeep -delete
+
+.PHONY: demo
+demo: build
+	./scripts/demo-highways.sh

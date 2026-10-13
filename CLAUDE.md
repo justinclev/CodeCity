@@ -32,6 +32,7 @@ Go CLI does the analysis and emits `city.json`; a Vite + three.js viewer renders
 - `make test` / `go test ./...`
 - `cd web && npm run dev` – viewer dev server (proxies `/api` and `/city.json` to a running `codecity serve` on :8080)
 - `cd web && npm run typecheck`
+- `make demo` – serves six example services (`examples/highways`, API + Kafka links) as one world; `TestExampleHighways` checks every highway
 
 ## Conventions
 - Go: stdlib only. Keep git access in `gitx`; validate refs (no leading `-`), use `--` before user-supplied URLs.

@@ -207,3 +207,60 @@ func TestHostNames(t *testing.T) {
 		}
 	}
 }
+
+// TestExampleHighways builds the services under examples/highways into git repos and checks
+// every highway the viewer should draw (the same repos power `make demo`).
+func TestExampleHighways(t *testing.T) {
+	root := filepath.Join("..", "..", "examples", "highways")
+	names := []string{"gateway", "orders", "payments", "users", "web", "notifications"}
+	var dirs []string
+	for _, n := range names {
+		files := map[string]string{}
+		filepath.Walk(filepath.Join(root, n), func(p string, info os.FileInfo, err error) error {
+			if err == nil && !info.IsDir() {
+				b, _ := os.ReadFile(p)
+				rel, _ := filepath.Rel(filepath.Join(root, n), p)
+				files[filepath.ToSlash(rel)] = string(b)
+			}
+			return nil
+		})
+		dir := mkrepo(t, "Dev", files)
+		named := filepath.Join(filepath.Dir(dir), "ex-"+n) // the repo's name = its directory name
+		if err := os.Rename(dir, named); err != nil {
+			t.Fatal(err)
+		}
+		dirs = append(dirs, named)
+	}
+	w := Build(analyzeAll(t, dirs...))
+	name := func(i int) string { return w.Repos[i].Name }
+	got := map[string]bool{}
+	for _, l := range w.Links {
+		switch l.Kind {
+		case "api":
+			for _, v := range l.Via {
+				got["api "+name(l.From)+"→"+name(l.To)+" "+v.Label] = true
+			}
+		case "message":
+			for _, v := range l.Via {
+				got["message "+name(l.From)+"→"+name(l.To)+" "+v.Label] = true
+			}
+		}
+	}
+	for _, want := range []string{
+		"api ex-web→ex-gateway /api/shop/orders",
+		"api ex-web→ex-gateway /api/shop/profile",
+		"api ex-gateway→ex-orders GET /internal/orders",
+		"api ex-gateway→ex-users GET /internal/users/me",
+		"api ex-payments→ex-users GET /internal/users/me",
+		"message ex-orders→ex-payments orders.created",
+		"message ex-payments→ex-orders payments.completed",
+		"message ex-payments→ex-notifications payments.completed",
+	} {
+		if !got[want] {
+			t.Errorf("missing highway %q", want)
+		}
+	}
+	if t.Failed() {
+		t.Logf("found: %v", got)
+	}
+}
