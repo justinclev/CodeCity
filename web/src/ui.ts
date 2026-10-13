@@ -726,8 +726,8 @@ export function linkToggles() {
 
 function autosize() {
   const t = $<HTMLTextAreaElement>('source');
-  const n = Math.min(8, Math.max(1, t.value.split('\n').length));
-  t.rows = n;
+  t.style.height = 'auto'; // grow with the content (wrapped lines included), up to 70% of the window
+  t.style.height = Math.min(t.scrollHeight + 2, Math.round(window.innerHeight * 0.7)) + 'px';
 }
 
 export function bindControls(h: Controls) {
@@ -741,6 +741,8 @@ export function bindControls(h: Controls) {
   $<HTMLInputElement>('search').onkeydown = e => { if (e.key === 'Enter') h.onSearchEnter(); if (e.key === 'Escape') (e.target as HTMLInputElement).blur(); };
   const src = $<HTMLTextAreaElement>('source');
   src.addEventListener('input', autosize);
+  window.addEventListener('resize', autosize);
+  requestAnimationFrame(autosize);
   src.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $<HTMLFormElement>('repoform').requestSubmit(); };
   $('showdeps').onchange = () => h.onLinksToggle();
   $<HTMLSelectElement>('buildings').onchange = e => h.onBuildings((e.target as HTMLSelectElement).value === 'classic');

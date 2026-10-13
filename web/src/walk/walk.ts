@@ -10,6 +10,7 @@ import type { TourStop } from '../tour';
 import { CityMap, type MapLabel, type MapMarker } from './map';
 import { Game, type GameWorld, type Reward } from './game';
 import { InfoCard, QuestLog, QuizBox, Rewards, SearchBox, StatusBar, TourCard, type CardData, type SearchHit } from './panels';
+import { Music } from './music';
 import { Props, type Shard, type Terminal } from './props';
 
 /** A definition from the symbol index: [name, kind, path, start, end]. */
@@ -38,7 +39,7 @@ export interface WalkHost {
   searchFiles(q: string): number[];
 }
 
-const HELP = 'WASD move · Space jump (double-tap: fly) · Shift run / descend · double-tap W sprint · M map · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
+const HELP = 'WASD move · Space jump (double-tap: fly) · Shift run / descend · double-tap W sprint · M map · P music · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
 
 const keyDown = new Set<string>();
 
@@ -105,6 +106,7 @@ export class WalkMode {
   private tour: TourStop[] = [];
   private tourK = -1;
   private props: Props | null = null;
+  private music = new Music();
   private symList: Sym[] = [];
   private seeTimer = 0;
   private mapDirty = false;
@@ -121,6 +123,7 @@ export class WalkMode {
   start(at = -1) {
     if (this.active || !this.scene.loaded) return;
     this.active = true;
+    void this.music.start();
     (document.activeElement as HTMLElement | null)?.blur?.(); // keys belong to walk mode now
     document.body.classList.add('walking');
     const cam = this.scene.camera;
@@ -172,6 +175,7 @@ export class WalkMode {
   stop() {
     if (!this.active) return;
     this.active = false;
+    this.music.stop();
     document.body.classList.remove('walking');
     if (document.pointerLockElement) document.exitPointerLock();
     this.leaveInterior();
@@ -273,6 +277,7 @@ export class WalkMode {
     if (e.code === 'KeyV') { this.firstPerson = !this.firstPerson; return; }
     if (e.code === 'KeyE') { this.use(); return; }
     if (e.code === 'KeyM') { this.toggleMap(); return; }
+    if (e.code === 'KeyP') { this.music.toggle(); return; }
     if (e.code === 'KeyX') { void this.toggleExplode(); return; }
     if (e.code === 'KeyI') { this.toggleCard(); return; }
     if (e.code === 'KeyJ') { if (this.log.open) this.log.hide(); else { this.log.show(this.game!, () => this.resetGame()); this.freeMouse(); } return; }
@@ -329,7 +334,7 @@ export class WalkMode {
     this.miniLabel.textContent = 'M map';
     miniWrap.append(this.mini, this.miniLabel);
     miniWrap.onclick = () => this.toggleMap();
-    this.hud.append(cross, this.prompt, this.menu, this.toastEl, this.fx, exit, view, miniWrap, this.status.root, this.rewards.root,
+    this.hud.append(cross, this.prompt, this.menu, this.toastEl, this.fx, exit, view, this.music.button, miniWrap, this.status.root, this.rewards.root,
       this.card.root, this.tourCard.root, this.quizBox.root, this.log.root, this.search.root);
     document.body.append(this.hud);
   }
