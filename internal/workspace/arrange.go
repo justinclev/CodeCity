@@ -86,7 +86,7 @@ func arrange(cities []*city.City, names []string, links []city.Link) (offsets []
 	}
 	var pls []placed
 	for _, members := range regions {
-		pls = append(pls, layoutRegion(members, cities, names, out, adj, margin, less))
+		pls = append(pls, bestRegion(members, cities, names, out, adj, margin, less))
 	}
 	// biggest region first (by area), then by its first city's name
 	sort.SliceStable(pls, func(a, b int) bool {
@@ -155,11 +155,12 @@ func sortedIdx(n int, less func(a, b int) bool) []int {
 }
 
 // layoutRegion lays out one connected group of cities in north→south layers.
-func layoutRegion(members []int, cities []*city.City, names []string, out, adj [][]int, margin float64, less func(a, b int) bool) (r struct {
+func layoutRegion(members []int, cities []*city.City, names []string, out, adj [][]int, margin float64, less func(a, b int) bool, variant int) (r struct {
 	idx  []int
 	x, z []float64
 	w, d float64
 }) {
+	members = append([]int(nil), members...)
 	sort.SliceStable(members, func(a, b int) bool { return less(members[a], members[b]) })
 	in := map[int]bool{}
 	for _, m := range members {
@@ -261,6 +262,11 @@ func layoutRegion(members []int, cities []*city.City, names []string, out, adj [
 	// order each layer by the mean position of its neighbours in the neighbouring layers
 	pos := map[int]float64{}
 	for _, row := range rows {
+		if variant%2 == 1 {
+			for a, b := 0, len(row)-1; a < b; a, b = a+1, b-1 {
+				row[a], row[b] = row[b], row[a]
+			}
+		}
 		for k, c := range row {
 			pos[c] = float64(k)
 		}
@@ -270,7 +276,7 @@ func layoutRegion(members []int, cities []*city.City, names []string, out, adj [
 		for l := range rows {
 			order = append(order, l)
 		}
-		if sweep%2 == 1 {
+		if (sweep+variant/2)%2 == 1 {
 			for a, b := 0, len(order)-1; a < b; a, b = a+1, b-1 {
 				order[a], order[b] = order[b], order[a]
 			}
@@ -312,10 +318,10 @@ func layoutRegion(members []int, cities []*city.City, names []string, out, adj [
 		rowD, x := 0.0, 0.0
 		for _, c := range row {
 			cx[c] = x + cities[c].Bounds.W/2
-			x += cities[c].Bounds.W + margin
+			x += cities[c].Bounds.W + margin*2.2
 			rowD = math.Max(rowD, cities[c].Bounds.D)
 		}
-		shift := (x - margin) / 2
+		shift := (x - margin*2.2) / 2
 		for _, c := range row {
 			cx[c] -= shift
 			cz[c] = z + rowD/2
@@ -343,12 +349,12 @@ func layoutRegion(members []int, cities []*city.City, names []string, out, adj [
 				cx[c] = target[c]
 				if k > 0 {
 					p := row[k-1]
-					cx[c] = math.Max(cx[c], cx[p]+(cities[p].Bounds.W+cities[c].Bounds.W)/2+margin)
+					cx[c] = math.Max(cx[c], cx[p]+(cities[p].Bounds.W+cities[c].Bounds.W)/2+margin*2.2)
 				}
 			}
 			for k := len(row) - 2; k >= 0; k-- {
 				c, nx := row[k], row[k+1]
-				cx[c] = math.Min(cx[c], cx[nx]-(cities[nx].Bounds.W+cities[c].Bounds.W)/2-margin)
+				cx[c] = math.Min(cx[c], cx[nx]-(cities[nx].Bounds.W+cities[c].Bounds.W)/2-margin*2.2)
 			}
 		}
 	}
@@ -366,4 +372,164 @@ func layoutRegion(members []int, cities []*city.City, names []string, out, adj [
 	}
 	r.w, r.d = maxX-minX, maxZ-minZ
 	return r
+}
+
+type regionPlan = struct {
+	idx  []int
+	x, z []float64
+	w, d float64
+}
+
+// bestRegion tries a few deterministic variants of a region (flow north→south or west→east, two
+// orderings of each layer) and keeps the one whose roads cross least, are shortest and whose
+// outline is closest to square.
+func bestRegion(members []int, cities []*city.City, names []string, out, adj [][]int, margin float64, less func(a, b int) bool) regionPlan {
+	if len(members) == 1 {
+		return layoutRegion(members, cities, names, out, adj, margin, less, 0)
+	}
+	in := map[int]int{}
+	for k, m := range members {
+		in[m] = k
+	}
+	var best regionPlan
+	bestScore := math.Inf(1)
+	for variant := 0; variant < 4; variant++ {
+		for _, flip := range []bool{false, true} {
+			p := layoutRegion(members, cities, names, out, adj, margin, less, variant)
+			if flip { // west → east: swap the axes, then push apart whatever the swap made touch
+				p.x, p.z = p.z, p.x
+				separate(&p, cities, margin)
+			}
+			sc := scoreRegion(p, cities, out, in)
+			if sc < bestScore-1e-9 {
+				best, bestScore = p, sc
+			}
+		}
+	}
+	return best
+}
+
+// separate restores the margin between cities after the axes were swapped and refits the outline.
+func separate(p *regionPlan, cities []*city.City, margin float64) {
+	n := len(p.idx)
+	for pass := 0; pass < 200; pass++ {
+		moved := false
+		for a := 0; a < n; a++ {
+			for b := a + 1; b < n; b++ {
+				ca, cb := cities[p.idx[a]], cities[p.idx[b]]
+				ox := (ca.Bounds.W+cb.Bounds.W)/2 + margin - math.Abs((p.x[b]+cb.Bounds.W/2)-(p.x[a]+ca.Bounds.W/2))
+				oz := (ca.Bounds.D+cb.Bounds.D)/2 + margin - math.Abs((p.z[b]+cb.Bounds.D/2)-(p.z[a]+ca.Bounds.D/2))
+				if ox <= 0 || oz <= 0 {
+					continue
+				}
+				moved = true
+				if ox < oz {
+					s := 1.0
+					if p.x[b]+cb.Bounds.W/2 < p.x[a]+ca.Bounds.W/2 {
+						s = -1
+					}
+					p.x[a] -= s * ox / 2
+					p.x[b] += s * ox / 2
+				} else {
+					s := 1.0
+					if p.z[b]+cb.Bounds.D/2 < p.z[a]+ca.Bounds.D/2 {
+						s = -1
+					}
+					p.z[a] -= s * oz / 2
+					p.z[b] += s * oz / 2
+				}
+			}
+		}
+		if !moved {
+			break
+		}
+	}
+	minX, minZ, maxX, maxZ := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	for k, i := range p.idx {
+		minX, minZ = math.Min(minX, p.x[k]), math.Min(minZ, p.z[k])
+		maxX, maxZ = math.Max(maxX, p.x[k]+cities[i].Bounds.W), math.Max(maxZ, p.z[k]+cities[i].Bounds.D)
+	}
+	for k := range p.idx {
+		p.x[k] -= minX
+		p.z[k] -= minZ
+	}
+	p.w, p.d = maxX-minX, maxZ-minZ
+}
+
+// scoreRegion: lower is better. Roads are the straight lines between city centres.
+func scoreRegion(p regionPlan, cities []*city.City, out [][]int, in map[int]int) float64 {
+	type seg struct {
+		ax, az, bx, bz float64
+		a, b           int
+	}
+	var segs []seg
+	ctr := func(k int) (float64, float64) {
+		c := cities[p.idx[k]]
+		return p.x[k] + c.Bounds.W/2, p.z[k] + c.Bounds.D/2
+	}
+	length := 0.0
+	for _, i := range p.idx {
+		for _, j := range out[i] {
+			kb, ok := in[j]
+			if !ok {
+				continue
+			}
+			ka := in[i]
+			ax, az := ctr(ka)
+			bx, bz := ctr(kb)
+			segs = append(segs, seg{ax, az, bx, bz, ka, kb})
+			length += math.Hypot(bx-ax, bz-az)
+		}
+	}
+	cross := func(s, t seg) bool {
+		if s.a == t.a || s.a == t.b || s.b == t.a || s.b == t.b {
+			return false
+		}
+		o := func(px, pz, qx, qz, rx, rz float64) float64 { return (qx-px)*(rz-pz) - (qz-pz)*(rx-px) }
+		d1, d2 := o(s.ax, s.az, s.bx, s.bz, t.ax, t.az), o(s.ax, s.az, s.bx, s.bz, t.bx, t.bz)
+		d3, d4 := o(t.ax, t.az, t.bx, t.bz, s.ax, s.az), o(t.ax, t.az, t.bx, t.bz, s.bx, s.bz)
+		return d1*d2 < 0 && d3*d4 < 0
+	}
+	crossings, through := 0, 0
+	for a := range segs {
+		for b := a + 1; b < len(segs); b++ {
+			if cross(segs[a], segs[b]) {
+				crossings++
+			}
+		}
+		for k, i := range p.idx { // a road running through a city it does not connect
+			if k == segs[a].a || k == segs[a].b {
+				continue
+			}
+			c := cities[i]
+			if segCrossesRect(segs[a].ax, segs[a].az, segs[a].bx, segs[a].bz, p.x[k], p.z[k], c.Bounds.W, c.Bounds.D) {
+				through++
+			}
+		}
+	}
+	aspect := math.Abs(math.Log(math.Max(p.w, 1) / math.Max(p.d, 1)))
+	scale := math.Max(p.w, p.d)
+	return float64(crossings)*scale*3 + float64(through)*scale*2 + length + aspect*scale*0.5
+}
+
+func segCrossesRect(ax, az, bx, bz, x, z, w, d float64) bool {
+	t0, t1 := 0.0, 1.0
+	dx, dz := bx-ax, bz-az
+	for _, c := range [][4]float64{{ax, dx, x, x + w}, {az, dz, z, z + d}} {
+		if math.Abs(c[1]) < 1e-9 {
+			if c[0] < c[2] || c[0] > c[3] {
+				return false
+			}
+			continue
+		}
+		u, v := (c[2]-c[0])/c[1], (c[3]-c[0])/c[1]
+		if u > v {
+			u, v = v, u
+		}
+		t0, t1 = math.Max(t0, u), math.Min(t1, v)
+		if t0 > t1 {
+			return false
+		}
+	}
+	return true
 }
