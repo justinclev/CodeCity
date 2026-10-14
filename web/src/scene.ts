@@ -32,6 +32,8 @@ export interface Hotspot { index: number; score: number; commits: number; loc: n
 /** Knowledge risk buckets for the 'knowledge' color mode. */
 export const RISK = ['no history', '3+ authors', '2 authors', 'single author', 'owner inactive'] as const;
 export const RISK_COLORS = ['#596277', '#51cf66', '#ffd43b', '#ff922b', '#ff4d4f'];
+/** Pre-built THREE.Color objects for knowledge risk — avoids per-building allocation in buildBaseColors. */
+export const RISK_COLOR_OBJS = RISK_COLORS.map(c => new THREE.Color(c));
 export const INACTIVE_DAYS = 180;
 
 export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | { kind: 'link'; index: number } | { kind: 'gate'; index: number } | null;
@@ -192,11 +194,16 @@ export class CityScene {
   private tmp = new THREE.Object3D();
   private last = performance.now();
   private flowTime = 0;
-  // scratch colors — reused every frame to avoid GC pressure in the paint hot path
+  // scratch colors — reused to avoid GC pressure in paint hot paths
   private readonly _scratchColor  = new THREE.Color();
   private readonly _WHITE         = new THREE.Color(0xffffff);
   private readonly _COLOR_ADD     = new THREE.Color(0x4dff88);
   private readonly _COLOR_CHANGE  = new THREE.Color(0xffc233);
+  // compare-mode palette (pre-allocated; avoids per-building allocs during buildBaseColors)
+  private readonly _CMP_WARM      = new THREE.Color('#ffa94d');
+  private readonly _CMP_HOT       = new THREE.Color('#ff6b6b');
+  private readonly _CMP_COOL      = new THREE.Color('#4dabf7');
+  private readonly _CMP_NEW       = new THREE.Color('#40c057');
   private fly: { p0: THREE.Vector3; t0: THREE.Vector3; p1: THREE.Vector3; t1: THREE.Vector3; start: number; dur: number } | null = null;
 
   commit = 0;
@@ -1089,12 +1096,12 @@ export class CityScene {
         case 'language': c = languageColor(b.lang).clone(); break;
         case 'depth': c = depthColor(this.city.districts[b.district].depth, maxDepth); break;
         case 'owner': c = b.own ? authorColor(b.own[0]).clone() : new THREE.Color('#596277'); break;
-        case 'knowledge': c = new THREE.Color(RISK_COLORS[this.risk(i)]); break;
+        case 'knowledge': c = RISK_COLOR_OBJS[this.risk(i)].clone(); break;
         case 'compare': {
           const was = this.vals.loc[i * this.C + B], now2 = this.vals.loc[i * this.C + cur];
-          if (was < 0) c = new THREE.Color('#40c057'); // new since baseline
-          else if (now2 > was) c = new THREE.Color('#ffa94d').lerp(new THREE.Color('#ff6b6b'), Math.min(1, (now2 - was) / Math.max(20, was)));
-          else if (now2 < was) c = new THREE.Color('#4dabf7');
+          if (was < 0) c = this._CMP_NEW.clone(); // new since baseline
+          else if (now2 > was) c = this._CMP_WARM.clone().lerp(this._CMP_HOT, Math.min(1, (now2 - was) / Math.max(20, was)));
+          else if (now2 < was) c = this._CMP_COOL.clone();
           else c = new THREE.Color(this.theme.night ? '#3b4256' : '#aab2c0');
           break;
         }
