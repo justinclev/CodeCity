@@ -3,6 +3,8 @@ package flow
 import (
 	"path"
 	"strings"
+
+	"github.com/justinclev/codecity/internal/scan"
 )
 
 type pyFunc struct {
@@ -65,7 +67,7 @@ func (b *builder) analyzePython(files []File, res *resolver) {
 	}
 	// nodes
 	for _, p := range order {
-		test := isTestPath(p.path)
+		test := scan.IsTestPath(p.path)
 		for _, c := range p.classes {
 			c.node = b.node("py:"+p.path+":"+c.name, Node{Kind: KClass, Sub: "class", Name: c.name, Path: p.path, Start: c.line, End: c.end, Lang: "Python",
 				Exported: !strings.HasPrefix(c.name, "_"), Test: test})
@@ -112,7 +114,7 @@ func (b *builder) analyzePython(files []File, res *resolver) {
 	moduleNode := func(p *pyFile) *Node {
 		if p.module == nil {
 			p.module = b.node("py:"+p.path+":‹top level›", Node{Kind: KFunc, Sub: "module", Name: path.Base(p.path) + " (top level)", Path: p.path,
-				Start: 1, End: p.toks[len(p.toks)-1].line, Lang: "Python", Entry: "module", Test: isTestPath(p.path)})
+				Start: 1, End: p.toks[len(p.toks)-1].line, Lang: "Python", Entry: "module", Test: scan.IsTestPath(p.path)})
 		}
 		return p.module
 	}

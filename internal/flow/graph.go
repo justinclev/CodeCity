@@ -654,13 +654,6 @@ func firstSegments(p string, n int) string {
 	return "/" + strings.Join(parts, "/")
 }
 
-func isTestPath(p string) bool {
-	b := path.Base(p)
-	return strings.HasSuffix(b, "_test.go") || strings.Contains(b, ".test.") || strings.Contains(b, ".spec.") ||
-		strings.HasPrefix(b, "test_") || strings.HasSuffix(b, "_test.py") || strings.Contains("/"+p, "/__tests__/") ||
-		strings.Contains("/"+p, "/tests/") || strings.Contains("/"+p, "/test/")
-}
-
 // Build analyzes one repository's files and returns the graph.
 func Build(files []File, opt Options) *Graph {
 	return BuildAll([]Repo{{Prefix: opt.Prefix, Files: files}}, opt)

@@ -9,6 +9,7 @@ import (
 	"github.com/justinclev/codecity/internal/flow"
 	"github.com/justinclev/codecity/internal/messaging"
 	"github.com/justinclev/codecity/internal/netscan"
+	"github.com/justinclev/codecity/internal/scan"
 )
 
 // Facts for cross-repository highways: the HTTP routes a repository serves, the
@@ -20,7 +21,7 @@ var dbWrite = map[string]bool{"INSERT": true, "UPDATE": true, "DELETE": true, "R
 
 func linkFacts(f *city.Facts, byPath map[string]int, g *flow.Graph) {
 	for _, r := range g.Routes() {
-		if i, ok := byPath[r.Path]; ok && len(f.Serves) < maxLinkFacts && !testPath.MatchString(r.Path) {
+		if i, ok := byPath[r.Path]; ok && len(f.Serves) < maxLinkFacts && !scan.IsTestPath(r.Path) {
 			f.Serves = append(f.Serves, city.Served{Building: i, Method: r.Method, Route: r.Route})
 		}
 	}
@@ -36,7 +37,7 @@ func linkFacts(f *city.Facts, byPath map[string]int, g *flow.Graph) {
 		}
 		i, ok := byPath[from.Path]
 		table := strings.ToLower(strings.TrimPrefix(to.Name, "public."))
-		if !ok || testPath.MatchString(from.Path) || len(table) < 3 || strings.HasPrefix(table, "information_schema") || strings.HasPrefix(table, "pg_") || strings.ContainsAny(table, " ()") {
+		if !ok || scan.IsTestPath(from.Path) || len(table) < 3 || strings.HasPrefix(table, "information_schema") || strings.HasPrefix(table, "pg_") || strings.ContainsAny(table, " ()") {
 			continue
 		}
 		u := city.DBUse{Building: i, Table: table, Write: dbWrite[e.Label]}
@@ -48,7 +49,7 @@ func linkFacts(f *city.Facts, byPath map[string]int, g *flow.Graph) {
 	seen := map[city.Call]bool{}
 	for _, r := range g.Requests {
 		i, ok := byPath[r.Path]
-		if !ok || testPath.MatchString(r.Path) || len(f.Calls) >= maxLinkFacts {
+		if !ok || scan.IsTestPath(r.Path) || len(f.Calls) >= maxLinkFacts {
 			continue
 		}
 		c := city.Call{Building: i, Method: r.Method, URL: r.URL}
@@ -128,7 +129,7 @@ func networkFacts(c *city.City, f *city.Facts, files []netFile) {
 	}
 	for _, nf := range files {
 		i, ok := byPath[nf.path]
-		if !ok || testPath.MatchString(nf.path) {
+		if !ok || scan.IsTestPath(nf.path) {
 			continue
 		}
 		res := netscan.Scan(nf.path, nf.content, env)

@@ -4,8 +4,15 @@ package scan
 import (
 	"bytes"
 	"path"
+	"regexp"
 	"strings"
 )
+
+// testPathRE matches test/spec file paths across the supported languages.
+var testPathRE = regexp.MustCompile(`(?:_test\.go|\.(?:test|spec)\.[cm]?[jt]sx?|(?:^|/)test_[^/]+\.py|_test\.py|_spec\.rb|Tests?\.(?:cs|java|kt))$|(?:^|/)(?:tests?|__tests__|spec)/`)
+
+// IsTestPath reports whether p looks like a test or spec file.
+func IsTestPath(p string) bool { return testPathRE.MatchString(p) }
 
 // Options controls filtering.
 type Options struct {

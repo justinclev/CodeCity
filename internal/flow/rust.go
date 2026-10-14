@@ -3,6 +3,8 @@ package flow
 import (
 	"path"
 	"strings"
+
+	"github.com/justinclev/codecity/internal/scan"
 )
 
 type rsFunc struct {
@@ -49,7 +51,7 @@ func (b *builder) analyzeRust(files []File, res *resolver) {
 		}
 		var stack []frame
 		var attrs [][]tok
-		test := isTestPath(f.Path)
+		test := scan.IsTestPath(f.Path)
 		for i := 0; i < n; i++ {
 			for len(stack) > 0 && i > stack[len(stack)-1].closeTok {
 				stack = stack[:len(stack)-1]
@@ -175,7 +177,7 @@ func (b *builder) analyzeRust(files []File, res *resolver) {
 	}
 	// nodes
 	for _, rf := range order {
-		test := isTestPath(rf.path)
+		test := scan.IsTestPath(rf.path)
 		for _, fn := range rf.funcs {
 			kind, parent, sub := KFunc, -1, ""
 			if fn.typ != "" {

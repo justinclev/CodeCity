@@ -8,6 +8,7 @@ import (
 	"github.com/justinclev/codecity/internal/city"
 	"github.com/justinclev/codecity/internal/flow"
 	"github.com/justinclev/codecity/internal/outline"
+	"github.com/justinclev/codecity/internal/scan"
 )
 
 // Architecture: every building's shape comes from its code, never from chance.
@@ -28,8 +29,6 @@ const (
 var dataLangs = map[string]bool{"JSON": true, "YAML": true, "TOML": true, "XML": true, "Config": true, "Protobuf": true, "Terraform": true}
 var docLangs = map[string]bool{"Markdown": true, "Text": true}
 
-var testPath = regexp.MustCompile(`(?:_test\.go|\.(?:test|spec)\.[cm]?[jt]sx?|(?:^|/)test_[^/]+\.py|_test\.py|_spec\.rb|Tests?\.(?:cs|java|kt))$|(?:^|/)(?:tests?|__tests__|spec)/`)
-
 var containerKinds = map[string]bool{"class": true, "struct": true, "interface": true, "trait": true, "impl": true,
 	"enum": true, "object": true, "module": true, "namespace": true, "record": true, "type": true}
 
@@ -45,7 +44,7 @@ func shapeOf(p, lang string, src []byte) *city.Shape {
 		s.Kind = city.ShapeDoc
 		docTiers(s, src)
 		return s
-	case testPath.MatchString(p):
+	case scan.IsTestPath(p):
 		s.Kind = city.ShapeTest
 	}
 	pieces := outline.Outline(lang, src)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/justinclev/codecity/internal/deps"
+	"github.com/justinclev/codecity/internal/scan"
 )
 
 // ---------------------------------------------------------------- import resolution
@@ -1001,7 +1002,7 @@ func (b *builder) analyzeScript(files []File, res *resolver) {
 	}
 	// nodes
 	for _, f := range order {
-		test := isTestPath(f.path)
+		test := scan.IsTestPath(f.path)
 		for _, c := range f.classes {
 			sub := "class"
 			if c.iface {
@@ -1186,7 +1187,7 @@ func (w *jsWorld) typeOf(f *jsFile, fn *jsFunc, name string) *jsClass {
 func (w *jsWorld) moduleNode(f *jsFile) *Node {
 	if f.module == nil {
 		f.module = w.b.node("js:"+f.path+":‹top level›", Node{Kind: KFunc, Sub: "module", Name: path.Base(f.path) + " (top level)", Path: f.path,
-			Start: 1, End: f.toks[len(f.toks)-1].line, Lang: f.lang, Entry: "module", Test: isTestPath(f.path)})
+			Start: 1, End: f.toks[len(f.toks)-1].line, Lang: f.lang, Entry: "module", Test: scan.IsTestPath(f.path)})
 	}
 	return f.module
 }
