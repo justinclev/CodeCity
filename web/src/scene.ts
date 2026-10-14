@@ -1239,9 +1239,16 @@ export class CityScene {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
-    const objects: THREE.Object3D[] = [...this.solidMeshes(false), this.districtMesh, ...this.linkMeshes.map(l => l.pick), ...this.gates.meshes];
+    const lmMeshes = this.landmarks.meshes as THREE.Object3D[];
+    const objects: THREE.Object3D[] = [...lmMeshes, ...this.solidMeshes(false), this.districtMesh, ...this.linkMeshes.map(l => l.pick), ...this.gates.meshes];
     if (this.exploded) objects.unshift(this.exploded.mesh);
     for (const hit of this.raycaster.intersectObjects(objects, false)) { // nearest first
+      // Landmark mesh hit (power plant, airport, plane, etc.)
+      if (lmMeshes.includes(hit.object)) {
+        const bi = this.landmarks.buildingIndexOf(hit.object as THREE.Mesh);
+        if (bi >= 0 && this.exists(bi)) return { kind: 'building', index: bi };
+        continue;
+      }
       if (this.exploded && hit.object === this.exploded.mesh && hit.instanceId !== undefined) return { kind: 'floor', index: hit.instanceId };
       const lm = this.linkMeshes.find(l => l.pick === hit.object);
       if (lm) return { kind: 'link', index: lm.view.index };
@@ -1368,7 +1375,10 @@ export class CityScene {
     const b = this.city.buildings[i];
     const h = this.target[i];
     const t = new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + h * 0.5, b.z + b.d / 2);
-    const dist = Math.max(h * 2.2, Math.max(b.w, b.d) * 5, this.size() * 0.06);
+    // Distance based solely on the building's own dimensions so small buildings
+    // don't get the camera yanked to city-overview distance (removed size()*0.06).
+    const footprint = Math.max(b.w, b.d);
+    const dist = Math.max(h * 2.2, footprint * 5);
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
     if (dir.y < 0.35) { dir.y = 0.35; dir.normalize(); }
     this.flyTo(t.clone().addScaledVector(dir, dist), t);

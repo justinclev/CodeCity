@@ -17,6 +17,20 @@ export class Landmarks {
   /** World-space positions of all airport planes after the last build(). */
   readonly planeSpots: THREE.Vector3[] = [];
 
+  /**
+   * All Mesh objects inside the landmark groups, for raycasting.
+   * Populated by build(); cleared by clear().
+   */
+  readonly meshes: THREE.Mesh[] = [];
+
+  /** Maps a Mesh (from meshes[]) back to its city building index. */
+  private meshToBuilding = new Map<THREE.Mesh, number>();
+
+  /** Returns the city building index for a landmark mesh hit, or -1. */
+  buildingIndexOf(mesh: THREE.Mesh): number {
+    return this.meshToBuilding.get(mesh) ?? -1;
+  }
+
   /** Rebuild every landmark from the city's footprints and base heights. */
   build(city: City, baseY: number[]) {
     this.clear();
@@ -33,7 +47,18 @@ export class Landmarks {
         // The plane sits at u*0.066 height and offset from centre on the apron.
         this.planeSpots.push(new THREE.Vector3(cx, y + u * 0.066, cz));
       }
-      if (g) { g.position.set(cx, y, cz); this.group.add(g); }
+      if (g) {
+        g.position.set(cx, y, cz);
+        this.group.add(g);
+        // Register all meshes inside this landmark group for picking.
+        g.traverse(obj => {
+          if ((obj as THREE.Mesh).isMesh) {
+            const m = obj as THREE.Mesh;
+            this.meshes.push(m);
+            this.meshToBuilding.set(m, i);
+          }
+        });
+      }
     });
   }
 
@@ -520,6 +545,8 @@ export class Landmarks {
     this.group.clear();
     for (const d of this.disposables) d.dispose();
     this.disposables = [];
+    this.meshes.length = 0;
+    this.meshToBuilding.clear();
   }
 
   dispose() { this.clear(); }
