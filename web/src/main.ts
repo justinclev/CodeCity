@@ -9,6 +9,7 @@ import type { GameWorld } from './walk/game';
 import { buildTour, isTest, KIND_LABEL, type TourStop } from './tour';
 import { bindBranchRows, showSwitcher, type LoadedRepo } from './branches';
 import { FlowView } from './flow/view';
+import { buildGates, layoutGates, traceRoute, type EdgeGate, type RouteStep } from './gates';
 import type { FlowGraph } from './flow/model';
 import { compute, markdown, type Insights } from './insights';
 import * as ui from './ui';
@@ -40,28 +41,48 @@ function repoCommitAt(k: number, c: number): string | null {
   return null;
 }
 
+function linkShown(kind: string, t: ReturnType<typeof ui.linkToggles>): boolean {
+  return kind === 'dependency' ? t.deps : kind === 'people' ? t.people : kind === 'api' ? t.api : kind === 'message' ? t.message : t.data;
+}
+const LINK_CHECK: Record<string, string> = { dependency: 'showdeps', people: 'showpeople', api: 'showapi', message: 'showmsg', data: 'showdb' };
+
+function linkLabel(l: NonNullable<City['links']>[number]): string {
+  switch (l.kind) {
+    case 'dependency': return `${repoName(l.from)} → ${repoName(l.to)}`;
+    case 'api': return `API · ${l.via?.length ?? 0} ${(l.via?.length ?? 0) === 1 ? 'call' : 'calls'}`;
+    case 'message': return `${(l.brokers ?? ['messages']).join('/')} · ${new Set((l.via ?? []).map(v => v.l)).size} topics`;
+    case 'data': return `database · ${new Set((l.via ?? []).map(v => v.l)).size} ${new Set((l.via ?? []).map(v => v.l)).size === 1 ? 'table' : 'tables'}`;
+    default: return `${l.peopleCount ?? 0} shared`;
+  }
+}
+
+function linkTitle(l: NonNullable<City['links']>[number]): string {
+  return l.kind === 'people' ? `${repoName(l.from)} ↔ ${repoName(l.to)}` : `${repoName(l.from)} → ${repoName(l.to)}`;
+}
+
 function linkViews(): LinkView[] {
   if (!city?.links?.length) return [];
   const t = ui.linkToggles();
   const out: LinkView[] = [];
   city.links.forEach((l, index) => {
-    if (l.kind === 'dependency' && !t.deps) return;
-    if (l.kind === 'people' && !t.people) return;
+    if (!linkShown(l.kind, t)) return;
     const files = l.files?.length ?? 0;
     out.push({ index, from: l.from, to: l.to, kind: l.kind,
       strength: l.kind === 'dependency' ? Math.min(1, Math.log1p(files + 1) / Math.log(60)) : 0,
-      label: l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${l.peopleCount ?? 0} shared` });
+      label: linkLabel(l) });
   });
   return out;
 }
 
+const ORDER = ['dependency', 'api', 'message', 'data', 'people'];
+
 function linkRows(): ui.LinkRow[] {
   return (city?.links ?? []).map((l, index) => ({
     index, kind: l.kind,
-    title: l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${repoName(l.from)} ↔ ${repoName(l.to)}`,
-    summary: l.kind === 'dependency' ? (l.evidence ?? []).slice(0, 2).join('; ') : `${l.peopleCount ?? 0} shared contributors`,
+    title: linkTitle(l),
+    summary: l.kind === 'people' ? `${l.peopleCount ?? 0} shared contributors` : (l.evidence ?? []).slice(0, 2).join('; '),
     evidence: l.evidence ?? [],
-  })).sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'dependency' ? -1 : 1));
+  })).sort((a, b) => ORDER.indexOf(a.kind) - ORDER.indexOf(b.kind));
 }
 
 function selectLink(index: number) {
@@ -76,14 +97,15 @@ function selectLink(index: number) {
   scene.highlightLink(index);
   // make sure the link is drawn even if its kind is toggled off
   const t = ui.linkToggles();
-  if ((l.kind === 'people' && !t.people) || (l.kind === 'dependency' && !t.deps)) {
-    (document.getElementById(l.kind === 'people' ? 'showpeople' : 'showdeps') as HTMLInputElement).checked = true;
+  if (!linkShown(l.kind, t)) {
+    (document.getElementById(LINK_CHECK[l.kind]) as HTMLInputElement).checked = true;
     scene.setLinks(linkViews());
   }
   ui.showLink({
     from: repoName(l.from), to: repoName(l.to), kind: l.kind, evidence: l.evidence ?? [],
     files: (l.files ?? []).map(([b, d]) => ({ index: b, path: city!.buildings[b].path, target: city!.districts[d].path })),
     people: l.people ?? [], peopleCount: l.peopleCount ?? 0,
+    via: (l.via ?? []).map(v => ({ from: v.a, to: v.b, label: v.l, fromPath: city!.buildings[v.a].path, toPath: city!.buildings[v.b].path })), brokers: l.brokers ?? [],
   }, infoHandlers);
 }
 
@@ -132,6 +154,8 @@ async function loadPieces(i: number) {
   const path = city.buildings[i].path, commit = scene.commit;
   file = null; fileError = ''; activePiece = -1; floors = [];
   scene.setSkin(-1, '');
+  if (city.buildings[i].docs?.length) { refreshSelection(); return; } // a library: documents listed, no single source
+
   if (!apiAvailable) { fileError = 'Pieces and source need the server (codecity serve).'; return; }
   const hash = repoCommitAt(repoOf(i), commit);
   if (!hash) { fileError = 'This file does not exist at this commit.'; return; }
@@ -266,6 +290,8 @@ function show(c: City) {
   selected = selectedDistrict = -1;
   tourAt = -1; tourBar(); historyCache.clear();
   flowView.reset();
+  flowGraphP = null;
+  clearGates();
   ui.setMessage('');
   ui.setPathResolver(i => c.buildings[i].path);
   ui.setChurnAvailable(c.churn === true);
@@ -285,6 +311,7 @@ function show(c: City) {
   applyHash();
   onCommitChanged();
   closeInfo();
+  if (apiAvailable && store.get<boolean>('gates') !== false) void setGatesOn(true); // doors are on unless the person turned them off
   if (wanted) {
     const i = c.buildings.findIndex(b => b.path === wanted);
     if (i >= 0 && scene.exists(i)) setTimeout(() => { if (city === c) selectBuilding(i, true); }, 2700); // after the intro
@@ -308,7 +335,7 @@ async function loadFile(f: File) {
 }
 
 // ---------------------------------------------------------------- analysis jobs
-interface JobInfo { id: number; state: string; stage: string; done: number; total: number; error?: string; source: string; request: { source?: string; sources?: string[]; ref: string; maxCommits: number; noChurn?: boolean } }
+interface JobInfo { id: number; state: string; stage: string; done: number; total: number; error?: string; source: string; request: { source?: string; sources?: string[]; ref: string; maxCommits: number; noChurn?: boolean; split?: boolean } }
 interface Status { hasCity: boolean; allowLocal: boolean; maxCommitsLimit: number; job?: JobInfo }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -349,13 +376,14 @@ async function watchJob() {
 }
 
 async function submit(source: string, ref: string, commits: number, churn: boolean) {
-  store.set('form', { source, ref, commits, churn });
+  const split = (document.getElementById('split') as HTMLInputElement).checked;
+  store.set('form', { source: source.replace(/https:\/\/[^@\/\s]+@github\.com/g, 'https://github.com'), ref, commits, churn, split });
   const sources = source.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   ui.setJobStatus('starting…');
   ui.setProgress({ done: 0, total: 0 });
   try {
     await api('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sources, ref, maxCommits: commits, noChurn: !churn }) });
+      body: JSON.stringify({ sources, ref, maxCommits: commits, noChurn: !churn, split }) });
     void watchJob();
   } catch (e) {
     ui.setProgress(null);
@@ -461,6 +489,23 @@ function links(path: string): { label: string; href: string }[] {
   return out;
 }
 
+async function openDoc(path: string, name: string) {
+  if (!city || selected < 0) return;
+  const hash = repoCommitAt(repoOf(selected), scene.commit);
+  if (!hash) return;
+  try {
+    const f = await fetchFile(path, hash);
+    if (selected < 0) return;
+    file = { ...f, path };
+    activePiece = 0; codeOpen = true;
+    showCode(file, 0, codeHandlers);
+    refreshSelection();
+  } catch (e) {
+    fileError = `Could not open ${name}: ${(e as Error).message}`;
+    refreshSelection();
+  }
+}
+
 const infoHandlers: ui.InfoHandlers = {
   onDistrict: d => selectDistrict(d, true),
   onPiece: k => openPiece(k),
@@ -468,8 +513,98 @@ const infoHandlers: ui.InfoHandlers = {
   onCode: () => openPiece(activePiece >= 0 ? activePiece : (floors[0]?.piece ?? 0)),
   onClose: () => closeInfo(),
   onPick: i => selectBuilding(i, true),
+  onGateFlow: id => openFlowAt(id),
+  onGate: k => selectGate(k),
+  onRoute: (k, d) => startRoute(k, d),
+  onRouteStep: k => { void goStep(k); },
+  onRouteStop: () => stopRoute(),
+  onGateCode: line => openCodeAt(line),
+  onDoc: (path, name) => void openDoc(path, name),
   onZoomDistrict: () => { if (selectedDistrict >= 0) scene.focusDistrict(selectedDistrict); },
 };
+
+/** A gate on the edge of a city: highlight it, draw its streets to the files behind it and list them. */
+function selectGate(k: number) {
+  const c = city, e = edgeGates[k];
+  if (!c || !e) return;
+  if (codeOpen) closeCode();
+  selected = -1; selectedDistrict = -1; selectedGate = k;
+  scene.setSelected(-1);
+  scene.setSelectedDistrict(-1);
+  scene.highlightGate(k);
+  ui.showBuilding(null, infoHandlers);
+  scene.showGateStreets([]);
+  // the arch flares first; then the streets light up and the routes popup opens
+  setTimeout(() => {
+    if (selectedGate !== k || city !== c) return;
+    scene.showGateStreets(e.gates.filter(g => scene.exists(g.building)).map(g => ({ gate: k, building: g.building })));
+    ui.showGate({
+      label: e.label, dir: e.dir, kind: e.kind, id: e.id, index: k,
+      repo: c.repos?.[e.repo]?.name ?? c.repo?.name ?? '',
+      leads: e.gates.map(g => ({ building: g.building, path: c.buildings[g.building].path, line: g.line, code: g.code })),
+    }, infoHandlers);
+    const first = e.gates.find(g => scene.exists(g.building));
+    if (first) scene.focus(first.building);
+  }, 700);
+}
+
+/** Start a route at an entrance: the handler, what it calls, each way out. */
+function startRoute(k: number, doorAt = 0) {
+  const c = city, e = edgeGates[k];
+  if (!c || !e || !gateGraph) return;
+  const door = e.gates[doorAt] ?? e.gates[0];
+  const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
+  const steps = traceRoute(gateGraph, door, p => pathIndex.get(p) ?? -1);
+  if (steps.length < 2) { ui.setGateCount('no route found'); return; }
+  const legs: NonNullable<typeof route>['legs'] = [];
+  let here: number | undefined;
+  steps.forEach(s => {
+    if (s.kind === 'enter') { legs.push({ from: { gate: k }, to: { building: s.building } }); here = s.building; return; }
+    if (s.kind === 'code') { legs.push({ from: { building: here ?? s.building }, to: { building: s.building } }); here = s.building; return; }
+    const out = edgeGates.findIndex(x => x.dir === 'out' && x.id === s.node && x.gates.some(g => g.building === s.building));
+    legs.push({ from: { building: here ?? s.building }, to: out >= 0 ? { gate: out } : { building: s.building } });
+  });
+  route = { gate: k, title: e.label, steps, legs, at: -1 };
+  stopPlayback();
+  void goStep(0);
+}
+
+async function goStep(k: number) {
+  const c = city, r = route;
+  if (!c || !r || k < 0 || k >= r.steps.length) return;
+  r.at = k;
+  const s = r.steps[k];
+  scene.showTrail(r.legs, k);
+  ui.showRoute({ title: r.title, at: k, steps: r.steps.map(x => ({ kind: x.kind, label: x.label, detail: x.detail, path: c.buildings[x.building].path, line: x.line })) }, infoHandlers);
+  const b = s.building;
+  if (selected !== b) {
+    if (scene.explodedBuilding >= 0) scene.collapse();
+    if (codeOpen) closeCode();
+    selected = b; selectedDistrict = -1;
+    scene.setSelected(b);
+    scene.setSelectedDistrict(-1);
+    await loadPieces(b);
+  }
+  if (route !== r || r.at !== k) return; // moved on
+  scene.focus(b);
+  if (file && selected === b) openCodeAt(s.line);
+}
+
+function stopRoute() {
+  if (!route) return;
+  route = null;
+  closeInfo();
+}
+
+function openCodeAt(line: number | undefined) {
+  if (!file) return;
+  let k = floors[0]?.piece ?? 0;
+  if (line !== undefined) {
+    const inside = file.pieces.map((p, n) => ({ p, n })).filter(x => x.p.start <= line && line <= x.p.end).sort((a, b) => (a.p.end - a.p.start) - (b.p.end - b.p.start))[0];
+    if (inside) k = inside.n;
+  }
+  openPiece(k);
+}
 
 function buildingInfo(i: number): ui.BuildingInfo {
   const c = city!;
@@ -486,8 +621,11 @@ function buildingInfo(i: number): ui.BuildingInfo {
     owner: b.own && author ? { name: author.name, share: Math.round((b.own[1] / Math.max(1, scene.totalCommits(i))) * 100),
       authors: b.own[2], risk: scene.risk(i), lastActive: author.last } : undefined,
     coupled: (b.cpl ?? []).filter(([j]) => scene.exists(j)).map(([j, shared, degree]) => ({ index: j, path: c.buildings[j].path, shared, degree })),
+    gates: gatesOn ? (gateByBuilding.get(i) ?? []).flatMap(k => edgeGates[k].gates.filter(g => g.building === i).map(g => ({ id: g.id, dir: g.dir, kind: g.kind, label: g.label, line: g.line, edge: k }))) : undefined,
     links: links(b.path),
     pieces: piecesState(),
+    landmark: b.lm,
+    docs: b.docs?.map(df => ({ name: df.name, path: df.path ?? '', lang: df.lang })),
     looks: scene.whyLooks(i),
     deps: {
       imports: (b.imp ?? []).filter(j => scene.exists(j)).map(j => ({ index: j, path: c.buildings[j].path })),
@@ -512,6 +650,8 @@ function selectBuilding(i: number, fly: boolean) {
   selectedDistrict = -1;
   scene.setSelectedDistrict(-1);
   scene.setSelected(i);
+  selectedGate = -1; scene.highlightGate(-1);
+  scene.showGateStreets(gatesOn ? (gateByBuilding.get(i) ?? []).map(k => ({ gate: k, building: i })) : []);
   ui.showBuilding(buildingInfo(i), infoHandlers);
   if (fly) scene.focus(i);
   writeHash();
@@ -551,6 +691,7 @@ function selectDistrict(d: number, fly: boolean) {
 }
 
 function closeInfo() {
+  route = null;
   selectedLink = -1;
   scene.highlightLink(-1);
   if (scene.explodedBuilding >= 0) scene.collapse();
@@ -560,12 +701,14 @@ function closeInfo() {
   selected = selectedDistrict = -1;
   scene.setSelected(-1);
   scene.setSelectedDistrict(-1);
+  if (selectedGate >= 0) { selectedGate = -1; scene.highlightGate(-1); }
+  scene.showGateStreets([]);
   ui.showBuilding(null, infoHandlers);
   writeHash();
 }
 
 function refreshSelection() {
-  if (!city) return;
+  if (!city || route) return;
   if (selected >= 0) {
     if (scene.exists(selected)) ui.showBuilding(buildingInfo(selected), infoHandlers);
     else closeInfo();
@@ -688,6 +831,7 @@ ui.bindControls({
   onLinksToggle: () => { scene.setLinks(linkViews()); },
   onBuildings: setBuildings,
   onCodeLinks: m => { scene.codeLinkMode = m; store.set('codelinks.' + scene.theme.name, m); scene.refreshCodeLinks(); },
+  onGates: on => { store.set('gates', on); void setGatesOn(on); },
   onCopyReport: () => {
     if (!city || !insights) return;
     const md = markdown(city, scene, insights, windowLabel() || 'all history');
@@ -701,6 +845,63 @@ if (store.get<boolean>('classic')) { scene.setClassic(true); ui.setBuildingsMode
 const sourceBox = document.getElementById('source') as HTMLTextAreaElement;
 const renderBranches = bindBranchRows(sourceBox, document.getElementById('branches')!, () => apiAvailable, src => loadedRepos().find(r => r.source === src)?.name);
 const repoBtn = document.getElementById('repo') as HTMLButtonElement;
+
+// ---------------------------------------------------------------- GitHub: list a user's repositories and add the chosen ones
+interface GHRepo { fullName: string; private: boolean; url: string; pushed: string; language: string; archived: boolean }
+function setupGitHub() {
+  const g = (id: string) => document.getElementById(id) as HTMLElement;
+  const reposEl = g('ghrepos'), status = g('ghstatus'), tools = g('ghtools');
+  const userIn = g('ghuser') as HTMLInputElement, tokenIn = g('ghtoken') as HTMLInputElement, filterIn = g('ghfilter') as HTMLInputElement;
+  if (!reposEl) return;
+  let repos: GHRepo[] = [];
+  const boxes = () => Array.from(reposEl.querySelectorAll('input[type=checkbox]')) as HTMLInputElement[];
+  const render = () => {
+    const q = (filterIn.value || '').toLowerCase();
+    reposEl.replaceChildren();
+    for (const r of repos) {
+      if (q && !r.fullName.toLowerCase().includes(q)) continue;
+      const row = document.createElement('label'); row.className = 'ghrow';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.dataset.full = r.fullName; cb.dataset.priv = String(r.private);
+      const nm = document.createElement('span'); nm.className = 'ghnm'; nm.textContent = r.fullName;
+      const meta = document.createElement('span'); meta.className = 'ghmeta';
+      meta.textContent = [r.private ? '🔒' : '', r.language, r.pushed ? r.pushed.slice(0, 10) : ''].filter(Boolean).join(' · ');
+      row.append(cb, nm, meta); reposEl.append(row);
+    }
+  };
+  (g('ghlist') as HTMLButtonElement).onclick = async () => {
+    const user = userIn.value.trim(), token = tokenIn.value.trim();
+    if (!user && !token) { status.textContent = 'Enter a username (public repos) or a token (your repos).'; return; }
+    status.textContent = 'Loading…'; tools.hidden = true; reposEl.replaceChildren();
+    try {
+      const r = await api<{ repos: GHRepo[] }>('/api/github/repos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user, token }) });
+      repos = r.repos || [];
+      status.textContent = repos.length ? `${repos.length} repositories · tick some, then Add selected` : 'No repositories found.';
+      tools.hidden = repos.length === 0; render();
+    } catch (e) { status.textContent = (e as Error).message; }
+  };
+  filterIn.oninput = render;
+  (g('ghall') as HTMLButtonElement).onclick = () => boxes().forEach(c => (c.checked = true));
+  (g('ghnone') as HTMLButtonElement).onclick = () => boxes().forEach(c => (c.checked = false));
+  (g('ghadd') as HTMLButtonElement).onclick = () => {
+    const token = tokenIn.value.trim();
+    const have = new Set(sourceBox.value.split('\n').map(l => l.trim().replace(/https:\/\/[^@\/\s]+@/, 'https://')));
+    const add: string[] = [];
+    for (const c of boxes()) {
+      if (!c.checked) continue;
+      const full = c.dataset.full!, priv = c.dataset.priv === 'true';
+      // private repos need auth to clone: embed the token (it is redacted before the form is saved)
+      const url = priv && token ? `https://${token}@github.com/${full}.git` : `https://github.com/${full}`;
+      if (!have.has(`https://github.com/${full}`) && !have.has(url)) add.push(url);
+    }
+    if (add.length) {
+      const cur = sourceBox.value.replace(/\s+$/, '');
+      sourceBox.value = (cur ? cur + '\n' : '') + add.join('\n');
+      sourceBox.dispatchEvent(new Event('input'));
+    }
+    status.textContent = add.length ? `Added ${add.length}. Private repos include your token (not saved to disk).` : 'Nothing new to add.';
+  };
+}
+setupGitHub();
 
 function loadedRepos(): LoadedRepo[] {
   if (!city) return [];
@@ -790,8 +991,13 @@ canvas.addEventListener('pointermove', e => {
     if (hit?.kind === 'link') {
       const l = city.links![hit.index];
       scene.setHover(-1);
-      ui.showTip([l.kind === 'dependency' ? `${repoName(l.from)} → ${repoName(l.to)}` : `${repoName(l.from)} ↔ ${repoName(l.to)}`,
+      ui.showTip([linkTitle(l),
         (l.evidence ?? []).slice(0, 2).join(' · ') + ' · click for details'], p.x, p.y);
+      canvas.style.cursor = 'pointer';
+    } else if (hit?.kind === 'gate') {
+      const e = edgeGates[hit.index];
+      scene.setHover(-1);
+      ui.showTip([`${e.dir === 'in' ? 'Entrance' : 'Exit'} · ${e.label}`, `${e.gates.length} ${e.gates.length === 1 ? 'file' : 'files'} behind it · click to follow the street`], p.x, p.y);
       canvas.style.cursor = 'pointer';
     } else if (hit?.kind === 'floor') {
       const f = scene.floorAt(hit.index)!;
@@ -803,6 +1009,8 @@ canvas.addEventListener('pointermove', e => {
       scene.setHover(i);
       const extra: string[] = [`${b.lang}`, `${ui.fmt(v.loc)} LOC`, `complexity ${ui.fmt(v.complexity)}`];
       if (city.churn) extra.push(`${scene.churnAt(i).commits} commits`);
+      const gk = gatesOn ? (gateByBuilding.get(i) ?? []).flatMap(k => edgeGates[k].gates.filter(g => g.building === i)) : [];
+      if (gk.length) extra.push(`${gk.filter(g => g.dir === 'in').length} in · ${gk.filter(g => g.dir === 'out').length} out`);
       ui.showTip([b.path, extra.join(' · ')], p.x, p.y);
       canvas.style.cursor = 'pointer';
     } else {
@@ -824,9 +1032,10 @@ canvas.addEventListener('pointerup', e => {
   if (moved || e.button !== 0) return; // orbit / pan drag
   const hit = scene.pick(e.clientX, e.clientY);
   if (hit?.kind === 'link') selectLink(hit.index);
+  else if (hit?.kind === 'gate') selectGate(hit.index);
   else if (hit?.kind === 'floor') openPiece(scene.floorAt(hit.index)!.piece);
-  else if (hit?.kind === 'building') selectBuilding(hit.index, false);
-  else if (hit?.kind === 'district') selectDistrict(hit.index, false);
+  else if (hit?.kind === 'building') selectBuilding(hit.index, true);
+  else if (hit?.kind === 'district') selectDistrict(hit.index, true);
   else closeInfo();
 });
 canvas.addEventListener('dblclick', e => {
@@ -848,8 +1057,8 @@ addEventListener('drop', e => {
 
 // ---------------------------------------------------------------- startup
 async function start() {
-  const saved = store.get<{ source: string; ref: string; commits: number; churn?: boolean }>('form');
-  if (saved) ui.setForm(saved.source, saved.ref, saved.commits, saved.churn ?? true);
+  const saved = store.get<{ source: string; ref: string; commits: number; churn?: boolean; split?: boolean }>('form');
+  if (saved) ui.setForm(saved.source, saved.ref, saved.commits, saved.churn ?? true, saved.split ?? false);
 
   const src = new URLSearchParams(location.search).get('src');
   if (src) {
@@ -866,7 +1075,7 @@ async function start() {
   }
   if (st.job?.request && !saved) {
     const r = st.job.request;
-    ui.setForm((r.sources?.length ? r.sources : [r.source ?? '']).join('\n'), r.ref, r.maxCommits, !r.noChurn);
+    ui.setForm((r.sources?.length ? r.sources : [r.source ?? '']).join('\n'), r.ref, r.maxCommits, !r.noChurn, r.split ?? false);
   }
   renderBranches();
   if (st.job?.state === 'running') { void watchJob(); return; }
@@ -901,6 +1110,31 @@ const walk = new WalkMode(scene, {
     const c = city!;
     const hash = repoCommitAt(repoOf(i), scene.commit);
     if (!hash) throw new Error('file does not exist at this commit');
+    const lib = c.buildings[i].docs;
+    if (lib?.length) { // a landmark: one floor listing its items (documents / dependencies / locales)
+      const b = c.buildings[i];
+      const LM: Record<string, [string, string]> = { library: ['Library', 'documents'], plant: ['Power plant', 'dependencies'], port: ['Airport', 'translations'] };
+      const [lmTitle, lmWord] = LM[b.lm ?? 'library'] ?? LM.library;
+      const open = async (path: string) => {
+        try { const fd = await fetchFile(path, hash); file = { ...fd, path }; activePiece = 0; codeOpen = true; showCode(file, 0, codeHandlers); }
+        catch (e) { ui.setJobStatus(`Could not open ${path}: ${(e as Error).message}`, true); }
+      };
+      const lobby: PanelRow[] = [
+        { text: b.path, color: '#bff8ff', size: 30 },
+        { text: `${lmTitle} · ${lib.length} ${lmWord}${lib[0].path ? ' (click to open)' : ''}`, color: '#ffe08a', size: 28 },
+        { text: '' },
+        ...lib.map(df => ({ text: df.name, hint: df.lang, color: '#8fd9a8', size: 28, action: df.path ? () => void open(df.path) : undefined })),
+      ];
+      const floor: InteriorFloor = { name: lmWord, kind: 'library', start: 1, end: Math.max(1, lib.length), loc: scene.valuesAt(i).loc, complexity: 0, piece: 0 };
+      const sp = scene.specOf(i);
+      const arch: InteriorArch | undefined = scene.classicBoxes ? undefined : {
+        facade: sp.facade, finish: FINISH_COLOR[sp.facade],
+        tiers: sp.tiers.map((t, k) => ({ name: t.name, s: t.s, color: TIER_COLORS[k % TIER_COLORS.length] })),
+        tierOf: [0], roof: scene.whyLooks(i).filter(l => l.startsWith('Roof:')).map(l => l.slice(6)),
+      };
+      return { path: b.path, lang: b.lang, lines: lib.map(df => df.name), floors: [floor],
+        lobby, directory: [{ text: `L1  ${lmWord}`, size: 30, action: () => {} }], references: () => [], glyphs: scene.glyphTexture, circuit: scene.circuitTexture, arch };
+    }
     const f = await fetchFile(c.buildings[i].path, hash);
     // storeys follow the building's tiers, as seen outside: the podium's pieces first, then each tier's (file order within)
     const sp0 = scene.specOf(i);
@@ -1038,6 +1272,15 @@ const walk = new WalkMode(scene, {
     return lab.map(d => ({ text: (d.name || d.path) + '/', x: d.x + d.w / 2, z: d.z + d.d / 2 }));
   },
   searchFiles: q => scene.search(q),
+  doors: () => edgeGates.map((e, k) => ({ k, dir: e.dir, label: e.label, leads: e.gates.length })),
+  leadsOf: k => (edgeGates[k]?.gates ?? []).map(g => ({ label: g.label, building: g.building, line: g.line, path: city!.buildings[g.building].path })),
+  doorRoute: (k, doorAt = 0) => {
+    const c = city, e = edgeGates[k];
+    if (!c || !e || !gateGraph) return null;
+    const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
+    const steps = traceRoute(gateGraph, e.gates[doorAt] ?? e.gates[0], p => pathIndex.get(p) ?? -1);
+    return steps.length < 2 ? null : { title: e.label, steps };
+  },
 });
 
 let walkTour: TourStop[] = [];
@@ -1109,12 +1352,64 @@ addEventListener('keydown', e => {
 // debug handle for automated checks (no behaviour change)
 (window as unknown as { __codecity: unknown }).__codecity = { scene, walk };
 
+// ---------------------------------------------------------------- entrances and exits (doors)
+let flowGraphP: Promise<FlowGraph> | null = null;
+function flowGraph(): Promise<FlowGraph> {
+  if (!apiAvailable) return Promise.reject(new Error('the flow view needs the server (codecity serve)'));
+  if (!flowGraphP) {
+    flowGraphP = api<FlowGraph>('/api/flow');
+    flowGraphP.catch(() => { flowGraphP = null; });
+  }
+  return flowGraphP;
+}
+
+let gatesOn = false;
+let edgeGates: EdgeGate[] = [];
+let gateByBuilding = new Map<number, number[]>(); // building → indices into edgeGates
+let selectedGate = -1;
+let gateGraph: FlowGraph | null = null;
+// a route through the code, one stop per file
+let route: { gate: number; title: string; steps: RouteStep[]; legs: { from: { gate?: number; building?: number }; to: { gate?: number; building?: number } }[]; at: number } | null = null;
+
+function clearGates() {
+  edgeGates = []; gateByBuilding = new Map(); selectedGate = -1; gateGraph = null; route = null;
+  scene.setGates([]);
+  scene.setGatesVisible(false);
+  ui.setGateCount('');
+}
+
+async function setGatesOn(on: boolean) {
+  gatesOn = on;
+  const box = document.getElementById('showgates') as HTMLInputElement;
+  box.checked = on;
+  if (!on) { scene.setGatesVisible(false); selectedGate = -1; ui.setGateCount(''); refreshSelection(); return; }
+  const c = city;
+  if (!c) return;
+  ui.setGateCount('reading…');
+  try {
+    const g = await flowGraph();
+    if (city !== c || !gatesOn) return;
+    gateGraph = g;
+    const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
+    const gates = buildGates(g, p => pathIndex.get(p) ?? -1);
+    edgeGates = layoutGates(gates, b => c.buildings[b].repo ?? 0, r => scene.cityRect(r), b => c.buildings[b].x + c.buildings[b].w / 2, scene.gateWidth, scene.gateOffset);
+    gateByBuilding = new Map();
+    edgeGates.forEach((e, k) => { for (const g of e.gates) { const l = gateByBuilding.get(g.building); if (l) l.push(k); else gateByBuilding.set(g.building, [k]); } });
+    scene.setGates(edgeGates.map(e => ({ x: e.x, z: e.z, dir: e.dir, label: e.label })));
+    scene.setGatesVisible(true);
+    const ins = gates.filter(x => x.dir === 'in').length, outs = gates.length - ins;
+    ui.setGateCount(`${ins} in · ${outs} out`);
+    refreshSelection();
+  } catch (e) {
+    box.checked = gatesOn = false;
+    ui.setGateCount(apiAvailable ? 'failed' : 'needs the server');
+    console.warn('doors:', (e as Error).message);
+  }
+}
+
 // ---------------------------------------------------------------- flow view (a diagram of how the code runs)
 const flowView = new FlowView({
-  load: async () => {
-    if (!apiAvailable) throw new Error('the flow view needs the server (codecity serve)');
-    return api<FlowGraph>('/api/flow');
-  },
+  load: () => flowGraph(),
   file: async (path, commit) => {
     const f = await fetchFile(path, commit);
     return { content: f.content, lang: f.lang };
@@ -1130,6 +1425,14 @@ const flowView = new FlowView({
   },
 });
 
+function openFlowAt(id: number) {
+  if (!city || walk.active) return;
+  stopPlayback();
+  scene.paused = true;
+  document.getElementById('flowbtn')!.classList.add('on');
+  void flowView.focusId(id);
+}
+
 function openFlow() {
   if (!city || walk.active) return;
   stopPlayback();
@@ -1143,4 +1446,12 @@ addEventListener('keydown', e => {
   const t = e.target as HTMLElement;
   if (walk.active || flowView.open || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
   if (e.key === 'd' || e.key === 'D') openFlow();
+});
+
+addEventListener('keydown', e => {
+  if (!route || walk.active || flowView.open) return;
+  const t = e.target as HTMLElement;
+  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
+  if (e.key === 'ArrowRight') { void goStep(Math.min(route.steps.length - 1, route.at + 1)); e.preventDefault(); }
+  else if (e.key === 'ArrowLeft') { void goStep(Math.max(0, route.at - 1)); e.preventDefault(); }
 });

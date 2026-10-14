@@ -26,15 +26,32 @@
 
     <div id="branchpop" hidden></div>
     <details id="repobox" open>
-      <summary>Repository</summary>
+      <summary>Repositories</summary>
       <form id="repoform">
-        <textarea id="source" rows="2" placeholder="local path or git URL&#10;one repo per line (optional ref after a space)" autocomplete="off" spellcheck="false" required></textarea>
+        <textarea id="source" rows="2" placeholder="one repository per line — local path or git URL (optional ref after a space)&#10;a monorepo is split into a city per project" autocomplete="off" spellcheck="false" required></textarea>
+        <details id="ghbox">
+          <summary>Add from GitHub</summary>
+          <div class="ghform">
+            <input id="ghuser" placeholder="GitHub username (public repos)" autocomplete="username" spellcheck="false" />
+            <input id="ghtoken" type="password" placeholder="personal access token (your repos, incl. private)" autocomplete="off" spellcheck="false" />
+            <button id="ghlist" type="button">List repositories</button>
+            <div id="ghstatus" class="ghstatus"></div>
+            <div id="ghtools" hidden>
+              <input id="ghfilter" placeholder="filter…" spellcheck="false" />
+              <button id="ghall" type="button">All</button>
+              <button id="ghnone" type="button">None</button>
+              <button id="ghadd" type="button" class="primary">Add selected</button>
+            </div>
+            <div id="ghrepos" class="ghrepos"></div>
+          </div>
+        </details>
         <div id="branches"></div>
         <div class="row">
           <span class="lbl">history samples</span>
           <input id="commits" type="number" min="1" max="1000" value="100" title="history samples (1 = snapshot only)" />
         </div>
         <label class="chk" title="change frequency, coupling and ownership from git log (needs a full clone)"><input id="churn" type="checkbox" checked /> history analysis (churn, coupling, owners)</label>
+        <label class="chk" title="detect a monolithic repo that holds several projects (each with its own build manifest) and render each project as its own city, linked like separate repositories"><input id="split" type="checkbox" /> split monorepos into projects</label>
         <div class="row">
           <button id="go" type="submit" class="primary">Analyze</button>
           <button id="cancel" type="button" hidden>Cancel</button>
@@ -83,9 +100,16 @@
           <option value="classic">classic boxes</option>
         </select>
       </label>
+      <div class="row connrow" id="gaterow">
+        <span>Doors</span>
+        <label class="chk" title="entrances (routes, commands, events) and exits (database, network, files, processes) on the roofs; click one to see where it leads (needs the server)"><input id="showgates" type="checkbox" /> entrances &amp; exits <span id="gatecount" class="dim"></span></label>
+      </div>
       <div id="connrow" class="row connrow" hidden>
         <span>Links</span>
         <label class="chk" title="dependencies declared in manifests or imported in code"><input id="showdeps" type="checkbox" checked /> dependencies</label>
+        <label class="chk" title="highways where a service calls routes another repository serves (HTTP, gRPC, GraphQL, WebSocket)"><input id="showapi" type="checkbox" checked /> API calls</label>
+        <label class="chk" title="highways where two repositories use the same database table"><input id="showdb" type="checkbox" checked /> databases</label>
+        <label class="chk" title="highways where one repository publishes to a topic or queue another consumes (Kafka, NATS, RabbitMQ, Redis, MQTT, SQS/SNS)"><input id="showmsg" type="checkbox" checked /> messages</label>
         <label class="chk" title="contributors who committed to both repositories"><input id="showpeople" type="checkbox" /> shared people</label>
       </div>
       <div id="baserow" class="row baserow" hidden>

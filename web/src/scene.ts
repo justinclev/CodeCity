@@ -1,3 +1,5 @@
+import { route } from './roads';
+import { GateMarks, type GateSpot } from './gatemarks';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
@@ -9,7 +11,9 @@ import { buildingMaterial, circuitMaterial, type BuildingUniforms, type CircuitU
 import { busRoute, TraceLayer, type Trace } from './links';
 import { buildSpecs, classicSpec, facadeCode, pathSeed, explain, type BuildingSpec, type Condition } from './architecture';
 import { RoofKit, type Works } from './roofs';
+import { Landmarks } from './landmarks';
 import { Walkways } from './walkways';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { HackerFx } from './fx';
 import { circuitTexture, codeTexture, glyphAtlas, skyTexture, THEMES, type Theme, type ThemeName } from './theme';
 import type { City, ColorMode, Metric, ScaleMode } from './types';
@@ -30,12 +34,14 @@ export const RISK = ['no history', '3+ authors', '2 authors', 'single author', '
 export const RISK_COLORS = ['#596277', '#51cf66', '#ffd43b', '#ff922b', '#ff4d4f'];
 export const INACTIVE_DAYS = 180;
 
-export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | { kind: 'link'; index: number } | null;
+export type Pick = { kind: 'building'; index: number } | { kind: 'district'; index: number } | { kind: 'floor'; index: number } | { kind: 'link'; index: number } | { kind: 'gate'; index: number } | null;
 
 /** A connection between two cities to draw (index into city.links). */
-export interface LinkView { index: number; from: number; to: number; kind: 'dependency' | 'people'; strength: number; label: string }
+export type LinkKind = 'dependency' | 'people' | 'api' | 'message' | 'data';
+export interface Road { kind: LinkKind; pts: [number, number][]; width: number; from: number; to: number }
+export interface LinkView { index: number; from: number; to: number; kind: LinkKind; strength: number; label: string }
 
-interface LinkMesh { view: LinkView; mesh: THREE.Mesh; pick: THREE.Mesh; mat: THREE.ShaderMaterial; label?: THREE.Sprite }
+interface LinkMesh { view: LinkView; mesh: THREE.Mesh; pick: THREE.Mesh; mat: THREE.ShaderMaterial; label?: THREE.Sprite; extra?: THREE.ShaderMaterial[]; extraMeshes?: THREE.Mesh[] }
 
 /** Tube material with light pulses flowing from the start (uv.x = 0) to the end. */
 function flowMaterial(a: THREE.Color, b: THREE.Color, count: number, speed: number, additive: boolean): THREE.ShaderMaterial {
@@ -52,6 +58,34 @@ function flowMaterial(a: THREE.Color, b: THREE.Color, count: number, speed: numb
       }`,
     transparent: true, depthWrite: false, toneMapped: false,
     blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+  });
+}
+
+/**
+ * A highway between two cities: dark asphalt with lit edges, a dashed centre line and "cars"
+ * (light pulses) in each lane. u.x runs from the first city to the second. Requests (api) travel
+ * both ways (the way back is dimmer: responses); messages only go from publisher to subscriber.
+ */
+function highwayMaterial(color: THREE.Color, len: number, twoWay: boolean, day: boolean): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uHi: { value: 0 }, uColor: { value: color }, uLen: { value: len }, uTwo: { value: twoWay ? 1 : 0 }, uDay: { value: day ? 1 : 0 } },
+    vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform float uTime; uniform float uHi; uniform vec3 uColor; uniform float uLen; uniform float uTwo; uniform float uDay; varying vec2 vUv;
+      void main() {
+        float y = vUv.y, x = vUv.x * uLen;
+        float edge = smoothstep(0.09, 0.0, y) + smoothstep(0.91, 1.0, y);
+        float centre = (1.0 - smoothstep(0.0, 0.025, abs(y - 0.5))) * step(0.5, fract(x / (uLen * 0.012 + 1.0) * 0.5));
+        float lane = y < 0.5 ? 1.0 : -1.0;
+        float dir = uTwo > 0.5 ? lane : 1.0;
+        float laneMask = 1.0 - smoothstep(0.1, 0.16, abs(y - (y < 0.5 ? 0.27 : 0.73)));
+        float f = fract((x - dir * uTime * uLen * 0.05) / (uLen * 0.07 + 1.0));
+        float car = smoothstep(0.0, 0.05, f) * (1.0 - smoothstep(0.05, 0.16, f)) * laneMask;
+        float dim = (uTwo > 0.5 && lane < 0.0) ? 0.55 : 1.0;
+        vec3 road = mix(vec3(0.015, 0.02, 0.04), vec3(0.2, 0.21, 0.24), uDay);
+        vec3 c = road + uColor * (edge * (0.8 + 0.8 * uHi) + centre * 0.35 + car * 2.2 * dim);
+        gl_FragColor = vec4(c, 0.96);
+      }`,
+    transparent: true, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
   });
 }
 
@@ -109,6 +143,11 @@ export class CityScene {
   private linkMeshes: LinkMesh[] = [];
   private linkHi = -1;
   readonly codeLinks = new TraceLayer(true);
+  private highwayGroup = new THREE.Group();
+  private gates = new GateMarks();
+  private gateSpots: GateSpot[] = [];
+  private streets = new TraceLayer(true);
+  private roadPaths: Road[] = [];
   private hackerFx = new HackerFx();
   codeLinkMode: 'off' | 'selection' | 'all' = 'selection';
   private importers: number[][] = []; // building → buildings that import it
@@ -125,6 +164,7 @@ export class CityScene {
   private specs: BuildingSpec[] = [];
   private classic = false;
   private roofs = new RoofKit();
+  readonly landmarks = new Landmarks();
   private ways = new Walkways();
   private conds: Condition[] = [];
   private worksKey = '';
@@ -183,7 +223,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.hackerFx.group, this.roofs.group, this.ways.group);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.highwayGroup, this.gates.group, this.streets.group, this.hackerFx.group, this.roofs.group, this.landmarks.group, this.ways.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -230,9 +270,11 @@ export class CityScene {
     if (this.exploded) this.animateExplode(dt);
     if (this.onFrame) this.onFrame(dt);
     this.codeLinks.update(this.flowTime);
-    if (this.linkMeshes.length || this.arcs.children.length || this.codeLinks.group.children.length) {
+    this.streets.update(this.flowTime);
+    this.gates.update();
+    if (this.streets.group.children.length || this.linkMeshes.length || this.highwayGroup.children.length || this.arcs.children.length || this.codeLinks.group.children.length) {
       this.flowTime += dt;
-      for (const l of this.linkMeshes) l.mat.uniforms.uTime.value = this.flowTime;
+      for (const l of this.linkMeshes) { l.mat.uniforms.uTime.value = this.flowTime; for (const m of l.extra ?? []) m.uniforms.uTime.value = this.flowTime; }
       for (const o of this.arcs.children) {
         const m = (o as THREE.Mesh).material as THREE.ShaderMaterial;
         if (m.uniforms?.uTime) m.uniforms.uTime.value = this.flowTime;
@@ -372,6 +414,23 @@ export class CityScene {
     return -1;
   }
 
+  /** Edge gate (index into the gates passed to setGates) under a ray, or -1. Gates hidden behind a nearer building do not count. */
+  rayGate(origin: THREE.Vector3, dir: THREE.Vector3, far: number): number {
+    const ms = this.gates.meshes;
+    if (!ms.length) return -1;
+    this.raycaster.set(origin, dir);
+    this.raycaster.far = far;
+    const hit = this.raycaster.intersectObjects(ms, false)[0];
+    let k = -1;
+    if (hit && hit.instanceId !== undefined) {
+      k = this.gates.gateOf(hit.object, hit.instanceId);
+      const b = this.raycaster.intersectObjects(this.solidMeshes(false), false)[0];
+      if (b && b.distance < hit.distance) k = -1;
+    }
+    this.raycaster.far = Infinity;
+    return k;
+  }
+
   /** Meshes making up the buildings (plus the floors of an exploded one). */
   private solidMeshes(withExploded: boolean): THREE.Object3D[] {
     const out: THREE.Object3D[] = [];
@@ -408,6 +467,7 @@ export class CityScene {
 
   /** "Classic boxes": every building a plain box (no tiers, facades, roofs or condition). */
   setClassic(on: boolean) {
+    this.landmarks?.setVisible(!on);
     if (on === this.classic) return;
     this.classic = on;
     this.ways.setVisible(!on);
@@ -452,6 +512,8 @@ export class CityScene {
     }
     this.worksKey = '';
     this.roofs.build(this.city.buildings.map((_, i) => this.specOf(i)), []);
+    this.landmarks.build(this.city, this.baseY);
+    this.landmarks.setVisible(!this.classic);
     this.moving = true;
   }
 
@@ -459,6 +521,15 @@ export class CityScene {
   private placeBuilding(i: number, h: number, hide: boolean) {
     const b = this.city.buildings[i], sp = this.specOf(i);
     const cx = b.x + b.w / 2, cz = b.z + b.d / 2, y = this.baseY[i];
+    if (b.lm && !this.classic) { // a landmark: a flat pad; the real model (landmarks.ts) sits on it
+      const u = Math.min(b.w, b.d);
+      this.tmp.position.set(cx, hide ? y - 1 : y + u * 0.03, cz);
+      this.tmp.scale.set(b.w, hide ? 0.004 : u * 0.06, b.d);
+      this.tmp.updateMatrix();
+      this.buildingMesh!.setMatrixAt(i, this.tmp.matrix);
+      this.roofs.place(i, { cx, cz, top: y, tw: b.w, td: b.d, th: 0, hide: true }); // no roof kit
+      return;
+    }
     const tiers = sp.tiers;
     for (let k = 0; k < tiers.length; k++) {
       const t = tiers[k];
@@ -575,6 +646,7 @@ export class CityScene {
       bm.roughness = t.hacker ? 0.15 : 0.55; bm.metalness = t.hacker ? 0.9 : 0.15;
     }
     this.roofs.setHacker(!!t.hacker);
+    this.landmarks.setHacker(!!t.hacker);
     this.ways.setTheme(!!t.hacker, t.name === 'night');
     if (this.skin) this.skin.mesh.visible = !!t.hacker;
     if (this.grid) {
@@ -796,6 +868,7 @@ export class CityScene {
   refreshCodeLinks() {
     if (!this.city) return;
     this.codeLinks.setAdditive(this.theme.name !== 'day');
+    this.streets.setAdditive(this.theme.name !== 'day');
     const s = this.size();
     this.codeLinks.spacing = s * 0.05;
     this.codeLinks.base = this.theme.name === 'day' ? 0.55 : 0.3;
@@ -976,6 +1049,7 @@ export class CityScene {
     if (instant) { this.cur.set(this.target); this.delay.fill(0); }
     this.moving = true;
     this.step(0);
+    this.updateHighwayVisibility();
 
     const maxDepth = this.city.districts.reduce((m, x) => Math.max(m, x.depth), 0);
 
@@ -1165,12 +1239,24 @@ export class CityScene {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - r.left) / r.width) * 2 - 1, -((clientY - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(ndc, this.camera);
-    const objects: THREE.Object3D[] = [...this.solidMeshes(false), this.districtMesh, ...this.linkMeshes.map(l => l.pick)];
+    const lmMeshes = this.landmarks.meshes as THREE.Object3D[];
+    const objects: THREE.Object3D[] = [...lmMeshes, ...this.solidMeshes(false), this.districtMesh, ...this.linkMeshes.map(l => l.pick), ...this.gates.meshes];
     if (this.exploded) objects.unshift(this.exploded.mesh);
     for (const hit of this.raycaster.intersectObjects(objects, false)) { // nearest first
+      // Landmark mesh hit (power plant, airport, plane, etc.)
+      if (lmMeshes.includes(hit.object)) {
+        const bi = this.landmarks.buildingIndexOf(hit.object as THREE.Mesh);
+        if (bi >= 0 && this.exists(bi)) return { kind: 'building', index: bi };
+        continue;
+      }
       if (this.exploded && hit.object === this.exploded.mesh && hit.instanceId !== undefined) return { kind: 'floor', index: hit.instanceId };
       const lm = this.linkMeshes.find(l => l.pick === hit.object);
       if (lm) return { kind: 'link', index: lm.view.index };
+      if (hit.instanceId !== undefined && this.gates.meshes.includes(hit.object)) {
+        const gk = this.gates.gateOf(hit.object, hit.instanceId);
+        if (gk >= 0) return { kind: 'gate', index: gk };
+        continue;
+      }
       const id = hit.instanceId ?? -1;
       if (id < 0) continue;
       if (hit.object === this.buildingMesh || hit.object === this.tierMesh) {
@@ -1289,7 +1375,10 @@ export class CityScene {
     const b = this.city.buildings[i];
     const h = this.target[i];
     const t = new THREE.Vector3(b.x + b.w / 2, this.baseY[i] + h * 0.5, b.z + b.d / 2);
-    const dist = Math.max(h * 2.2, Math.max(b.w, b.d) * 5, this.size() * 0.06);
+    // Distance based solely on the building's own dimensions so small buildings
+    // don't get the camera yanked to city-overview distance (removed size()*0.06).
+    const footprint = Math.max(b.w, b.d);
+    const dist = Math.max(h * 2.2, footprint * 5);
     const dir = this.camera.position.clone().sub(this.controls.target).normalize();
     if (dir.y < 0.35) { dir.y = 0.35; dir.normalize(); }
     this.flyTo(t.clone().addScaledVector(dir, dist), t);
@@ -1312,8 +1401,11 @@ export class CityScene {
     return new THREE.Vector3(x.x + x.w / 2, this.districtTop(Math.max(0, x.depth)) + lift, x.z + x.d / 2);
   }
 
-  private linkColors(kind: 'dependency' | 'people'): [THREE.Color, THREE.Color] {
+  private linkColors(kind: LinkKind): [THREE.Color, THREE.Color] {
     const t = this.theme.name;
+    if (kind === 'data') return t === 'day' ? [new THREE.Color('#862e9c'), new THREE.Color('#be4bdb')] : [new THREE.Color('#b57cff'), new THREE.Color('#ff7ad9')];
+    if (kind === 'api') return t === 'day' ? [new THREE.Color('#d9480f'), new THREE.Color('#f59f00')] : [new THREE.Color('#ff9f1c'), new THREE.Color('#ffd166')];
+    if (kind === 'message') return t === 'day' ? [new THREE.Color('#087f5b'), new THREE.Color('#0ca678')] : [new THREE.Color('#2bffb0'), new THREE.Color('#7dffe0')];
     if (kind === 'people') return t === 'day' ? [new THREE.Color('#e8590c'), new THREE.Color('#f08c00')] : [new THREE.Color('#ffb547'), new THREE.Color('#ff7ad9')];
     if (t === 'hacker') return [new THREE.Color('#d23cff'), new THREE.Color('#36e0ff')];
     if (t === 'day') return [new THREE.Color('#1c7ed6'), new THREE.Color('#7048e8')];
@@ -1328,11 +1420,15 @@ export class CityScene {
       if (l.label) { this.linkGroup.remove(l.label); l.label.material.map?.dispose(); l.label.material.dispose(); }
     }
     this.linkMeshes = [];
+    for (const o of [...this.highwayGroup.children]) { this.highwayGroup.remove(o); (o as THREE.Mesh).geometry?.dispose(); }
     if (!this.city?.repos) return;
     const s = this.size();
     const additive = this.theme.name !== 'day';
     const pickMat = new THREE.MeshBasicMaterial({ visible: false });
+    this.roadPaths = [];
+    this.buildHighways(views.filter(v => v.kind === 'api' || v.kind === 'message' || v.kind === 'data'));
     for (const v of views) {
+      if (v.kind === 'api' || v.kind === 'message' || v.kind === 'data') continue;
       const from = this.districtCenter(this.city.repos[v.from].district, 0.05);
       const to = this.districtCenter(this.city.repos[v.to].district, 0.05);
       const dist = from.distanceTo(to);
@@ -1357,13 +1453,180 @@ export class CityScene {
       this.linkMeshes.push(lm);
     }
     this.highlightLink(this.linkHi);
+    this.updateHighwayVisibility();
+  }
+
+  /** The highways as ground polylines (for maps). */
+  roads(): Road[] { return this.roadPaths; }
+
+  /** A highway exists only while both of its cities do (a city appears at its first sampled commit). */
+  private updateHighwayVisibility() {
+    if (!this.city?.repos || !this.linkMeshes.length) return;
+    const live = new Set<number>();
+    this.city.buildings.forEach((b, i) => { if (this.exists(i)) live.add(b.repo ?? 0); });
+    for (const l of this.linkMeshes) {
+      if (l.view.kind !== 'api' && l.view.kind !== 'message' && l.view.kind !== 'data') continue;
+      const on = live.has(l.view.from) && live.has(l.view.to);
+      l.mesh.visible = on;
+      for (const m of l.extraMeshes ?? []) m.visible = on;
+      l.pick.visible = on;
+      if (l.label) l.label.visible = on;
+    }
+  }
+
+  /** Gates on the city edges (positions come from layoutGates). */
+  setGates(spots: GateSpot[]) { this.gates.set(spots, Math.max(this.cell * 3.2, (this.city ? this.size() : 1) * 0.011)); this.gateSpots = spots; this.clearStreets(); }
+  setGatesVisible(on: boolean) { this.gates.group.visible = on && this.gates.count > 0; if (!on) this.clearStreets(); }
+  highlightGate(k: number) { this.gates.highlight(k); }
+
+  /**
+   * Streets from a gate to the files behind it: up a ramp at the gate, across above the skyline, down onto
+   * the roof. Entrances flow gate → file, exits file → gate.
+   */
+  showGateStreets(targets: { gate: number; building: number }[]) {
+    this.clearStreets();
+    if (!this.gates.group.visible) return;
+    const traces: Trace[] = [];
+    const w = Math.max(this.cell * 0.55, this.size() * 0.0022);
+    for (const t of targets.slice(0, 40)) {
+      const g = this.gateSpots[t.gate];
+      if (!g || !this.exists(t.building)) continue;
+      const from = new THREE.Vector3(g.x, 0.05, g.z), to = this.buildingAnchor(t.building);
+      const pts = busRoute(from, to, this.busLayer(t.building + t.gate), t.building + t.gate);
+      if (g.dir === 'out') pts.reverse();
+      traces.push({ points: pts, color: new THREE.Color(g.dir === 'in' ? 0x2de2d0 : 0xff6b5b), width: w * 2, speed: this.size() * 0.05 });
+    }
+    this.streets.set(traces);
+  }
+
+  /**
+   * A route spot by spot: streets between consecutive stops up to the current one (earlier legs dim, the
+   * current leg bright). A stop is a gate (index into the edge gates) or a building.
+   */
+  showTrail(legs: { from: { gate?: number; building?: number }; to: { gate?: number; building?: number } }[], current: number) {
+    this.clearStreets();
+    const at = (p: { gate?: number; building?: number }) => {
+      if (p.gate !== undefined) { const g = this.gateSpots[p.gate]; return g ? new THREE.Vector3(g.x, 0.05, g.z) : null; }
+      return p.building !== undefined && this.exists(p.building) ? this.buildingAnchor(p.building) : null;
+    };
+    const w = Math.max(this.cell * 0.55, this.size() * 0.0022);
+    const traces: Trace[] = [];
+    legs.slice(0, current + 1).forEach((l, k) => {
+      const a = at(l.from), b = at(l.to);
+      if (!a || !b) return;
+      const now = k === current;
+      traces.push({ points: busRoute(a, b, this.busLayer(k * 3 + 1), k + 1), color: new THREE.Color(now ? 0xffffff : 0x2de2d0), width: now ? w * 2.6 : w * 1.4, speed: this.size() * (now ? 0.09 : 0.04) });
+    });
+    this.streets.set(traces);
+  }
+
+  clearStreets() { this.streets.clear(); }
+
+  /** Footprint of a city's districts root (repo r, or the only city) and the offset gates stand outside it. */
+  cityRect(repo: number): { x: number; z: number; w: number; d: number } {
+    const d = this.city.repos?.[repo]?.district ?? 0;
+    const r = this.city.districts[d];
+    return { x: r.x, z: r.z, w: r.w, d: r.d };
+  }
+  get gateWidth() { return Math.max(this.cell * 3.2, this.size() * 0.011); }
+  get gateOffset() { return this.cell * 2.5; }
+
+  /** Route of a highway from city A to city B around the other cities (see roads.ts). */
+  private highwayRoute(from: number, to: number): [number, number][] {
+    const rs = this.city.repos!;
+    const others = rs.filter((_, k) => k !== from && k !== to).map(r => this.city.districts[r.district]);
+    return route(this.city.districts[rs[from].district], this.city.districts[rs[to].district], others, this.cell);
+  }
+
+  /** Highways between cities: asphalt strips from the rim of one city to the rim of the other. */
+  private buildHighways(views: LinkView[]) {
+    const width = Math.max(this.cell * 1.5, this.size() * 0.006);
+    const dark = this.theme.name === 'day';
+    const lanes = new Map<string, number>(); // lateral slot per city pair, so highways side by side do not overlap
+    const total = new Map<string, number>();
+    for (const v of views) { const k = Math.min(v.from, v.to) + ':' + Math.max(v.from, v.to); total.set(k, (total.get(k) ?? 0) + 1); }
+    const pickMat = new THREE.MeshBasicMaterial({ visible: false });
+    for (const v of views) {
+      const k = Math.min(v.from, v.to) + ':' + Math.max(v.from, v.to);
+      const slot = lanes.get(k) ?? 0; lanes.set(k, slot + 1);
+      let pts = this.highwayRoute(v.from, v.to);
+      const off = (slot - ((total.get(k) ?? 1) - 1) / 2) * width * 1.35;
+      if (pts.length === 2) {
+        const dx = pts[1][0] - pts[0][0], dz = pts[1][1] - pts[0][1], len = Math.hypot(dx, dz);
+        if (len < 1e-3) continue;
+        pts = pts.map(p => [p[0] - (dz / len) * off, p[1] + (dx / len) * off] as [number, number]);
+      } else {
+        pts = pts.map(p => [p[0] + off, p[1] + off] as [number, number]);
+      }
+      const [c1] = this.linkColors(v.kind);
+      this.roadPaths.push({ kind: v.kind, pts, width, from: v.from, to: v.to });
+      let longest = 0, longLen = 0;
+      const segs: { mesh: THREE.Mesh; len: number; mid: THREE.Vector3; p0: [number, number]; p1: [number, number] }[] = [];
+      const boxes: THREE.BufferGeometry[] = [];
+      const segMeshes: THREE.Mesh[] = [];
+      for (let q = 0; q + 1 < pts.length; q++) {
+        const p0 = pts[q], p1 = pts[q + 1];
+        const dx = p1[0] - p0[0], dz = p1[1] - p0[1], len = Math.hypot(dx, dz);
+        if (len < 1e-3) continue;
+        const mat = highwayMaterial(c1.clone(), len, v.kind === 'api', dark);
+        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(len + (q + 2 < pts.length ? width : 0) + (q > 0 ? width : 0), width).rotateX(-Math.PI / 2), mat);
+        mesh.position.set((p0[0] + p1[0]) / 2, 0.06, (p0[1] + p1[1]) / 2);
+        mesh.rotation.y = -Math.atan2(dz, dx);
+        mesh.renderOrder = 4;
+        segMeshes.push(mesh);
+        this.highwayGroup.add(mesh);
+        const box = new THREE.BoxGeometry(len, Math.max(width, this.size() * 0.01), Math.max(width * 2, this.size() * 0.01));
+        box.applyMatrix4(new THREE.Matrix4().compose(mesh.position, new THREE.Quaternion().setFromEuler(mesh.rotation), new THREE.Vector3(1, 1, 1)));
+        boxes.push(box);
+        segs.push({ mesh, len, mid: mesh.position.clone(), p0, p1 });
+        if (len > longLen) { longLen = len; longest = segs.length - 1; }
+      }
+      if (!segs.length) continue;
+      // one LinkMesh per highway: the longest segment stands for it (highlight / time uniforms of every segment follow it)
+      const main = segs[longest];
+      const mats = segs.map(sg => sg.mesh.material as THREE.ShaderMaterial);
+      const pick = new THREE.Mesh(mergeGeometries(boxes.map(b => { const g = b.clone(); g.deleteAttribute('uv'); g.deleteAttribute('normal'); return g; }))!, pickMat);
+      this.linkGroup.add(pick);
+      const lm: LinkMesh = { view: v, mesh: main.mesh, pick, mat: mats[longest], extra: mats.filter((_, i) => i !== longest), extraMeshes: segMeshes.filter(m => m !== main.mesh) };
+      if (v.label) {
+        const h = Math.max(0.8, this.size() * 0.016);
+        lm.label = this.textSprite(v.label, h);
+        const f = (slot + 1) / ((total.get(k) ?? 1) + 1);
+        lm.label.position.set(main.p0[0] + (main.p1[0] - main.p0[0]) * f, h * (0.9 + 1.1 * slot), main.p0[1] + (main.p1[1] - main.p0[1]) * f);
+        this.linkGroup.add(lm.label);
+      }
+      this.linkMeshes.push(lm);
+    }
+  }
+
+  /** Arcs between the buildings behind one highway (calls and the routes they reach, publishers and subscribers). */
+  private viaArcs(vias: { a: number; b: number }[], kind: LinkKind, from?: number) {
+    const s = this.size();
+    const top = (k: number) => {
+      const x = this.city.buildings[k];
+      return new THREE.Vector3(x.x + x.w / 2, this.baseY[k] + Math.max(this.target[k], MIN_H), x.z + x.d / 2);
+    };
+    const [ca, cb] = this.linkColors(kind);
+    for (const v of vias.slice(0, 120)) {
+      if (!this.exists(v.a) || !this.exists(v.b) || (from !== undefined && v.a !== from && v.b !== from)) continue;
+      const a = top(v.a), b = top(v.b), dist = a.distanceTo(b);
+      const mid = a.clone().add(b).multiplyScalar(0.5);
+      mid.y = Math.max(a.y, b.y) + dist * 0.3 + s * 0.01;
+      const mat = flowMaterial(ca.clone().lerp(new THREE.Color('#ffffff'), 0.25), cb, Math.max(4, Math.round(dist / (s * 0.04))), 0.6, this.theme.name !== 'day');
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.QuadraticBezierCurve3(a, mid, b), 64, s * 0.0022, 6), mat);
+      tube.renderOrder = 7;
+      this.arcs.add(tube);
+    }
   }
 
   highlightLink(index: number) {
+    const l = index >= 0 ? this.city?.links?.[index] : undefined;
+    if (l && (l.kind === 'api' || l.kind === 'message') && l.via) { this.clearArcs(); this.viaArcs(l.via.map(v => ({ a: v.a, b: v.b })), l.kind); }
     this.linkHi = index;
     for (const l of this.linkMeshes) {
       const on = l.view.index === index;
       l.mat.uniforms.uHi.value = on ? 1 : 0;
+      for (const m of l.extra ?? []) m.uniforms.uHi.value = on ? 1 : 0;
       if (l.label) l.label.material.opacity = index < 0 || on ? 1 : 0.4;
     }
   }
@@ -1411,6 +1674,7 @@ export class CityScene {
         this.arcs.add(tube);
       }
     }
+    for (const l of links) if ((l.kind === 'api' || l.kind === 'message') && l.via) this.viaArcs(l.via, l.kind, i);
   }
 
   // ------------------------------------------------------------------ hacker mode

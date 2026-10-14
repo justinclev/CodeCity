@@ -389,3 +389,51 @@ func TestRouteMatching(t *testing.T) {
 		t.Errorf("sql insert: %v", got)
 	}
 }
+
+func TestMatcher(t *testing.T) {
+	rs := []Route{{Route: "/"}, {Method: "GET", Route: "/api/orders"}, {Route: "/api/orders/{id}"}, {Route: "/static/"}, {Route: "/{tenant}/ping"}, {Route: "/a/b/c/d/e"}}
+	m := NewMatcher(rs)
+	cases := []struct {
+		method, url string
+		want        []int
+	}{
+		{"GET", "http://x:80/api/orders", []int{1}},
+		{"GET", "/api/orders/42", []int{2}},
+		{"GET", "/static/app.js", []int{3}},
+		{"GET", "/acme/ping", []int{4}},
+		{"GET", "/a/b/c/d/e", []int{5}},
+		{"POST", "/api/orders", []int{0}}, // /api/orders is GET only: only the catch-all "/" takes a POST
+	}
+	for _, c := range cases {
+		got, _, _ := m.Match(c.method, c.url)
+		if len(got) == 0 && len(c.want) == 0 {
+			continue
+		}
+		if len(got) != 1 || len(c.want) != 1 || got[0] != c.want[0] {
+			t.Errorf("%s %s = %v, want %v", c.method, c.url, got, c.want)
+		}
+	}
+}
+
+func TestRequestToLocalhostWithPort(t *testing.T) {
+	g := Build([]File{{Path: "main.go", Lang: "Go", Content: []byte(`package main
+
+import "net/http"
+
+func main() {
+	http.HandleFunc("/api/x", h)
+	http.Get("http://localhost:8080/api/x")
+}
+
+func h(w http.ResponseWriter, r *http.Request) {}
+`)}}, Options{})
+	found := false
+	for _, e := range g.Edges {
+		if e.Kind == ERequest {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a request to localhost:8080 must reach the route this code base serves")
+	}
+}

@@ -3,7 +3,7 @@ package city
 
 import "github.com/justinclev/codecity/internal/deps"
 
-const Version = 6
+const Version = 8
 
 type City struct {
 	// Facts is what the repo provides and uses, for linking repositories; not sent to the viewer.
@@ -29,6 +29,7 @@ type Repo struct {
 	Source     string `json:"source"`
 	Remote     string `json:"remote,omitempty"`
 	Path       string `json:"path,omitempty"` // absolute work tree of a local repo (for editor links)
+	Base       string `json:"base,omitempty"` // git-relative project dir when this city is one project of a monorepo ("" = whole repo)
 	Ref        string `json:"ref"`
 	Commit     string `json:"commit"`
 	AnalyzedAt string `json:"analyzedAt"`
@@ -49,6 +50,7 @@ type RepoInfo struct {
 	Source   string `json:"source"`
 	Remote   string `json:"remote,omitempty"`
 	Path     string `json:"path,omitempty"`
+	Base     string `json:"base,omitempty"` // git-relative project dir for a monorepo project
 	Ref      string `json:"ref"`
 	Commit   string `json:"commit"`
 	District int    `json:"district"` // its root district
@@ -64,9 +66,22 @@ type Link struct {
 	Evidence []string `json:"evidence,omitempty"` // human-readable reasons
 	// Files: [importing building, imported district] pairs (dependency links).
 	Files [][2]int `json:"files,omitempty"`
+	// Via: building pairs behind an "api" or "message" link — [from, to] are buildings of
+	// the From and To repository (merged indices); Label is "POST /orders" or the topic.
+	Via []Via `json:"via,omitempty"`
+	// Broker: for "message" links the brokers involved (kafka, nats, ...).
+	Brokers []string `json:"brokers,omitempty"`
 	// People: shared contributors (people links), most active first.
 	People      []string `json:"people,omitempty"`
 	PeopleCount int      `json:"peopleCount,omitempty"`
+}
+
+// Via is one concrete connection of a link: an HTTP call to a served route, or a
+// message published to a topic and consumed by the other repository.
+type Via struct {
+	From  int    `json:"a"`
+	To    int    `json:"b"`
+	Label string `json:"l"`
 }
 
 // Point is one change in a file's size history: [commit index, loc, lines, bytes, complexity].
@@ -149,6 +164,19 @@ type Building struct {
 	// Shape is the building's architecture, derived from its code at the newest
 	// commit (nil when the file is absent then). It never changes between commits.
 	Shape *Shape `json:"shape,omitempty"`
+	// Landmark marks a grouped building that lists things rather than holding
+	// code: "library" (docs), "plant" (external dependencies), "port" (i18n).
+	Landmark string `json:"lm,omitempty"`
+	// Docs lists the items inside a landmark building (documents, dependencies
+	// or localization files). An item with an empty Path is not openable.
+	Docs []DocFile `json:"docs,omitempty"`
+}
+
+// DocFile is one item listed inside a landmark building.
+type DocFile struct {
+	Name string `json:"name"` // display name (file name, or dependency name)
+	Path string `json:"path,omitempty"` // full building-style path when openable ("" for dependencies)
+	Lang string `json:"lang"` // language, or ecosystem (npm/go/…) for a dependency
 }
 
 // Shape kinds (archetypes).
@@ -159,6 +187,8 @@ const (
 	ShapeData  = "data"  // data / config files: utility block
 	ShapeDoc   = "doc"   // documentation: library
 	ShapeTest  = "test"  // tests: lattice annex
+	ShapePlant = "plant" // external dependencies, grouped: a power plant
+	ShapePort  = "port"  // localization / i18n resources, grouped: an airport / dock
 )
 
 // Roles (rooftops), from the flow analysis at the newest commit.
@@ -191,4 +221,39 @@ type Facts struct {
 	Deps       []deps.Dep
 	Imports    map[int][]string // building index → import specs (see deps.Imports)
 	Authors    map[string]int   // every contributor (case-merged) → non-merge commits
+	Serves     []Served         // network endpoints this repository serves (HTTP routes, gRPC services, GraphQL fields)
+	Aliases    []string         // network names its configuration gives services (docker-compose, Kubernetes)
+	DB         []DBUse          // database tables its code reads and writes
+	Calls      []Call           // HTTP requests it makes to a known target
+	Messages   []Msg            // topics it publishes to / consumes from
+}
+
+// Served is an HTTP route and the building that handles it.
+type Served struct {
+	Building int
+	Method   string
+	Route    string
+	Weak     bool // from a file that may only be a copy (OpenAPI spec, GraphQL schema)
+}
+
+// DBUse is a database table a building reads or writes.
+type DBUse struct {
+	Building int
+	Table    string
+	Write    bool
+}
+
+// Call is an outgoing HTTP request with a known target.
+type Call struct {
+	Building int
+	Method   string
+	URL      string
+}
+
+// Msg is a publish or subscribe site.
+type Msg struct {
+	Building int
+	Dir      string // "pub" | "sub"
+	Broker   string
+	Topic    string
 }

@@ -100,6 +100,151 @@ type Graph struct {
 	Stats   Stats   `json:"stats"`
 	// Commits: the commit each repository was analyzed at (by path prefix; "" for a single repository)
 	Commits map[string]string `json:"commits,omitempty"`
+	// Requests: every HTTP request whose target is a string (not sent to the viewer).
+	Requests []Request `json:"-"`
+}
+
+// Request is an outgoing HTTP call with a known target.
+type Request struct {
+	Path   string // file the call is in
+	Method string
+	URL    string
+	Line   int
+}
+
+// Route is an HTTP route served by a handler in Path.
+type Route struct {
+	Path   string
+	Method string
+	Route  string
+}
+
+// Routes lists the HTTP routes the graph serves and the file of the handler.
+func (g *Graph) Routes() []Route {
+	byID := make(map[int]*Node, len(g.Nodes))
+	for _, n := range g.Nodes {
+		byID[n.ID] = n
+	}
+	var out []Route
+	seen := map[Route]bool{}
+	for _, e := range g.Edges {
+		from, to := byID[e.From], byID[e.To]
+		if e.Kind != EHandles || from == nil || to == nil || from.Kind != KEndpoint || to.Path == "" {
+			continue
+		}
+		route := from.Name
+		if from.Sub != "" && from.Sub != "ANY" {
+			route = strings.TrimSpace(strings.TrimPrefix(route, from.Sub))
+		}
+		r := Route{Path: to.Path, Method: from.Sub, Route: route}
+		if !seen[r] {
+			seen[r] = true
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func hostNoPort(h string) string {
+	if i := strings.LastIndexByte(h, ':'); i >= 0 && !strings.Contains(h[i:], "]") {
+		return h[:i]
+	}
+	return h
+}
+
+// Matcher matches request targets against a fixed set of served routes. Routes are compiled once
+// and indexed by their leading literal path segments (up to maxIndexSegs).
+type Matcher struct {
+	routes []mroute
+	index  map[string][]int
+}
+
+const maxIndexSegs = 3
+
+type mroute struct {
+	method string
+	re     *regexp.Regexp
+	base   int
+}
+
+func indexKey(segs []string) string {
+	return strings.Join(segs, "/") + "|" + string(rune('0'+len(segs)))
+}
+
+// NewMatcher compiles routes; the i-th route keeps index i in Match results (uncompilable ones never match).
+func NewMatcher(routes []Route) *Matcher {
+	m := &Matcher{routes: make([]mroute, len(routes)), index: map[string][]int{}}
+	for i, r := range routes {
+		re := routeRegexp(r.Route)
+		if re == nil {
+			continue
+		}
+		m.routes[i] = mroute{r.Method, re, len(routeParam.ReplaceAllString(r.Route, "")) * 2}
+		route := r.Route
+		if j := strings.Index(route, "/"); j > 0 && !strings.HasPrefix(route, "/") {
+			route = route[j:]
+		}
+		var lit []string
+		for _, seg := range strings.Split(strings.Trim(route, "/"), "/") {
+			if seg == "" || routeParam.MatchString(seg) || len(lit) == maxIndexSegs {
+				break
+			}
+			lit = append(lit, seg)
+		}
+		k := indexKey(lit)
+		m.index[k] = append(m.index[k], i)
+	}
+	return m
+}
+
+// Match returns the most specific matching routes (indices into the NewMatcher slice), their score and the request's host.
+func (m *Matcher) Match(reqMethod, url string) (best []int, score int, host string) {
+	p, host := normURL(url)
+	probe := strings.ReplaceAll(p, "\x00", "x")
+	segs := strings.Split(strings.Trim(p, "/"), "/")
+	score = -1
+	try := func(idx []int) {
+		for _, i := range idx {
+			r := m.routes[i]
+			if r.re == nil || (r.method != "" && r.method != "ANY" && reqMethod != "" && r.method != reqMethod) || !r.re.MatchString(probe) {
+				continue
+			}
+			sc := r.base + map[bool]int{true: 1}[r.method != "" && r.method == reqMethod]
+			if sc > score {
+				best, score = []int{i}, sc
+			} else if sc == score {
+				best = append(best, i)
+			}
+		}
+	}
+	for l := 0; l <= maxIndexSegs && l <= len(segs); l++ {
+		if l > 0 && strings.Contains(segs[l-1], "\x00") {
+			break
+		}
+		try(m.index[indexKey(segs[:l])])
+	}
+	if len(best) == 0 {
+		return nil, 0, host
+	}
+	return best, score, host
+}
+
+// Match reports how specifically a request (method, url) matches a served route (higher = more
+// specific; ok = false when it does not match), and the host part of the request URL.
+func Match(method, route, reqMethod, url string) (score int, host string, ok bool) {
+	re := routeRegexp(route)
+	if re == nil {
+		return 0, "", false
+	}
+	p, host := normURL(url)
+	if method != "" && method != "ANY" && reqMethod != "" && method != reqMethod {
+		return 0, host, false
+	}
+	if !re.MatchString(strings.ReplaceAll(p, "\x00", "x")) {
+		return 0, host, false
+	}
+	score = len(routeParam.ReplaceAllString(route, ""))*2 + map[bool]int{true: 1}[method != "" && method == reqMethod]
+	return score, host, true
 }
 
 // Repo is one repository's files (multi-repo worlds prefix paths with "name/").
@@ -375,10 +520,11 @@ func (b *builder) finish() *Graph {
 		}
 	}
 	for _, r := range b.requests {
+		b.g.Requests = append(b.g.Requests, Request{Path: firstNonEmpty(r.file, r.from.Path), Method: r.method, URL: r.url, Line: r.line})
 		p, host := normURL(r.url)
 		probe := strings.ReplaceAll(p, "\x00", "x") // template holes
 		matched := false
-		if host == "" || host == "localhost" || strings.HasPrefix(host, "127.0.0.1") {
+		if h := hostNoPort(host); h == "" || h == "localhost" || strings.HasPrefix(h, "127.") || h == "0.0.0.0" {
 			// the most specific route wins: "/" serving static files must not swallow "/api/x"
 			best, bestScore := []ep(nil), -1
 			for _, e := range eps {

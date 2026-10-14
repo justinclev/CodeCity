@@ -18,9 +18,9 @@ export interface City {
 }
 
 export interface Commit { hash: string; date: string; author: string; subject: string; repo?: number }
-export interface RepoInfo { name: string; source: string; remote?: string; path?: string; ref: string; commit: string; district: number; churn: boolean }
+export interface RepoInfo { name: string; source: string; remote?: string; path?: string; base?: string; ref: string; commit: string; district: number; churn: boolean }
 /** dependency: from depends on to (evidence, importing files → imported directory); people: shared contributors. */
-export interface Link { from: number; to: number; kind: 'dependency' | 'people'; evidence?: string[]; files?: [number, number][]; people?: string[]; peopleCount?: number }
+export interface Link { from: number; to: number; kind: 'dependency' | 'people' | 'api' | 'message' | 'data'; evidence?: string[]; files?: [number, number][]; via?: { a: number; b: number; l: string }[]; brokers?: string[]; people?: string[]; peopleCount?: number }
 export interface Author { name: string; commits: number; files: number; last: number }
 
 export interface District {
@@ -45,9 +45,15 @@ export interface Building {
   impd?: number[];
   /** Architecture from the code at the newest commit (absent if the file is gone by then). */
   shape?: Shape;
+  /** Grouped landmark: "library" (docs), "plant" (deps), "port" (i18n). */
+  lm?: string;
+  /** Items inside a landmark building (documents, dependencies, or locale files). */
+  docs?: DocFile[];
 }
 
-export type ShapeKind = 'tower' | 'slab' | 'types' | 'data' | 'doc' | 'test';
+export interface DocFile { name: string; path: string; lang: string }
+
+export type ShapeKind = 'tower' | 'slab' | 'types' | 'data' | 'doc' | 'test' | 'plant' | 'port';
 export type Role = 'entry' | 'serve' | 'db' | 'exec' | 'files' | 'call';
 
 export interface Shape {
@@ -68,4 +74,4 @@ export type Metric = 'loc' | 'lines' | 'bytes' | 'complexity';
 export type ScaleMode = 'sqrt' | 'linear' | 'log';
 export type ColorMode = 'language' | 'hotspot' | 'churn' | 'complexity' | 'age' | 'owner' | 'knowledge' | 'compare' | 'depth' | 'dependents';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 8;

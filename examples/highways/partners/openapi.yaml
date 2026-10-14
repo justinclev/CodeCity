@@ -1,0 +1,11 @@
+openapi: 3.0.0
+info:
+  title: Partners
+  version: 1.0.0
+paths:
+  /partners/{id}:
+    get:
+      summary: One partner
+  /partners/{id}/offers:
+    get:
+      summary: Offers of a partner

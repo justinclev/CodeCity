@@ -1,0 +1,1 @@
+{ "name": "shop-graphql", "version": "1.0.0", "dependencies": { "@apollo/server": "^4.0.0" } }

@@ -176,6 +176,12 @@ export interface BuildingInfo {
   history?: HistoryState;
   /** Reasons for the building's architecture (empty in classic mode). */
   looks: string[];
+  /** Entrances and exits in this file (when the doors are shown). */
+  gates?: { id: number; dir: 'in' | 'out'; kind: string; label: string; line?: number; edge: number }[];
+  /** A landmark building: "library" (docs), "plant" (deps), "port" (i18n). */
+  landmark?: string;
+  /** The items it lists (documents, dependencies, or localization files). */
+  docs?: { name: string; path: string; lang: string }[];
 }
 
 export interface FileCommit { hash: string; date: string; author: string; subject: string; body?: string }
@@ -194,6 +200,9 @@ export interface DistrictInfo {
 export interface InfoHandlers {
   onClose(): void; onPick(i: number): void; onZoomDistrict(): void; onDistrict(d: number): void;
   onPiece(k: number): void; onExplode(): void; onCode(): void;
+  onGateFlow(id: number): void; onGateCode(line: number | undefined): void; onGate(k: number): void;
+  onDoc(path: string, name: string): void;
+  onRoute(k: number, door: number): void; onRouteStep(k: number): void; onRouteStop(): void;
 }
 
 function infoHead(title: string, h: InfoHandlers) {
@@ -216,6 +225,110 @@ function kv(rows: [string, string | Node][]) {
   for (const [k, v] of rows) { g.append(el('span', '', k)); const s = el('span'); s.append(v); g.append(s); }
   return g;
 }
+
+const GATE_NOUN: Record<string, string> = {
+  endpoint: 'route', command: 'command', flag: 'flag', event: 'event', entry: 'program entry', env: 'environment', args: 'arguments', stdin: 'stdin',
+  http: 'HTTP', db: 'database', storage: 'storage', process: 'process', file: 'file', network: 'network', request: 'service call',
+};
+
+/** Entrances and exits of a file; each leads to its place in the flow view or to the line in the code. */
+function gatesSection(gates: NonNullable<BuildingInfo['gates']>, h: InfoHandlers) {
+  const w = el('div', 'gates');
+  w.append(el('h4', '', 'Entrances & exits'));
+  for (const dir of ['in', 'out'] as const) {
+    const list = gates.filter(g => g.dir === dir);
+    if (!list.length) continue;
+    w.append(el('div', 'gatehead ' + dir, dir === 'in' ? `Ways in (${list.length})` : `Ways out (${list.length})`));
+    for (const g of list) {
+      const row = el('div', 'gate ' + dir);
+      const name = el('button', 'gname', g.label);
+      name.title = (GATE_NOUN[g.kind] ?? g.kind) + (g.line ? ` · line ${g.line}` : '') + ' · show its street';
+      name.onclick = () => h.onGate(g.edge);
+      const flow = el('button', 'icon', 'flow');
+      flow.title = 'open the flow view at this ' + (GATE_NOUN[g.kind] ?? 'door');
+      flow.onclick = () => h.onGateFlow(g.id);
+      const code = el('button', 'icon', 'code');
+      code.title = g.line ? `show the code (line ${g.line})` : 'show the code';
+      code.onclick = () => h.onGateCode(g.line);
+      row.append(el('span', 'gkind', GATE_NOUN[g.kind] ?? g.kind), name, flow, code);
+      w.append(row);
+    }
+  }
+  return w;
+}
+
+export interface GateInfo {
+  label: string; dir: 'in' | 'out'; kind: string; id: number; repo: string; index: number;
+  leads: { building: number; path: string; line?: number; code?: number }[];
+}
+
+export interface RouteInfo {
+  title: string; at: number;
+  steps: { kind: 'enter' | 'code' | 'out'; label: string; detail: string; path: string; line?: number }[];
+}
+
+/** A gate on the city edge: what it is and the files its street leads to. */
+export function showGate(d: GateInfo, h: InfoHandlers) {
+  const box = $('info');
+  box.replaceChildren(infoHead(d.label, h), el('div', 'p', `${d.dir === 'in' ? 'Entrance' : 'Exit'} · ${GATE_NOUN[d.kind] ?? d.kind}${d.repo ? ' · ' + d.repo : ''}`));
+  const open = el('button', 'wide', 'Open in flow view');
+  open.onclick = () => h.onGateFlow(d.id);
+  box.append(open);
+  if (d.dir === 'in' && d.leads.length === 1) {
+    const go = el('button', 'wide primary', 'Follow the route');
+    go.title = 'walk through what this does, file by file';
+    go.onclick = () => h.onRoute(d.index, 0);
+    box.append(go);
+  }
+  box.append(el('h4', '', d.dir === 'in' ? 'The street leads to' : 'Reached from'));
+  const list = el('div', 'list');
+  d.leads.forEach((l, n) => {
+    const row = el('div', 'leadrow');
+    const b = el('button');
+    b.title = l.line ? `${l.path}:${l.line}` : l.path;
+    b.append(el('span', 'path', '‎' + l.path + (l.line ? ':' + l.line : '')));
+    b.onclick = () => { h.onPick(l.building); if (l.line) setTimeout(() => h.onGateCode(l.line), 400); };
+    row.append(b);
+    if (d.dir === 'in' && d.leads.length > 1) {
+      const r = el('button', 'icon', 'route');
+      r.title = 'follow what this does, file by file';
+      r.onclick = () => h.onRoute(d.index, n);
+      row.append(r);
+    }
+    list.append(row);
+  });
+  box.append(list);
+  box.hidden = false;
+}
+
+/** A route through the code, one stop per file; the current stop is open in the city. */
+export function showRoute(d: RouteInfo, h: InfoHandlers) {
+  const box = $('info');
+  box.replaceChildren(infoHead('Route · ' + d.title, h));
+  box.append(el('div', 'p', `Stop ${d.at + 1} of ${d.steps.length} · ← → to move, Esc to leave`));
+  const nav = el('div', 'routenav');
+  const back = el('button', '', '‹ Back');
+  back.disabled = d.at <= 0;
+  back.onclick = () => h.onRouteStep(d.at - 1);
+  const next = el('button', 'primary', d.at >= d.steps.length - 1 ? 'Done' : 'Next ›');
+  next.onclick = () => (d.at >= d.steps.length - 1 ? h.onRouteStop() : h.onRouteStep(d.at + 1));
+  nav.append(back, next);
+  box.append(nav);
+  const list = el('ol', 'routelist');
+  d.steps.forEach((s, k) => {
+    const li = el('li', `${s.kind}${k === d.at ? ' now' : k < d.at ? ' past' : ''}`);
+    const b = el('button');
+    b.append(el('span', 'rlabel', s.label), el('span', 'rdetail', s.detail), el('span', 'rpath', '‎' + s.path + (s.line ? ':' + s.line : '')));
+    b.onclick = () => h.onRouteStep(k);
+    li.append(b);
+    list.append(li);
+  });
+  box.append(list);
+  box.hidden = false;
+  list.querySelector('.now')?.scrollIntoView({ block: 'nearest' });
+}
+
+export function setGateCount(text: string) { $('gatecount').textContent = text; }
 
 export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
   const box = $('info');
@@ -261,6 +374,7 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     }
     box.append(list);
   }
+  if (d.gates?.length) box.append(gatesSection(d.gates, h));
   if (d.looks.length) {
     const w = el('div', 'looks');
     w.append(el('div', 'title', 'Why it looks like this'));
@@ -268,7 +382,7 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     box.append(w);
   }
   box.append(depsSection(d.deps, h));
-  box.append(piecesSection(d.pieces, h));
+  if (d.docs?.length) box.append(docsSection(d.landmark ?? 'library', d.docs, h)); else box.append(piecesSection(d.pieces, h));
   if (d.links.length) {
     const links = el('div', 'links');
     for (const l of d.links) {
@@ -335,6 +449,34 @@ function depsSection(d: BuildingInfo['deps'], h: InfoHandlers): HTMLElement {
   return wrap;
 }
 
+const LANDMARK_LABEL: Record<string, [string, string, string]> = {
+  library: ['Library', 'document', 'documents'],
+  plant: ['Power plant', 'dependency', 'dependencies'],
+  port: ['Airport', 'translation', 'translations'],
+};
+
+function docsSection(landmark: string, docs: NonNullable<BuildingInfo['docs']>, h: InfoHandlers): HTMLElement {
+  const [title, one, many] = LANDMARK_LABEL[landmark] ?? LANDMARK_LABEL.library;
+  const wrap = el('div', 'docs');
+  wrap.append(el('h4', '', `${title} · ${docs.length} ${docs.length === 1 ? one : many}`));
+  const list = el('div', 'list');
+  for (const df of docs) {
+    if (df.path) { // an openable file
+      const b = el('button', 'docrow');
+      b.title = `open ${df.path}`;
+      b.append(el('span', 'nm', df.name), el('span', 'kind', df.lang));
+      b.onclick = () => h.onDoc(df.path, df.name);
+      list.append(b);
+    } else { // a listed dependency (not openable)
+      const row = el('div', 'docrow static');
+      row.append(el('span', 'nm', df.name), el('span', 'kind', df.lang));
+      list.append(row);
+    }
+  }
+  wrap.append(list);
+  return wrap;
+}
+
 function piecesSection(st: PiecesState, h: InfoHandlers): HTMLElement {
   const wrap = el('div', 'pieces');
   const head = el('div', 'pieces-head');
@@ -371,7 +513,8 @@ function piecesSection(st: PiecesState, h: InfoHandlers): HTMLElement {
 }
 
 export interface LinkInfo {
-  from: string; to: string; kind: 'dependency' | 'people';
+  from: string; to: string; kind: 'dependency' | 'people' | 'api' | 'message' | 'data';
+  via: { from: number; to: number; label: string; fromPath: string; toPath: string }[]; brokers: string[];
   evidence: string[];
   files: { index: number; path: string; target: string }[];
   people: string[]; peopleCount: number;
@@ -383,8 +526,10 @@ export function showLink(d: LinkInfo | null, h: InfoHandlers) {
   const title = d.kind === 'people' ? `${d.from} ↔ ${d.to}` : `${d.from} → ${d.to}`;
   box.replaceChildren(infoHead(title, h));
   const head = el('div', 'linkhead');
-  head.append(el('span', 'kindtag' + (d.kind === 'people' ? ' people' : ''), d.kind === 'people' ? 'shared people' : 'dependency'));
-  head.append(el('span', '', d.kind === 'people' ? `${fmt(d.peopleCount)} contributors work on both` : `${d.from} depends on ${d.to}`));
+  const tag = { dependency: 'dependency', people: 'shared people', api: 'API highway', message: 'message highway', data: 'database highway' }[d.kind];
+  const what = { dependency: `${d.from} depends on ${d.to}`, people: `${fmt(d.peopleCount)} contributors work on both`, api: `${d.from} calls routes served by ${d.to}`,
+    message: `${d.from} publishes, ${d.to} consumes${d.brokers.length ? ' · ' + d.brokers.join(', ') : ''}`, data: `${d.from} and ${d.to} use the same database tables` }[d.kind];
+  head.append(el('span', 'kindtag ' + d.kind, tag), el('span', '', what));
   box.append(head);
   if (d.evidence.length) {
     box.append(el('h4', '', 'Evidence'));
@@ -400,6 +545,18 @@ export function showLink(d: LinkInfo | null, h: InfoHandlers) {
       b.title = `${f.path}\n→ ${f.target}`;
       b.append(el('span', 'path', '\u200E' + f.path), el('span', 'num', '→ ' + f.target.split('/').slice(-1)[0]));
       b.onclick = () => h.onPick(f.index);
+      list.append(b);
+    }
+    box.append(list);
+  }
+  if (d.via.length) {
+    box.append(el('h4', '', d.kind === 'api' ? `Calls (${fmt(d.via.length)})` : d.kind === 'data' ? `Tables (${fmt(d.via.length)})` : `Topics (${fmt(d.via.length)}): publisher → subscriber`));
+    const list = el('div', 'list');
+    for (const v of d.via.slice(0, 200)) {
+      const b = el('button');
+      b.title = `${v.fromPath}\n→ ${v.toPath}`;
+      b.append(el('span', 'path', '\u200E' + v.fromPath), el('span', 'num', v.label));
+      b.onclick = () => h.onPick(v.from);
       list.append(b);
     }
     box.append(list);
@@ -702,17 +859,18 @@ export interface Controls {
   onCopyReport(): void;
   onLinksToggle(): void;
   onCodeLinks(mode: 'off' | 'selection' | 'all'): void;
+  onGates(on: boolean): void;
   onBuildings(classic: boolean): void;
 }
 
 export function linkToggles() {
-  return { deps: $<HTMLInputElement>('showdeps').checked, people: $<HTMLInputElement>('showpeople').checked };
+  return { deps: $<HTMLInputElement>('showdeps').checked, people: $<HTMLInputElement>('showpeople').checked, api: $<HTMLInputElement>('showapi').checked, message: $<HTMLInputElement>('showmsg').checked, data: $<HTMLInputElement>('showdb').checked };
 }
 
 function autosize() {
   const t = $<HTMLTextAreaElement>('source');
-  const n = Math.min(8, Math.max(1, t.value.split('\n').length));
-  t.rows = n;
+  t.style.height = 'auto'; // grow with the content (wrapped lines included), up to 70% of the window
+  t.style.height = Math.min(t.scrollHeight + 2, Math.round(window.innerHeight * 0.7)) + 'px';
 }
 
 export function bindControls(h: Controls) {
@@ -726,11 +884,17 @@ export function bindControls(h: Controls) {
   $<HTMLInputElement>('search').onkeydown = e => { if (e.key === 'Enter') h.onSearchEnter(); if (e.key === 'Escape') (e.target as HTMLInputElement).blur(); };
   const src = $<HTMLTextAreaElement>('source');
   src.addEventListener('input', autosize);
+  window.addEventListener('resize', autosize);
+  requestAnimationFrame(autosize);
   src.onkeydown = e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) $<HTMLFormElement>('repoform').requestSubmit(); };
   $('showdeps').onchange = () => h.onLinksToggle();
+  $<HTMLInputElement>('showgates').onchange = e => h.onGates((e.target as HTMLInputElement).checked);
   $<HTMLSelectElement>('buildings').onchange = e => h.onBuildings((e.target as HTMLSelectElement).value === 'classic');
   $<HTMLSelectElement>('codelinks').onchange = e => h.onCodeLinks((e.target as HTMLSelectElement).value as 'off' | 'selection' | 'all');
   $('showpeople').onchange = () => h.onLinksToggle();
+  $('showapi').onchange = () => h.onLinksToggle();
+  $('showmsg').onchange = () => h.onLinksToggle();
+  $('showdb').onchange = () => h.onLinksToggle();
   $('repoform').onsubmit = e => {
     e.preventDefault();
     h.onSubmit(src.value.trim(), '',
@@ -763,13 +927,14 @@ export function setBaselineRow(visible: boolean, label: string) {
   $('cwinrow').hidden = visible;
 }
 
-export function setForm(source: string, ref: string, commits: number, churn = true) {
+export function setForm(source: string, ref: string, commits: number, churn = true, split = false) {
   // an old-style default ref folds into the lines that do not name one
   if (ref) source = source.split('\n').map(l => (l.trim() && !l.trim().startsWith('#') && l.trim().split(/\s+/).length === 1 ? `${l.trim()} ${ref}` : l)).join('\n');
   $<HTMLTextAreaElement>('source').value = source;
   autosize();
   $<HTMLInputElement>('commits').value = String(commits);
   $<HTMLInputElement>('churn').checked = churn;
+  $<HTMLInputElement>('split').checked = split;
 }
 
 export function flashCopied(text: string) {

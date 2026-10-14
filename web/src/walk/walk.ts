@@ -10,7 +10,9 @@ import type { TourStop } from '../tour';
 import { CityMap, type MapLabel, type MapMarker } from './map';
 import { Game, type GameWorld, type Reward } from './game';
 import { InfoCard, QuestLog, QuizBox, Rewards, SearchBox, StatusBar, TourCard, type CardData, type SearchHit } from './panels';
+import { Music } from './music';
 import { Props, type Shard, type Terminal } from './props';
+import { PlaneMode } from './plane';
 
 /** A definition from the symbol index: [name, kind, path, start, end]. */
 export type Sym = [string, string, string, number, number];
@@ -36,9 +38,15 @@ export interface WalkHost {
   topDistricts(): { path: string; name: string; x: number; z: number; w: number; d: number }[];
   mapLabels(): MapLabel[];
   searchFiles(q: string): number[];
+  /** Entrances and exits on the city edge (the door list shared with the city view). */
+  doors(): { k: number; dir: 'in' | 'out'; label: string; leads: number }[];
+  /** Every door behind one edge gate (a collapsed "7 routes" gate lists each route with the file and line of its definition). */
+  leadsOf(k: number): { label: string; building: number; line?: number; path: string }[];
+  /** The code route behind a door: gate, then spot by spot through the functionality. */
+  doorRoute(k: number, doorAt?: number): { title: string; steps: { kind: 'enter' | 'code' | 'out'; label: string; detail: string; building: number; line?: number }[] } | null;
 }
 
-const HELP = 'WASD move · Space jump (double-tap: fly) · Shift run / descend · double-tap W sprint · M map · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
+const HELP = 'WASD move · Space jump · F or double-tap Space: fly (W goes where you look) · Shift run / descend · double-tap W sprint · M map · P music · R routes · T tour · / search · X take apart · I info · J quests · E enter/use · V view · Q exit';
 
 const keyDown = new Set<string>();
 
@@ -71,7 +79,7 @@ export class WalkMode {
   private locked = false;
   private drag: { x: number; y: number } | null = null;
   private aim: { kind: 'code'; wall: CodeWall; token: string | null; line: number } | { kind: 'panel'; panel: TextPanel; row: PanelRow | null }
-    | { kind: 'elevator' } | { kind: 'exit' } | { kind: 'building'; i: number } | { kind: 'floor'; k: number } | null = null;
+    | { kind: 'elevator' } | { kind: 'exit' } | { kind: 'building'; i: number } | { kind: 'floor'; k: number } | { kind: 'gate'; k: number } | null = null;
   private busy = false; // teleporting / entering
   private savedCam = { pos: new THREE.Vector3(), target: new THREE.Vector3(), fov: 45, near: 0.1, far: 20000 };
   private tracer: { mesh: THREE.Mesh; head: THREE.Mesh; mat: THREE.ShaderMaterial; curve: THREE.CurvePath<THREE.Vector3>; t: number; dur: number; done: () => void } | null = null;
@@ -85,6 +93,8 @@ export class WalkMode {
   private lastSpace = -1;
   private lastW = -1;
   private sprint = false;
+  private flyBoost = 1;
+  private flySpeed = 0;
   private velH = new THREE.Vector3();
   // taking a building apart
   private explodeFloors: Floor[] = [];
@@ -104,10 +114,17 @@ export class WalkMode {
   private search = new SearchBox(q => this.find(q), () => this.search.hide());
   private tour: TourStop[] = [];
   private tourK = -1;
+  private routeSteps: { kind: 'enter' | 'code' | 'out'; label: string; detail: string; building: number; line?: number }[] = [];
+  private routeTitle = '';
+  private routeK = -1;
   private props: Props | null = null;
+  private music = new Music();
   private symList: Sym[] = [];
   private seeTimer = 0;
   private mapDirty = false;
+  // plane easter egg
+  private planeCtrl: PlaneMode | null = null;
+  private piloting = false;
 
   constructor(private scene: CityScene, private host: WalkHost) {}
 
@@ -121,6 +138,7 @@ export class WalkMode {
   start(at = -1) {
     if (this.active || !this.scene.loaded) return;
     this.active = true;
+    void this.music.start();
     (document.activeElement as HTMLElement | null)?.blur?.(); // keys belong to walk mode now
     document.body.classList.add('walking');
     const cam = this.scene.camera;
@@ -172,10 +190,12 @@ export class WalkMode {
   stop() {
     if (!this.active) return;
     this.active = false;
+    this.music.stop();
     document.body.classList.remove('walking');
     if (document.pointerLockElement) document.exitPointerLock();
     this.leaveInterior();
     if (this.scene.explodedBuilding >= 0) this.scene.collapse(true);
+    if (this.piloting) { this.planeCtrl?.dispose(); this.piloting = false; }
     this.props?.dispose(); this.props = null;
     this.map?.closeFull(); this.map = null;
     this.tourK = -1; this.cardFor = -1;
@@ -266,6 +286,7 @@ export class WalkMode {
       else if (this.log.open) this.log.hide();
       else if (this.map?.full) this.toggleMap();
       else if (this.card.open) this.closeCard();
+      else if (this.routeK >= 0) this.endRoute();
       else if (this.tourK >= 0) this.endTour();
       return;
     }
@@ -273,12 +294,15 @@ export class WalkMode {
     if (e.code === 'KeyV') { this.firstPerson = !this.firstPerson; return; }
     if (e.code === 'KeyE') { this.use(); return; }
     if (e.code === 'KeyM') { this.toggleMap(); return; }
+    if (e.code === 'KeyF' && !e.repeat) { this.toggleFly(); return; }
+    if (e.code === 'KeyP') { this.music.toggle(); return; }
     if (e.code === 'KeyX') { void this.toggleExplode(); return; }
     if (e.code === 'KeyI') { this.toggleCard(); return; }
     if (e.code === 'KeyJ') { if (this.log.open) this.log.hide(); else { this.log.show(this.game!, () => this.resetGame()); this.freeMouse(); } return; }
     if (e.code === 'KeyT') { if (this.tourK >= 0) this.endTour(); else this.startTour(); return; }
-    if (e.code === 'KeyN') { if (this.tourK >= 0) this.goStop(this.tourK + 1); return; }
-    if (e.code === 'KeyB') { if (this.tourK > 0) this.goStop(this.tourK - 1); return; }
+    if (e.code === 'KeyR') { if (this.routeK >= 0) this.endRoute(); else this.pickRoute(); return; }
+    if (e.code === 'KeyN') { if (this.routeK >= 0) this.goRoute(this.routeK + 1); else if (this.tourK >= 0) this.goStop(this.tourK + 1); return; }
+    if (e.code === 'KeyB') { if (this.routeK > 0) this.goRoute(this.routeK - 1); else if (this.tourK > 0) this.goStop(this.tourK - 1); return; }
     if (e.code === 'KeyH') { this.toast(HELP, 10); return; }
     if (e.code === 'Slash') { e.preventDefault(); this.search.show(); this.freeMouse(); return; }
     if (e.code === 'Space' && !e.repeat) {
@@ -329,7 +353,7 @@ export class WalkMode {
     this.miniLabel.textContent = 'M map';
     miniWrap.append(this.mini, this.miniLabel);
     miniWrap.onclick = () => this.toggleMap();
-    this.hud.append(cross, this.prompt, this.menu, this.toastEl, this.fx, exit, view, miniWrap, this.status.root, this.rewards.root,
+    this.hud.append(cross, this.prompt, this.menu, this.toastEl, this.fx, exit, view, this.music.button, miniWrap, this.status.root, this.rewards.root,
       this.card.root, this.tourCard.root, this.quizBox.root, this.log.root, this.search.root);
     document.body.append(this.hud);
   }
@@ -401,7 +425,7 @@ export class WalkMode {
         }
         return { x: this.pos.x, z: this.pos.z, heading: this.avatar.group.rotation.y, yaw: this.yaw };
       },
-    }, [{ x: this.pos.x, z: this.pos.z }]);
+    }, [{ x: this.pos.x, z: this.pos.z }], this.scene.roads());
     this.status.update(this.game);
   }
 
@@ -413,6 +437,7 @@ export class WalkMode {
     const q = this.game?.activeQuest();
     for (const i of q?.pins?.() ?? []) { if (this.game!.isStudied(i) && q!.id !== 'entry' && q!.id !== 'wiring') continue; const c = center(i); if (c) out.push({ ...c, kind: 'quest' }); }
     if (this.tourK >= 0) this.tour.forEach((st, k) => { const c = center(st.building); if (c) out.push({ ...c, kind: 'tour', label: String(k + 1) }); });
+    if (this.routeK >= 0) this.routeSteps.forEach((st, k) => { const c = center(st.building); if (c) out.push({ ...c, kind: 'tour', label: String(k + 1) }); });
     return out;
   }
 
@@ -475,6 +500,7 @@ export class WalkMode {
     else if (a.kind === 'panel' && a.row?.action) a.row.action();
     else if (a.kind === 'building') this.enter(a.i);
     else if (a.kind === 'floor') this.enterFloor(a.k);
+    else if (a.kind === 'gate') this.openGate(a.k);
     else if (a.kind === 'elevator') this.use();
     else if (a.kind === 'exit') this.exitBuilding();
   }
@@ -483,11 +509,15 @@ export class WalkMode {
   private use() {
     if (this.busy) return;
     if (this.where === 'city') {
+      // plane easter egg: board the airport plane
+      const ps = this.nearPlane();
+      if (ps && !this.piloting) { this.boardPlane(ps); return; }
       const t = this.nearTerminal();
       if (t) { this.openQuiz(t); return; }
       const roof = this.roofUnderfoot();
       if (roof >= 0) { this.useRoof(roof); return; }
       if (this.aim?.kind === 'floor') { this.enterFloor(this.aim.k); return; }
+      if (this.aim?.kind === 'gate') { this.openGate(this.aim.k); return; }
       const landed = this.landed.i >= 0 && Math.hypot(this.pos.x - this.landed.x, this.pos.z - this.landed.z) < this.u * 2 ? this.landed.i : -1;
       const i = this.aim?.kind === 'building' ? this.aim.i : landed >= 0 ? landed : this.nearestFacade();
       if (i >= 0) this.enter(i);
@@ -918,6 +948,70 @@ export class WalkMode {
     this.goStop(0);
   }
 
+  /** R: every entrance (paged), then each route behind it; the route goes spot by spot (N / B) from its definition. */
+  private pickRoute() {
+    const doors = this.host.doors().filter(d => d.dir === 'in');
+    if (!doors.length) { this.toast('No doors in this city (they need the server and a Go/JS/TS/Python/Rust flow)'); return; }
+    this.pagedMenu('ROUTES — pick an entrance', doors.map(d => ({ label: d.label, sub: d.leads > 1 ? `${d.leads} routes` : undefined, go: () => this.chooseLead(d.k) })));
+  }
+
+  /** Click / E on an arch: it flares, then its options appear. */
+  private openGate(k: number) {
+    const d = this.host.doors().find(x => x.k === k);
+    if (!d || this.busy) return;
+    this.closeMenu();
+    this.scene.highlightGate(-1);
+    this.scene.highlightGate(k); // restarts the glow
+    this.toast(`${d.dir === 'in' ? 'ENTRANCE' : 'EXIT'} · ${d.label}`, 1.2);
+    window.setTimeout(() => { if (this.active && !this.busy) this.chooseLead(k); }, 700);
+  }
+
+  /** The doors behind one edge gate: one entry per route / table / host, each with its file and line. */
+  private chooseLead(k: number) {
+    const d = this.host.doors().find(x => x.k === k);
+    const leads = this.host.leadsOf(k);
+    if (!d || !leads.length) return;
+    if (d.dir === 'in' && leads.length === 1) { this.startRoute(k, 0); return; }
+    this.pagedMenu(`${d.dir === 'in' ? 'ENTRANCE' : 'EXIT'} — ${d.label}`, leads.map((l, j) => ({
+      label: l.label, sub: `${l.path.split('/').slice(-2).join('/')}${l.line ? ':' + l.line : ''}`,
+      go: () => d.dir === 'in' ? this.startRoute(k, j) : this.teleport({ building: l.building, line: l.line, label: `${l.label} — ${l.path}${l.line ? ':' + l.line : ''}` }),
+    })));
+  }
+
+  /** Menu with more than nine entries: eight per page, the ninth turns the page. */
+  private pagedMenu(title: string, items: { label: string; sub?: string; go: () => void }[], page = 0) {
+    this.freeMouse();
+    const per = items.length > 9 ? 8 : 9, pages = Math.ceil(items.length / per);
+    const here = items.slice(page * per, page * per + per);
+    const list = [...here];
+    if (pages > 1) list.push({ label: page + 1 < pages ? 'more ▸' : '◂ first page', sub: `page ${page + 1}/${pages}`, go: () => this.pagedMenu(title, items, (page + 1) % pages) });
+    this.openMenu(title, list);
+  }
+
+  private startRoute(k: number, doorAt = 0) {
+    const r = this.host.doorRoute(k, doorAt);
+    if (!r) { this.toast('No route found behind that door'); return; }
+    if (this.tourK >= 0) this.endTour();
+    this.routeSteps = r.steps; this.routeTitle = r.title;
+    this.goRoute(0);
+  }
+
+  private endRoute() {
+    this.routeK = -1; this.routeSteps = [];
+    this.tourCard.hide();
+  }
+
+  private goRoute(k: number) {
+    if (k >= this.routeSteps.length) { this.toast('End of the route.', 4); this.endRoute(); return; }
+    if (k < 0 || this.busy) return;
+    this.routeK = k; this.mapDirty = true;
+    const s = this.routeSteps[k];
+    const kind = s.kind === 'enter' ? 'ENTRANCE' : s.kind === 'out' ? 'EXIT' : 'CODE';
+    this.tourCard.show(k, this.routeSteps.length, `${this.routeTitle} · ${kind}`, this.host.buildingName(s.building), [s.label, s.detail], 'N next · B back · E go inside · R end route');
+    if (s.line !== undefined) this.teleport({ building: s.building, line: s.line, label: `${s.label}:${s.line}` });
+    else this.travel(s.building, () => void this.openCard(s.building, [s.label, s.detail]));
+  }
+
   private endTour() {
     this.tourK = -1;
     this.tourCard.hide();
@@ -993,6 +1087,13 @@ export class WalkMode {
     const cam = this.scene.camera;
     this.hudFrame(dt);
 
+    // --- plane flight mode ---
+    if (this.piloting && this.planeCtrl) {
+      const stillFlying = this.planeCtrl.frame(dt, keyDown);
+      if (!stillFlying) this.exitPlane();
+      return;
+    }
+
     if (this.tracer) {
       const tr = this.tracer;
       tr.t += dt / tr.dur;
@@ -1042,9 +1143,11 @@ export class WalkMode {
     this.trail.update(dt, this.pos, this.h * 0.32, (running || this.flying) && this.lastSpeed > this.h * 0.5);
     if (this.where === 'city' && this.time - this.lastDoorCheck > 0.3) {
       this.lastDoorCheck = this.time;
+      const plane = this.nearPlane();
       const t = this.nearTerminal();
       const near = this.nearestFacade();
-      if (t && !this.quizBox.open) this.showPrompt(`[E] quiz terminal · ${t.label}`);
+      if (plane) this.showPrompt('[E] board the plane ✈');
+      else if (t && !this.quizBox.open) this.showPrompt(`[E] quiz terminal · ${t.label}`);
       else if (near >= 0 && this.aim?.kind !== 'building' && this.aim?.kind !== 'floor') this.showPrompt(`[E] enter ${this.host.buildingName(near)} · [X] take apart · [I] info`);
     }
     if (this.where === 'city') this.cityChecks(dt);
@@ -1101,6 +1204,46 @@ export class WalkMode {
     return null;
   }
 
+  private nearPlane(): THREE.Vector3 | null {
+    const spots = this.scene.landmarks?.planeSpots ?? [];
+    const thresh = this.scene.cell * 5.5;
+    for (const s of spots) {
+      if (Math.hypot(s.x - this.pos.x, s.z - this.pos.z) < thresh && Math.abs(s.y - this.pos.y) < this.u * 5) return s;
+    }
+    return null;
+  }
+
+  private boardPlane(spot: THREE.Vector3) {
+    if (this.piloting) return;
+    this.piloting = true;
+    // hide avatar + standard trail
+    this.avatar.setVisible(false);
+    this.trail.mesh.visible = false;
+    // lazily create the controller
+    if (!this.planeCtrl) this.planeCtrl = new PlaneMode(this.scene);
+    this.planeCtrl.enter(spot.clone(), this.yaw);
+    this.toast('✈  PLANE MODE  — W/S pitch · A/D roll · Space throttle+ · Shift throttle- · E land · Q eject', 7);
+  }
+
+  private exitPlane() {
+    if (!this.piloting || !this.planeCtrl) return;
+    this.piloting = false;
+    const land = this.planeCtrl.landing;
+    this.planeCtrl.dispose();
+    // restore avatar visibility
+    this.avatar.setVisible(!this.firstPerson && !this.busy);
+    this.trail.mesh.visible = true;
+    // relocate the player to where the plane landed
+    if (land) {
+      this.pos.set(land.x, Math.max(0, land.y), land.z);
+      this.yaw = land.yaw;
+      this.faceCamera();
+    }
+    // reset camera fov
+    const cam = this.scene.camera;
+    cam.fov = 70; cam.updateProjectionMatrix();
+  }
+
   private lastSpeed = 0;
   private idle = 0;
   /** Direction the body faces (rotation.y; the model looks down +z). Follows the walking direction. */
@@ -1129,8 +1272,11 @@ export class WalkMode {
     let v: THREE.Vector3;
     if (this.flying) {
       // creative-mode flight: faster than walking, with a little glide (inertia)
-      const speed = this.h * (this.sprint ? 14 : 6.5);
-      this.velH.lerp(dir.clone().multiplyScalar(speed), Math.min(1, dt * 5));
+      // cruise speed climbs the longer you hold a direction (x1 -> x3 over ~1.5 s); double-tap W is a further x2.5
+      this.flyBoost = dir.lengthSq() > 0 ? Math.min(1.6, this.flyBoost + dt * 0.4) : 1;
+      const speed = this.h * 8 * this.flyBoost * (this.sprint ? 2 : 1);
+      this.flySpeed = speed;
+      this.velH.lerp(dir.clone().multiplyScalar(speed), Math.min(1, dt * 4));
       v = this.velH.clone().multiplyScalar(dt);
     } else {
       const run = shift || this.sprint;
@@ -1161,7 +1307,10 @@ export class WalkMode {
     let ny: number;
     if (this.flying) {
       const up = (key('Space') ? 1 : 0) - (shift && !typing ? 1 : 0);
-      this.velY += (up * this.h * 5.5 - this.velY) * Math.min(1, dt * 8);
+      // W/S also follow where you look (a dead zone keeps level flight level): look up and fly up
+      const tilt = Math.abs(this.pitch) > 0.25 ? Math.sign(this.pitch) * (Math.abs(this.pitch) - 0.25) / 0.9 : 0;
+      const climb = f !== 0 ? tilt * f * this.flySpeed : 0;
+      this.velY += (up * this.h * 7 + climb - this.velY) * Math.min(1, dt * 5);
       ny = this.pos.y + this.velY * dt;
       const ceiling = this.scene.skyline() * 2 + this.scene.worldSize * 0.6;
       if (ny > ceiling) { ny = ceiling; this.velY = 0; }
@@ -1199,10 +1348,11 @@ export class WalkMode {
     if (this.busy) return;
     if (this.where === 'inside') { this.toast('No flying indoors — take the stairs or the elevator'); return; }
     this.flying = !this.flying;
-    this.velY = this.flying ? this.h * 2.5 : 0; // a little hop into the air
+    this.velY = this.flying ? this.h * 3.5 : 0; // a hop into the air
+    this.flyBoost = 1;
     this.grounded = false;
     this.velH.set(0, 0, 0);
-    if (this.flying) this.toast('FLYING · Space up · Shift down · double-tap W fast · double-tap Space to drop', 4);
+    if (this.flying) this.toast('FLYING · W/S go where you look · Space up · Shift down · speeds up slowly · double-tap W boost · F to drop', 4);
   }
 
   /** Building tiers (setbacks are terraces) plus the floors of a taken-apart building (which replace its tiers). */
@@ -1288,9 +1438,11 @@ export class WalkMode {
         else if (o.userData.exit) aim = { kind: 'exit' };
       }
     } else {
-      const k = this.scene.rayFloor(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 60);
-      const i = k >= 0 ? -1 : this.scene.rayBuilding(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 30);
-      if (k >= 0) aim = { kind: 'floor', k };
+      const gk = this.scene.rayGate(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 120);
+      const k = gk >= 0 ? -1 : this.scene.rayFloor(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 60);
+      const i = gk >= 0 || k >= 0 ? -1 : this.scene.rayBuilding(this.raycaster.ray.origin, this.raycaster.ray.direction, this.u * 30);
+      if (gk >= 0) aim = { kind: 'gate', k: gk };
+      else if (k >= 0) aim = { kind: 'floor', k };
       else if (i >= 0) aim = { kind: 'building', i };
     }
     if (this.aim?.kind === 'panel' && (aim?.kind !== 'panel' || aim.panel !== this.aim.panel)) this.aim.panel.clearHover();
@@ -1302,6 +1454,11 @@ export class WalkMode {
       case 'panel': this.showPrompt(aim.row?.action ? `click: ${aim.row.text}` : ''); break;
       case 'elevator': this.showPrompt(this.interior!.inShaft(this.pos.x, this.pos.z) ? '[E] choose floor' : '[E] call elevator'); break;
       case 'exit': this.showPrompt('click / walk through: back to the city'); break;
+      case 'gate': {
+        const d = this.host.doors().find(x => x.k === aim.k);
+        this.showPrompt(d ? `[E] / click: ${d.dir === 'in' ? 'entrance' : 'exit'} ${d.label} · pick a route` : '');
+        break;
+      }
       case 'building': this.showPrompt(`[E] / click: enter ${this.host.buildingName(aim.i)} · [X] take apart · [I] info`); break;
       case 'floor': {
         const f = this.explodeFloors[aim.k];

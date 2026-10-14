@@ -113,3 +113,35 @@ func TestZeroWeightIgnored(t *testing.T) {
 		t.Error("a should fill")
 	}
 }
+
+func TestBiasOrdersNorthToSouth(t *testing.T) {
+	mk := func(name string, w, bias float64, signal bool) *Node {
+		return &Node{Name: name, Weight: w, Bias: bias, Signal: signal}
+	}
+	root := &Node{Name: "", Children: []*Node{
+		mk("db.go", 50, 1, true), mk("util.go", 80, 0, false), mk("mid.go", 30, 0.2, true),
+		mk("routes.go", 20, -1, true), mk("api.go", 40, -0.6, true),
+	}}
+	Layout(root, 100, 100, Options{})
+	y := map[string]float64{}
+	for _, c := range root.Children {
+		y[c.Name] = c.Rect.Y
+	}
+	// entrances above exits (rows run from the top; items of one row share a y)
+	if !(y["routes.go"] <= y["api.go"] && y["api.go"] <= y["mid.go"] && y["mid.go"] <= y["db.go"]) {
+		t.Errorf("not ordered north to south: %v", y)
+	}
+	if y["routes.go"] >= y["db.go"] {
+		t.Errorf("entrance should lie north of exit: %v", y)
+	}
+	// deterministic
+	again := &Node{Name: "", Children: []*Node{
+		mk("routes.go", 20, -1, true), mk("db.go", 50, 1, true), mk("api.go", 40, -0.6, true), mk("util.go", 80, 0, false), mk("mid.go", 30, 0.2, true),
+	}}
+	Layout(again, 100, 100, Options{})
+	for _, c := range again.Children {
+		if c.Rect.Y != y[c.Name] {
+			t.Errorf("%s moved with input order", c.Name)
+		}
+	}
+}

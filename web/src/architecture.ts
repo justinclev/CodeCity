@@ -19,7 +19,7 @@ export const FACADE = {
 } as const;
 export type Facade = keyof typeof FACADE;
 
-export type RoofKind = 'spire' | 'antenna' | 'tanks' | 'chimney' | 'vents' | 'uplink' | 'watertower';
+export type RoofKind = 'spire' | 'antenna' | 'tanks' | 'chimney' | 'vents' | 'uplink' | 'watertower' | 'stacks' | 'control';
 export type Archetype = ShapeKind | 'mixed';
 
 export interface TierSpec {
@@ -73,6 +73,8 @@ export const ROOF_LABEL: Record<RoofKind, string> = {
   vents: 'vents: reads or writes files',
   uplink: 'uplink mast: calls HTTP services',
   watertower: 'water tower: JSON / YAML data',
+  stacks: 'cooling towers: the power plant of external dependencies',
+  control: 'control tower: the localization terminal',
 };
 
 export const KIND_LABEL: Record<Archetype, string> = {
@@ -83,6 +85,8 @@ export const KIND_LABEL: Record<Archetype, string> = {
   doc: 'Library: documentation, chapters as tiers',
   test: 'Lattice annex: tests',
   mixed: 'Setbacks: each large declaration is a tier',
+  plant: 'Power plant: the project\u2019s external dependencies, grouped',
+  port: 'Airport / dock: the project\u2019s localization resources, grouped',
 };
 
 const ROLE_ROOF: Record<Role, RoofKind> = { entry: 'spire', serve: 'antenna', db: 'tanks', exec: 'chimney', files: 'vents', call: 'uplink' };
@@ -108,6 +112,8 @@ export function specOf(b: Building, plinth: boolean): BuildingSpec {
   else if (kind === 'types') facade = 'crystal';
   else if (kind === 'data') facade = 'utility';
   else if (kind === 'doc') facade = 'library';
+  else if (kind === 'plant') facade = 'utility';
+  else if (kind === 'port') facade = 'storefront';
 
   const locs = sh?.t?.length ? sh.t.map(x => Math.max(0, x)) : [1];
   const total = locs.reduce((a, x) => a + x, 0) || 1;
@@ -139,6 +145,8 @@ export function specOf(b: Building, plinth: boolean): BuildingSpec {
     if (k && !roof.includes(k)) roof.push(k);
   }
   if (kind === 'data' && (b.lang === 'JSON' || b.lang === 'YAML')) roof.push('watertower');
+  if (kind === 'plant') { roof.length = 0; roof.push('stacks'); }
+  if (kind === 'port') { roof.length = 0; roof.push('control'); }
   return { kind, facade, tiers, roof: roof.slice(0, 3), roles, plinth, ribbon: kind === 'slab' };
 }
 
@@ -203,6 +211,8 @@ export function explain(b: Building, spec: BuildingSpec, cond?: Condition): stri
   else if (spec.kind === 'data') out.push('Utility block: data / configuration');
   else if (spec.kind === 'doc') out.push(upper.length ? `Library: chapters ${upper.map(t => `“${t.name}”`).join(', ')}` : 'Library: documentation');
   else if (spec.kind === 'test') out.push('Lattice annex: a test file');
+  else if (spec.kind === 'plant') out.push('Power plant: external dependencies, grouped into one');
+  else if (spec.kind === 'port') out.push('Airport / dock: localization resources, grouped into one');
   if (spec.kind !== 'tower' && spec.kind !== 'doc' && upper.length) out.push(`Setbacks: ${upper.map(t => `${t.name} (${pct(t.loc, sh)})`).join(', ')}`);
   out.push(`Facade: ${FACADE_LABEL[spec.facade]}`);
   for (const r of spec.roof) out.push(`Roof: ${ROOF_LABEL[r]}`);
@@ -224,6 +234,8 @@ export function legend(): [string, string[]][] {
     ['Shape (what the file is made of)', (['tower', 'slab', 'types', 'data', 'doc', 'test', 'mixed'] as Archetype[]).map(k => KIND_LABEL[k])],
     ['Facade (language)', (['concrete', 'glass', 'brick', 'steel', 'storefront', 'library', 'utility', 'plain'] as Facade[]).map(f => FACADE_LABEL[f])],
     ['Roof (what the code does)', (Object.keys(ROOF_LABEL) as RoofKind[]).map(r => ROOF_LABEL[r]).concat(['columned lobby: imported by many files'])],
+    ['Walkways', ['skybridge: joins a test to the code it tests (walk across it)']],
+    ['Highways (several repos): road colour = what connects the cities', ['amber: API calls (HTTP, gRPC, GraphQL, WebSocket)', 'green: messages through a broker (Kafka, NATS, RabbitMQ, ...)', 'purple: the same database table', 'cars drive publisher → subscriber, caller ⇄ server']],
     ['Condition (history at this commit)', ['scaffolding / crane: recent heavy churn', 'irregular windows: complex code', 'weathering: long untouched']],
   ];
 }

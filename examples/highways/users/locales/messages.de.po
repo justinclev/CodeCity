@@ -1,0 +1,5 @@
+msgid "welcome"
+msgstr "Willkommen"
+
+msgid "orders.empty"
+msgstr "Sie haben noch keine Bestellungen"

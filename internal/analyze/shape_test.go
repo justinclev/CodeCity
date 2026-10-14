@@ -95,7 +95,7 @@ import "os"
 func save() { os.WriteFile("x", nil, 0o644) }
 `)},
 	}
-	assignRoles(c, files)
+	assignRoles(c, files, nil)
 	if got := c.Buildings[0].Shape.Roles; !reflect.DeepEqual(got, []string{city.RoleEntry, city.RoleServe, city.RoleExec}) {
 		t.Errorf("main.go roles = %v", got)
 	}

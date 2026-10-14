@@ -1,0 +1,1 @@
+Sessions are JWT-based. Tokens last 24h and refresh on activity.
