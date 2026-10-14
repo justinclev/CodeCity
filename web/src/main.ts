@@ -377,7 +377,7 @@ async function watchJob() {
 
 async function submit(source: string, ref: string, commits: number, churn: boolean) {
   const split = (document.getElementById('split') as HTMLInputElement).checked;
-  store.set('form', { source, ref, commits, churn, split });
+  store.set('form', { source: source.replace(/https:\/\/[^@\/\s]+@github\.com/g, 'https://github.com'), ref, commits, churn, split });
   const sources = source.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   ui.setJobStatus('starting…');
   ui.setProgress({ done: 0, total: 0 });
@@ -844,6 +844,63 @@ if (store.get<boolean>('classic')) { scene.setClassic(true); ui.setBuildingsMode
 const sourceBox = document.getElementById('source') as HTMLTextAreaElement;
 const renderBranches = bindBranchRows(sourceBox, document.getElementById('branches')!, () => apiAvailable, src => loadedRepos().find(r => r.source === src)?.name);
 const repoBtn = document.getElementById('repo') as HTMLButtonElement;
+
+// ---------------------------------------------------------------- GitHub: list a user's repositories and add the chosen ones
+interface GHRepo { fullName: string; private: boolean; url: string; pushed: string; language: string; archived: boolean }
+function setupGitHub() {
+  const g = (id: string) => document.getElementById(id) as HTMLElement;
+  const reposEl = g('ghrepos'), status = g('ghstatus'), tools = g('ghtools');
+  const userIn = g('ghuser') as HTMLInputElement, tokenIn = g('ghtoken') as HTMLInputElement, filterIn = g('ghfilter') as HTMLInputElement;
+  if (!reposEl) return;
+  let repos: GHRepo[] = [];
+  const boxes = () => Array.from(reposEl.querySelectorAll('input[type=checkbox]')) as HTMLInputElement[];
+  const render = () => {
+    const q = (filterIn.value || '').toLowerCase();
+    reposEl.replaceChildren();
+    for (const r of repos) {
+      if (q && !r.fullName.toLowerCase().includes(q)) continue;
+      const row = document.createElement('label'); row.className = 'ghrow';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.dataset.full = r.fullName; cb.dataset.priv = String(r.private);
+      const nm = document.createElement('span'); nm.className = 'ghnm'; nm.textContent = r.fullName;
+      const meta = document.createElement('span'); meta.className = 'ghmeta';
+      meta.textContent = [r.private ? '🔒' : '', r.language, r.pushed ? r.pushed.slice(0, 10) : ''].filter(Boolean).join(' · ');
+      row.append(cb, nm, meta); reposEl.append(row);
+    }
+  };
+  (g('ghlist') as HTMLButtonElement).onclick = async () => {
+    const user = userIn.value.trim(), token = tokenIn.value.trim();
+    if (!user && !token) { status.textContent = 'Enter a username (public repos) or a token (your repos).'; return; }
+    status.textContent = 'Loading…'; tools.hidden = true; reposEl.replaceChildren();
+    try {
+      const r = await api<{ repos: GHRepo[] }>('/api/github/repos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ user, token }) });
+      repos = r.repos || [];
+      status.textContent = repos.length ? `${repos.length} repositories · tick some, then Add selected` : 'No repositories found.';
+      tools.hidden = repos.length === 0; render();
+    } catch (e) { status.textContent = (e as Error).message; }
+  };
+  filterIn.oninput = render;
+  (g('ghall') as HTMLButtonElement).onclick = () => boxes().forEach(c => (c.checked = true));
+  (g('ghnone') as HTMLButtonElement).onclick = () => boxes().forEach(c => (c.checked = false));
+  (g('ghadd') as HTMLButtonElement).onclick = () => {
+    const token = tokenIn.value.trim();
+    const have = new Set(sourceBox.value.split('\n').map(l => l.trim().replace(/https:\/\/[^@\/\s]+@/, 'https://')));
+    const add: string[] = [];
+    for (const c of boxes()) {
+      if (!c.checked) continue;
+      const full = c.dataset.full!, priv = c.dataset.priv === 'true';
+      // private repos need auth to clone: embed the token (it is redacted before the form is saved)
+      const url = priv && token ? `https://${token}@github.com/${full}.git` : `https://github.com/${full}`;
+      if (!have.has(`https://github.com/${full}`) && !have.has(url)) add.push(url);
+    }
+    if (add.length) {
+      const cur = sourceBox.value.replace(/\s+$/, '');
+      sourceBox.value = (cur ? cur + '\n' : '') + add.join('\n');
+      sourceBox.dispatchEvent(new Event('input'));
+    }
+    status.textContent = add.length ? `Added ${add.length}. Private repos include your token (not saved to disk).` : 'Nothing new to add.';
+  };
+}
+setupGitHub();
 
 function loadedRepos(): LoadedRepo[] {
   if (!city) return [];
