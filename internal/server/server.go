@@ -294,14 +294,13 @@ type fileRef struct {
 // Close releases the open repository (removing a temporary clone).
 func (s *Server) Close() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	repos := s.repos
+	s.repos = nil
 	if s.cancel != nil {
 		s.cancel()
 	}
-	for _, r := range s.repos {
-		r.Close()
-	}
-	s.repos = nil
+	s.mu.Unlock()
+	closeRepos(repos)
 }
 
 // maxSymbols caps the definition index.
