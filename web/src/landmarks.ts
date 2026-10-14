@@ -42,10 +42,13 @@ export class Landmarks {
       let g: THREE.Group | null = null;
       if (b.lm === 'plant') g = this.powerPlant(b.w, b.d, u);
       else if (b.lm === 'port') {
+        const along = b.w >= b.d;
+        const RL = (along ? b.w : b.d) * 2.6;
         g = this.airport(b.w, b.d, u);
-        // Record the plane's world-space position for walk-mode proximity.
-        // The plane sits at u*0.066 height and offset from centre on the apron.
-        this.planeSpots.push(new THREE.Vector3(cx, y + u * 0.066, cz));
+        // The plane is offset from the group centre — match airport() placement exactly.
+        const planeOffX = along ? -RL * 0.22 : 0;
+        const planeOffZ = along ? 0 : -RL * 0.22;
+        this.planeSpots.push(new THREE.Vector3(cx + planeOffX, y + u * 0.066, cz + planeOffZ));
       }
       if (g) {
         g.position.set(cx, y, cz);
@@ -333,181 +336,188 @@ export class Landmarks {
    */
   private plane(u: number): THREE.Group {
     const g = new THREE.Group();
-    const body    = this.mat(0xe8f2ff, { rough: 0.28, metal: 0.48 });
-    const teal    = this.mat(0x2de2d0, { emissive: 0x2de2d0, emiss: 0.75, rough: 0.22 });
-    const eng     = this.mat(0x4a5768, { rough: 0.42, metal: 0.78 });
-    const dark    = this.mat(0x0c1620, { rough: 0.75, metal: 0.15 });
-    const engGlow = this.mat(0x0d2050, { emissive: 0x1866ff, emiss: 1.2, rough: 0.2, metal: 0.85 });
-    const rubber  = this.mat(0x181818, { rough: 0.98 });
+    // Materials
+    const white   = this.mat(0xf0f4ff, { rough: 0.25, metal: 0.55 });
+    const teal    = this.mat(0x00c8b4, { emissive: 0x00c8b4, emiss: 0.6, rough: 0.2 });
+    const dark    = this.mat(0x0a1520, { rough: 0.7 });
+    const eng     = this.mat(0x3c4858, { rough: 0.4, metal: 0.8 });
+    const engGlow = this.mat(0x0020a0, { emissive: 0x2266ff, emiss: 1.4, rough: 0.15, metal: 0.9 });
+    const rubber  = this.mat(0x111111, { rough: 1.0 });
+    const chrome  = this.mat(0xaabbcc, { rough: 0.1, metal: 1.0 });
 
-    const R  = u * 0.088;  // max fuselage radius
-    const TL = u * 1.15;   // total body length
+    // Key dims — make R much fatter so it reads at a distance
+    const R  = u * 0.13;   // fuselage radius (wider than before)
+    const TL = u * 1.10;   // total length
 
-    // ── fuselage: LatheGeometry smooth loft ──
-    // Profile rotates around Y; we rotate -90°Z so nose→+X.
-    // Stations designed for a recognisable widebody airliner profile:
-    // long blunt nose that tapers smoothly, constant barrel, elegant swept tail.
-    const fusePts = [
-      new THREE.Vector2(0.001, 0),            // nose tip
-      new THREE.Vector2(R * 0.22, TL * 0.025),
-      new THREE.Vector2(R * 0.58, TL * 0.055),
-      new THREE.Vector2(R * 0.88, TL * 0.085),
-      new THREE.Vector2(R * 1.00, TL * 0.13), // full width starts here
-      new THREE.Vector2(R * 1.00, TL * 0.68), // constant barrel
-      new THREE.Vector2(R * 0.96, TL * 0.76),
-      new THREE.Vector2(R * 0.84, TL * 0.84),
-      new THREE.Vector2(R * 0.62, TL * 0.91),
-      new THREE.Vector2(R * 0.38, TL * 0.96),
-      new THREE.Vector2(R * 0.14, TL * 1.00), // tail point
-    ];
-    const fuseMesh = new THREE.Mesh(this.geo(new THREE.LatheGeometry(fusePts, 20)), body);
-    fuseMesh.rotation.z = -Math.PI / 2;
-    // After -90°Z rotation: lathe-Y maps to world-X. Lathe goes 0..TL.
-    // We want nose (+x=TL→+x=TL/2 after offset -TL/2) and tail at -TL/2.
-    fuseMesh.position.x = -TL / 2;
-    g.add(fuseMesh);
+    // ── FUSELAGE: 3-part tube (nose sphere + barrel cylinder + tail cone) ──
+    // This avoids the thin-spindle problem with LatheGeometry at small screen size.
+    const barrelL = TL * 0.56;
+    const noseL   = TL * 0.22;
+    const tailL   = TL * 0.22;
 
-    // ── teal livery band (LatheGeometry ring around barrel) ──
-    const liveryPts = [
-      new THREE.Vector2(R * 1.004, TL * 0.15),
-      new THREE.Vector2(R * 1.008, TL * 0.16),  // slight raised bead
-      new THREE.Vector2(R * 1.008, TL * 0.64),
-      new THREE.Vector2(R * 1.004, TL * 0.65),
-    ];
-    const livery = new THREE.Mesh(this.geo(new THREE.LatheGeometry(liveryPts, 20)), teal);
-    livery.rotation.z = -Math.PI / 2;
-    livery.position.x = -TL / 2;
-    g.add(livery);
+    // Barrel — fat cylinder
+    const barrel = new THREE.Mesh(
+      this.geo(new THREE.CylinderGeometry(R, R, barrelL, 18)),
+      white);
+    barrel.rotation.z = Math.PI / 2;
+    barrel.position.x = 0;
+    g.add(barrel);
 
-    // ── cockpit window visor: dark curved cap on nose ──
-    // A half-sphere cap sitting on the top-front of the nose
-    const visor = new THREE.Mesh(
-      this.geo(new THREE.SphereGeometry(R * 0.58, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.42)),
+    // Nose — elongated hemisphere (scaled sphere)
+    const noseSphere = new THREE.Mesh(
+      this.geo(new THREE.SphereGeometry(R, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2)),
+      white);
+    noseSphere.rotation.z = -Math.PI / 2;  // flat end faces -X
+    noseSphere.scale.set(noseL / R, 1, 1);  // elongate along X
+    noseSphere.position.x = barrelL / 2;
+    g.add(noseSphere);
+
+    // Tail cone — narrow cylinder tapering to a point
+    const tailCone = new THREE.Mesh(
+      this.geo(new THREE.CylinderGeometry(0.001, R, tailL, 18)),
+      white);
+    tailCone.rotation.z = Math.PI / 2;
+    tailCone.position.x = -(barrelL / 2 + tailL / 2);
+    g.add(tailCone);
+
+    // ── TEAL LIVERY stripe along barrel ──
+    const stripeR = R * 1.012;
+    const stripe = new THREE.Mesh(
+      this.geo(new THREE.CylinderGeometry(stripeR, stripeR, barrelL * 0.88, 18)),
+      teal);
+    stripe.rotation.z = Math.PI / 2;
+    g.add(stripe);
+
+    // ── COCKPIT WINDOWS: dark band on nose top ──
+    const cockpit = new THREE.Mesh(
+      this.geo(new THREE.BoxGeometry(noseL * 0.55, R * 0.55, R * 1.1)),
       dark);
-    visor.rotation.z = Math.PI / 2;  // open end faces -X
-    visor.position.set(TL / 2 - TL * 0.025, R * 0.32, 0);
-    g.add(visor);
+    cockpit.position.set(barrelL / 2 + noseL * 0.18, R * 0.55, 0);
+    g.add(cockpit);
 
-    // ── wings: curved airfoil cross-section using extruded curved shape ──
-    const wSpan  = u * 0.70;   // half-span
-    const wRoot  = u * 0.34;   // root chord
-    const wTip   = u * 0.11;   // tip chord
-    const wSweep = u * 0.24;   // tip sweep (LE moves aft)
-    const wThick = R * 0.30;   // wing thickness at root
-    // Wing half uses a curved shape for a better airfoil appearance
-    const wingRootX = TL * 0.06; // measured from the fuselage centre
-    const halfWingGeo = this.curvedWingShape(wRoot, wTip, wSpan, wSweep, wThick);
+    // ── WINGS ──
+    const wSpan  = u * 0.80;  // half-span (wider = more readable)
+    const wRoot  = u * 0.40;  // root chord
+    const wTip   = u * 0.12;  // tip chord
+    const wSweep = u * 0.26;  // LE sweep
+    const wThick = R * 0.38;  // good thickness
+
+    const wingGeo = this.curvedWingShape(wRoot, wTip, wSpan, wSweep, wThick);
     for (const side of [1, -1] as const) {
-      const wm = new THREE.Mesh(halfWingGeo, body);
+      const wm = new THREE.Mesh(wingGeo, white);
       wm.rotation.x = -Math.PI / 2;
       wm.scale.z = side;
-      wm.position.set(-wingRootX, -R * 0.52, side < 0 ? -wThick : 0);
+      wm.position.set(-wRoot * 0.12, -R * 0.35, side < 0 ? -wThick : 0);
       g.add(wm);
-    }
-    // winglets: angled upswept tips
-    for (const side of [1, -1] as const) {
-      const wlH = wSpan * 0.12;
-      const wlGeo = this.geo(new THREE.BoxGeometry(wTip * 1.1, wlH, wThick * 0.5));
-      const wl = new THREE.Mesh(wlGeo, body);
-      // angle outward at ~15°
-      wl.rotation.x = (Math.PI / 180) * (-15 * side);
-      wl.position.set(-wingRootX - wSweep + wTip * 0.55, -R * 0.52 + wlH * 0.4, side * (wSpan + wThick * 0.25));
+      // Teal stripe along top of wing
+      const ws = new THREE.Mesh(
+        this.geo(new THREE.BoxGeometry(wRoot * 0.85, wThick * 0.05, wSpan * 0.72)),
+        teal);
+      ws.position.set(-wRoot * 0.12 - wSweep * 0.4, -R * 0.35 + wThick * 0.52, side * wSpan * 0.38);
+      g.add(ws);
+      // Winglet
+      const wlH = wSpan * 0.14;
+      const wl = new THREE.Mesh(
+        this.geo(new THREE.BoxGeometry(wTip * 0.9, wlH, wThick * 0.45)),
+        white);
+      wl.rotation.x = (Math.PI / 180) * (12 * side);
+      wl.position.set(-wRoot * 0.12 - wSweep + wTip * 0.45, -R * 0.35 + wlH * 0.45, side * (wSpan + wThick * 0.2));
       g.add(wl);
     }
 
-    // ── engine nacelles: smooth via LatheGeometry ──
-    const nacPts = [
-      new THREE.Vector2(0.001,     0),
-      new THREE.Vector2(R * 0.50,  u * 0.015),
-      new THREE.Vector2(R * 0.56,  u * 0.04),   // intake lip
-      new THREE.Vector2(R * 0.53,  u * 0.10),
-      new THREE.Vector2(R * 0.50,  u * 0.22),   // barrel
-      new THREE.Vector2(R * 0.50,  u * 0.27),
-      new THREE.Vector2(R * 0.44,  u * 0.30),   // nozzle taper
-      new THREE.Vector2(R * 0.28,  u * 0.32),
-    ];
-    const engX = -wingRootX - wRoot * 0.24;
-    const engY = -R * 0.52 - wThick * 0.55 - R * 0.52;
-    const engL = u * 0.32;
+    // ── ENGINES (2, under wings) ──
+    const engL  = u * 0.30;
+    const engR  = R * 0.46;
+    const engY  = -R * 0.38 - wThick * 0.5;
+    const engXc = -wRoot * 0.20;
     for (const side of [1, -1] as const) {
-      const engZ = side * wSpan * 0.44;
-      const nacMesh = new THREE.Mesh(this.geo(new THREE.LatheGeometry(nacPts, 14)), eng);
-      nacMesh.rotation.z = -Math.PI / 2;
-      nacMesh.position.set(engX - engL / 2, engY, engZ);
-      g.add(nacMesh);
-      // glowing intake ring
+      const ez = side * wSpan * 0.46;
+      // Nacelle body
+      const nac = new THREE.Mesh(
+        this.geo(new THREE.CylinderGeometry(engR * 0.9, engR, engL, 14)),
+        eng);
+      nac.rotation.z = Math.PI / 2;
+      nac.position.set(engXc, engY, ez);
+      g.add(nac);
+      // Intake ring (glowing)
       const lip = new THREE.Mesh(
-        this.geo(new THREE.TorusGeometry(R * 0.53, R * 0.09, 8, 16)), engGlow);
+        this.geo(new THREE.TorusGeometry(engR, engR * 0.16, 8, 16)),
+        engGlow);
       lip.rotation.y = Math.PI / 2;
-      lip.position.set(engX + engL * 0.01, engY, engZ);
+      lip.position.set(engXc + engL * 0.5, engY, ez);
       g.add(lip);
-      // pylon
-      const pylH = R * 0.45 + wThick;
-      const pyl = new THREE.Mesh(this.geo(new THREE.BoxGeometry(engL * 0.55, pylH, u * 0.038)), body);
-      pyl.position.set(engX - wRoot * 0.08, engY + pylH / 2, engZ);
+      // Pylon connecting wing to engine
+      const pylH = Math.abs(engY) - R * 0.35;
+      const pyl = new THREE.Mesh(
+        this.geo(new THREE.BoxGeometry(engL * 0.45, pylH, u * 0.032)),
+        white);
+      pyl.position.set(engXc, engY + pylH / 2, ez);
       g.add(pyl);
     }
 
-    // ── horizontal stabilisers (same curved shape, smaller) ──
-    const hSpan  = wSpan * 0.38, hRoot = wRoot * 0.40, hTip = wTip * 0.52, hSweep = wSweep * 0.60;
-    const hThick = wThick * 0.65;
-    const hWingGeo = this.curvedWingShape(hRoot, hTip, hSpan, hSweep, hThick);
-    const tailX = -(TL / 2 - TL * 0.06);
+    // ── HORIZONTAL STABILISERS ──
+    const hSpan  = wSpan * 0.35;
+    const hRoot  = wRoot * 0.38;
+    const hTip   = wTip  * 0.55;
+    const hSweep = wSweep * 0.55;
+    const hThick = wThick * 0.55;
+    const hGeo   = this.curvedWingShape(hRoot, hTip, hSpan, hSweep, hThick);
+    const tailX  = -(barrelL / 2 + tailL * 0.55);
     for (const side of [1, -1] as const) {
-      const sm = new THREE.Mesh(hWingGeo, body);
-      sm.rotation.x = -Math.PI / 2; sm.scale.z = side;
-      sm.position.set(tailX + hRoot * 0.78, -R * 0.04, side < 0 ? -hThick : 0);
-      g.add(sm);
+      const hs = new THREE.Mesh(hGeo, white);
+      hs.rotation.x = -Math.PI / 2;
+      hs.scale.z = side;
+      hs.position.set(tailX + hRoot * 0.72, 0, side < 0 ? -hThick : 0);
+      g.add(hs);
     }
 
-    // ── vertical tail fin: swept, thick, prominent ──
-    // Build as stacked slabs (swept trapezoid) for real visible thickness.
-    const finH     = u * 0.40;
-    const finRootC = u * 0.26;
-    const finTipC  = u * 0.11;
-    const finThick = R * 0.45;   // much thicker than before
-    const finSlabs = 10;
-    const finBaseX = tailX + finRootC * 0.22;
+    // ── VERTICAL TAIL FIN ──
+    // Stacked slabs: each slab is a box, swept and tapered toward the top.
+    const finH     = u * 0.44;
+    const finRootC = u * 0.28;
+    const finTipC  = u * 0.10;
+    const finThick = R * 0.52;
+    const finSlabs = 8;
+    const finBaseX = tailX + finRootC * 0.28;
     for (let s = 0; s < finSlabs; s++) {
-      const t     = (s + 0.5) / finSlabs;
-      const chord = finRootC + (finTipC - finRootC) * t;
-      const thick = finThick * (1 - t * 0.45);
-      const sweep = finRootC * 0.4 * t;   // leading-edge sweeps back
-      const slabH = finH / finSlabs;
-      const slab  = new THREE.Mesh(this.geo(new THREE.BoxGeometry(chord, slabH + 0.001, thick)), body);
-      slab.position.set(finBaseX - sweep, R * 0.88 + s * slabH + slabH / 2, 0);
+      const t      = (s + 0.5) / finSlabs;
+      const chord  = finRootC + (finTipC - finRootC) * t;
+      const thick  = finThick * (1 - t * 0.5);
+      const sweep  = finRootC * 0.38 * t;
+      const slabH  = finH / finSlabs;
+      const slab   = new THREE.Mesh(
+        this.geo(new THREE.BoxGeometry(chord, slabH + 0.001, thick)),
+        s < finSlabs * 0.7 ? teal : white);
+      slab.position.set(finBaseX - sweep, R * 0.9 + s * slabH + slabH / 2, 0);
       g.add(slab);
     }
 
-    // ── landing gear ──
-    const gearY  = -R * 0.88;    // belly attachment height
-    const strutH = R * 0.72;
-
-    // Main gear (2 bogies, 2 wheels each)
+    // ── LANDING GEAR ──
+    const gearY  = -(R + R * 0.04);
+    const strutH = R * 0.78;
+    // Main gear
     for (const side of [1, -1] as const) {
-      const gearZ = side * wSpan * 0.18;
-      const strut = new THREE.Mesh(this.geo(new THREE.CylinderGeometry(R * 0.048, R * 0.055, strutH, 6)), eng);
-      strut.position.set(-wingRootX + wRoot * 0.06, gearY - strutH / 2, gearZ);
+      const gz = side * wSpan * 0.22;
+      const strut = new THREE.Mesh(
+        this.geo(new THREE.CylinderGeometry(R * 0.045, R * 0.05, strutH, 6)), chrome);
+      strut.position.set(-wRoot * 0.08, gearY - strutH / 2, gz);
       g.add(strut);
-      const axle = new THREE.Mesh(this.geo(new THREE.CylinderGeometry(R * 0.032, R * 0.032, R * 0.65, 6)), eng);
-      axle.rotation.z = Math.PI / 2;
-      axle.position.set(-wingRootX + wRoot * 0.06, gearY - strutH, gearZ);
-      g.add(axle);
       for (const wx of [-1, 1] as const) {
-        const wheel = new THREE.Mesh(this.geo(new THREE.TorusGeometry(R * 0.19, R * 0.075, 8, 14)), rubber);
-        wheel.position.set(-wingRootX + wRoot * 0.06, gearY - strutH, gearZ + wx * R * 0.27);
+        const wheel = new THREE.Mesh(
+          this.geo(new THREE.TorusGeometry(R * 0.20, R * 0.08, 7, 12)), rubber);
+        wheel.position.set(-wRoot * 0.08, gearY - strutH, gz + wx * R * 0.28);
         g.add(wheel);
       }
     }
     // Nose gear
-    const noseGearX = TL * 0.30;
-    const noseStrutH = strutH * 0.75;
-    const noseStrut = new THREE.Mesh(this.geo(new THREE.CylinderGeometry(R * 0.038, R * 0.042, noseStrutH, 6)), eng);
-    noseStrut.position.set(noseGearX, gearY - noseStrutH / 2, 0);
-    g.add(noseStrut);
-    const noseWheel = new THREE.Mesh(this.geo(new THREE.TorusGeometry(R * 0.15, R * 0.065, 8, 12)), rubber);
-    noseWheel.position.set(noseGearX, gearY - noseStrutH, 0);
-    g.add(noseWheel);
+    const nStrut = new THREE.Mesh(
+      this.geo(new THREE.CylinderGeometry(R * 0.035, R * 0.04, strutH * 0.72, 6)), chrome);
+    nStrut.position.set(barrelL * 0.36, gearY - strutH * 0.36, 0);
+    g.add(nStrut);
+    const nWheel = new THREE.Mesh(
+      this.geo(new THREE.TorusGeometry(R * 0.15, R * 0.07, 7, 10)), rubber);
+    nWheel.position.set(barrelL * 0.36, gearY - strutH * 0.72, 0);
+    g.add(nWheel);
 
     return g;
   }
