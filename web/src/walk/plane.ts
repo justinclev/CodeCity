@@ -110,93 +110,183 @@ export class PlaneMode {
   }
 
   private buildPlane() {
-    // Re-use the same geometry as Landmarks.plane() but inline here so this
-    // module is self-contained. A minimal silhouette is enough: the landmark
-    // plane stays visible on the ground; this clone flies.
+    // Tron Light Jet aesthetic: near-black angular hull with bright cyan/blue
+    // emissive edge strips and glowing engine cores.  Every surface is dark;
+    // only the trim lines and intakes emit light so the craft reads as neon
+    // outlines streaking through the hacker sky.
     const u = this.scene.cell * 0.28;
-    const mat = (col: number, opts: { emissive?: number; emiss?: number; rough?: number; metal?: number } = {}) =>
-      new THREE.MeshStandardMaterial({
-        color: col, roughness: opts.rough ?? 0.4, metalness: opts.metal ?? 0.3,
-        emissive: opts.emissive ?? 0, emissiveIntensity: opts.emiss ?? 1,
-      });
 
-    const R  = u * 0.072, Lm = u * 0.62, Ln = u * 0.18, Lt = u * 0.14;
-    const body  = mat(0xeef4ff, { rough: 0.3, metal: 0.45, emissive: 0x90b0d0, emiss: 0.1 });
-    const engM  = mat(0x6b7a8a, { rough: 0.5, metal: 0.7 });
-    const teal  = mat(0x2de2d0, { emissive: 0x2de2d0, emiss: 0.8, rough: 0.2 });
+    const hull  = new THREE.MeshStandardMaterial({ color: 0x050c14, roughness: 0.15, metalness: 0.95, emissive: 0x0a1828, emissiveIntensity: 0.4 });
+    const glow  = new THREE.MeshStandardMaterial({ color: 0x00e8ff, emissive: 0x00e8ff, emissiveIntensity: 2.2, roughness: 0.1, metalness: 0.0, toneMapped: false });
+    const glow2 = new THREE.MeshStandardMaterial({ color: 0x0055ff, emissive: 0x0055ff, emissiveIntensity: 2.8, roughness: 0.1, metalness: 0.0, toneMapped: false });
+    const core  = new THREE.MeshStandardMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 4.0, roughness: 0.0, metalness: 0.0, toneMapped: false });
 
-    const mk = (geo: THREE.BufferGeometry, m: THREE.Material) => { const mesh = new THREE.Mesh(geo, m); return mesh; };
+    const mk = (geo: THREE.BufferGeometry, m: THREE.Material) => {
+      const mesh = new THREE.Mesh(geo, m);
+      this.planeGroup.add(mesh);
+      return mesh;
+    };
 
-    // fuselage
-    const nose = mk(new THREE.CylinderGeometry(R * 0.18, R, Ln, 14), body);
-    nose.rotation.z = Math.PI / 2; nose.position.x = Lm / 2 + Ln / 2;
-    const barrel = mk(new THREE.CylinderGeometry(R, R, Lm, 14), body);
-    barrel.rotation.z = Math.PI / 2;
-    const tail = mk(new THREE.CylinderGeometry(R * 0.28, R, Lt, 14), body);
-    tail.rotation.z = Math.PI / 2; tail.position.x = -(Lm / 2 + Lt / 2);
-    this.planeGroup.add(nose, barrel, tail);
+    // ── dims ──────────────────────────────────────────────────────────────────
+    const TL   = u * 0.95;   // total length  (+x = nose, -x = tail)
+    const R    = u * 0.095;  // fuselage half-height (angular, not round)
+    const RW   = R * 0.60;   // fuselage half-width (flattened cross-section)
+    const EDGE = R * 0.055;  // trim strip thickness
 
-    // window stripe
-    const stripe = mk(new THREE.BoxGeometry(Lm * 0.72, R * 0.26, 0.003), teal);
-    stripe.position.set(0, R * 0.55, R * 1.01); this.planeGroup.add(stripe);
-    const s2 = stripe.clone(); s2.position.z = -R * 1.01; this.planeGroup.add(s2);
+    // ── FUSELAGE: flat angular box — nose wedge + belly wedge ──────────────
+    // Main body (rectangular cross-section, tapering to nose)
+    const bodyGeo = new THREE.BoxGeometry(TL * 0.72, R * 1.6, RW * 2.1);
+    const body = mk(bodyGeo, hull);
+    body.position.x = -TL * 0.04;
 
-    // wings
-    const wSpan = u * 0.52, wRoot = u * 0.26, wTip = u * 0.10, wSweep = u * 0.18, wThick = R * 0.32;
+    // Nose wedge: sharp angular point
+    const noseGeo = new THREE.CylinderGeometry(0.002, RW * 0.85, TL * 0.28, 4);
+    const nose = mk(noseGeo, hull);
+    nose.rotation.z = Math.PI / 2;
+    nose.rotation.y = Math.PI / 4; // 45° so the 4-sided base aligns to diamond
+    nose.position.x = TL * 0.36 + TL * 0.14;
+
+    // Tail taper
+    const tailGeo = new THREE.CylinderGeometry(RW * 0.35, RW * 0.85, TL * 0.22, 4);
+    const tail = mk(tailGeo, hull);
+    tail.rotation.z = Math.PI / 2;
+    tail.rotation.y = Math.PI / 4;
+    tail.position.x = -(TL * 0.36 + TL * 0.11);
+
+    // ── TRON EDGE STRIPS on fuselage ──────────────────────────────────────
+    // Top centre spine
+    const spine = mk(new THREE.BoxGeometry(TL * 0.80, EDGE, EDGE), glow);
+    spine.position.set(-TL * 0.04, R * 0.82, 0);
+
+    // Bottom spine
+    const bspine = mk(new THREE.BoxGeometry(TL * 0.70, EDGE, EDGE), glow2);
+    bspine.position.set(-TL * 0.04, -R * 0.82, 0);
+
+    // Side cheatlines (both sides)
+    for (const side of [1, -1] as const) {
+      const cl = mk(new THREE.BoxGeometry(TL * 0.75, EDGE, EDGE), glow);
+      cl.position.set(-TL * 0.04, R * 0.30, side * RW * 1.06);
+    }
+
+    // Nose rim diamond
+    const noseRim = mk(new THREE.TorusGeometry(RW * 0.55, EDGE * 0.8, 4, 4), glow);
+    noseRim.rotation.y = Math.PI / 4;
+    noseRim.rotation.z = Math.PI / 2;
+    noseRim.position.x = TL * 0.34;
+
+    // ── WINGS: thin flat swept slabs with glowing leading edges ──────────
+    const wSpan  = u * 0.72;
+    const wRoot  = u * 0.38;
+    const wTip   = u * 0.06;
+    const wSweep = u * 0.28;
+    const wThick = R * 0.20;
+
     const wShape = new THREE.Shape();
-    wShape.moveTo(0, 0); wShape.lineTo(-wRoot, 0); wShape.lineTo(-wSweep - wTip, wSpan); wShape.lineTo(-wSweep, wSpan); wShape.closePath();
+    wShape.moveTo(0, 0);
+    wShape.lineTo(-wRoot, 0);
+    wShape.lineTo(-wSweep - wTip, wSpan);
+    wShape.lineTo(-wSweep, wSpan);
+    wShape.closePath();
     const wingGeo = new THREE.ExtrudeGeometry(wShape, { depth: wThick, bevelEnabled: false });
-    for (const side of [1, -1]) {
-      const wm = mk(wingGeo, body);
-      wm.rotation.x = -Math.PI / 2; wm.scale.z = side;
-      wm.position.set(u * 0.06, -R - wThick * 0.5, side < 0 ? -wThick : 0);
-      this.planeGroup.add(wm);
+
+    for (const side of [1, -1] as const) {
+      const wm = mk(wingGeo, hull);
+      wm.rotation.x = -Math.PI / 2;
+      wm.scale.z = side;
+      wm.position.set(-wRoot * 0.08, -R * 0.60, side < 0 ? -wThick : 0);
+
+      // Glowing leading edge strip on wing top
+      const leLen = Math.hypot(wSpan, wSweep) * 1.02;
+      const le = mk(new THREE.BoxGeometry(leLen, EDGE, EDGE), glow);
+      le.rotation.y = -Math.atan2(wSweep, wSpan) * side;
+      le.position.set(-wRoot * 0.08 - wSweep * 0.5 + wTip * 0.1, -R * 0.60 + wThick * 0.52, side * wSpan * 0.5);
+
+      // Wing tip cap glow
+      const tip = mk(new THREE.BoxGeometry(wTip * 0.9, EDGE, wThick * 1.1), glow);
+      tip.position.set(-wRoot * 0.08 - wSweep + wTip * 0.45, -R * 0.60 + wThick * 0.52, side * (wSpan + wThick * 0.15));
     }
 
-    // engines
-    const engR = R * 0.52, engL = u * 0.22;
-    const engX = u * 0.06 - wRoot * 0.28, engY = -R - wThick - engR * 0.7;
-    for (const side of [1, -1]) {
-      const engZ = side * wSpan * 0.42;
-      const nac = mk(new THREE.CylinderGeometry(engR, engR, engL, 10), engM);
-      nac.rotation.z = Math.PI / 2; nac.position.set(engX, engY, engZ);
-      this.planeGroup.add(nac);
-      const lip = mk(new THREE.TorusGeometry(engR * 0.92, engR * 0.14, 8, 14),
-        new THREE.MeshStandardMaterial({ color: 0x3a4050, emissive: 0x2080ff, emissiveIntensity: 1.2, roughness: 0.2, metalness: 0.8 }));
-      lip.rotation.y = Math.PI / 2; lip.position.set(engX + engL / 2, engY, engZ);
-      this.planeGroup.add(lip);
+    // ── TWIN ENGINES: angular nacelles with bright core rings ─────────────
+    const engL  = u * 0.28;
+    const engH  = R * 0.60;
+    const engW  = R * 0.48;
+    const engX  = -wRoot * 0.12;
+    const engY  = -R * 0.42 - wThick * 0.5 - engH * 0.6;
+
+    for (const side of [1, -1] as const) {
+      const ez = side * wSpan * 0.44;
+
+      // Angular nacelle box
+      const nac = mk(new THREE.BoxGeometry(engL, engH, engW), hull);
+      nac.position.set(engX, engY, ez);
+
+      // Intake frame (front)
+      for (const [ey, ez2] of [[engH * 0.5, 0], [-engH * 0.5, 0], [0, engW * 0.5], [0, -engW * 0.5]] as [number,number][]) {
+        const bar = mk(new THREE.BoxGeometry(EDGE, ey === 0 ? EDGE : engH, ey === 0 ? engW : EDGE), glow2);
+        bar.position.set(engX + engL * 0.5, engY + ey, ez + ez2);
+      }
+
+      // Glowing engine core (torus)
+      const ring = mk(new THREE.TorusGeometry(engH * 0.38, EDGE * 1.4, 8, 16), core);
+      ring.rotation.y = Math.PI / 2;
+      ring.position.set(engX + engL * 0.48, engY, ez);
+
+      // Exhaust glow (back)
+      const exhaust = mk(new THREE.BoxGeometry(EDGE, engH * 0.85, engW * 0.85), glow2);
+      exhaust.position.set(engX - engL * 0.5, engY, ez);
+
+      // Pylon
+      const pylH = Math.abs(engY) - R * 0.58;
+      const pyl = mk(new THREE.BoxGeometry(engL * 0.38, pylH, EDGE * 2), hull);
+      pyl.position.set(engX, engY + pylH / 2, ez);
+      const pylGlow = mk(new THREE.BoxGeometry(engL * 0.35, EDGE, EDGE), glow);
+      pylGlow.position.set(engX, engY + pylH, ez);
     }
 
-    // tail fin
-    const fShape = new THREE.Shape();
-    const fH = u * 0.28, fRoot = u * 0.19, fTip = u * 0.10, fSwp = u * 0.12;
-    fShape.moveTo(0, 0); fShape.lineTo(fRoot, 0); fShape.lineTo(fSwp + fTip, fH); fShape.lineTo(fSwp, fH); fShape.closePath();
-    const finGeo = new THREE.ExtrudeGeometry(fShape, { depth: R * 0.22, bevelEnabled: false });
-    const fin = mk(finGeo, body);
-    fin.rotation.y = Math.PI; fin.position.set(-(Lm / 2 + Lt) + fRoot, R * 0.05, -R * 0.11);
-    this.planeGroup.add(fin);
+    // ── VERTICAL FIN: single tall angular slab ────────────────────────────
+    const finH    = R * 2.8;
+    const finRoot = u * 0.24;
+    const finTip  = u * 0.06;
+    const finSwp  = u * 0.18;
+    const finShape = new THREE.Shape();
+    finShape.moveTo(0, 0);
+    finShape.lineTo(finRoot, 0);
+    finShape.lineTo(finSwp + finTip, finH);
+    finShape.lineTo(finSwp, finH);
+    finShape.closePath();
+    const finGeo = new THREE.ExtrudeGeometry(finShape, { depth: EDGE * 2.5, bevelEnabled: false });
+    const fin = mk(finGeo, hull);
+    fin.rotation.y = Math.PI;
+    fin.position.set(-(TL * 0.36) + finRoot, R * 0.82, -EDGE * 1.25);
 
-    // horizontal stabs
-    const hSpan = wSpan * 0.42, hRoot = wRoot * 0.46, hTip = wTip * 0.55, hSweep = wSweep * 0.7, hThick = wThick * 0.7;
+    // Fin leading edge glow
+    const finLeLen = Math.hypot(finH, finSwp) * 1.02;
+    const finLe = mk(new THREE.BoxGeometry(finLeLen, EDGE, EDGE), glow);
+    finLe.rotation.z = Math.atan2(finSwp, finH);
+    finLe.position.set(-(TL * 0.36) + finSwp * 0.5 + finTip * 0.3, R * 0.82 + finH * 0.5, 0);
+
+    // ── HORIZONTAL STABS ──────────────────────────────────────────────────
+    const hSpan = wSpan * 0.36, hRoot = wRoot * 0.38, hTip = wTip * 0.7, hSweep = wSweep * 0.55, hThick = wThick * 0.8;
     const hShape = new THREE.Shape();
     hShape.moveTo(0, 0); hShape.lineTo(-hRoot, 0); hShape.lineTo(-hSweep - hTip, hSpan); hShape.lineTo(-hSweep, hSpan); hShape.closePath();
     const stabGeo = new THREE.ExtrudeGeometry(hShape, { depth: hThick, bevelEnabled: false });
-    for (const side of [1, -1]) {
-      const sm = mk(stabGeo, body);
+    for (const side of [1, -1] as const) {
+      const sm = mk(stabGeo, hull);
       sm.rotation.x = -Math.PI / 2; sm.scale.z = side;
-      sm.position.set(-(Lm / 2 + Lt) + hRoot * 0.9, -R * 0.1, side < 0 ? -hThick : 0);
-      this.planeGroup.add(sm);
+      sm.position.set(-(TL * 0.36) + hRoot * 0.88, -R * 0.05, side < 0 ? -hThick : 0);
+      // Stab leading edge
+      const sLeLen = Math.hypot(hSpan, hSweep) * 1.02;
+      const sLe = mk(new THREE.BoxGeometry(sLeLen, EDGE, EDGE), glow);
+      sLe.rotation.y = -Math.atan2(hSweep, hSpan) * side;
+      sLe.position.set(-(TL * 0.36) + hRoot * 0.88 - hSweep * 0.5, -R * 0.05 + hThick * 0.52, side * hSpan * 0.5);
     }
 
-    // nav lights: red left, green right, white tail strobe
-    for (const [z, col] of [[-wSpan, 0xff3030], [wSpan, 0x30ff60]] as [number, number][]) {
-      const nl = mk(new THREE.SphereGeometry(R * 0.18, 6, 6),
-        new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 2.5, roughness: 1, toneMapped: false }));
-      nl.position.set(u * 0.06 - wSweep, -R - wThick - engR * 0.3, z); this.planeGroup.add(nl);
-    }
-    const tailLight = mk(new THREE.SphereGeometry(R * 0.15, 6, 6),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 2.5, roughness: 1, toneMapped: false }));
-    tailLight.position.set(-(Lm / 2 + Lt), R * 0.2, 0); this.planeGroup.add(tailLight);
+    // ── COCKPIT: dark tinted visor with subtle glow outline ───────────────
+    const visor = mk(new THREE.BoxGeometry(TL * 0.18, R * 0.60, RW * 1.1), hull);
+    visor.position.set(TL * 0.28, R * 0.55, 0);
+    // visor rim
+    mk(new THREE.BoxGeometry(TL * 0.19, EDGE, RW * 1.12), glow).position.set(TL * 0.28, R * 0.84, 0);
+    mk(new THREE.BoxGeometry(TL * 0.19, EDGE, RW * 1.12), glow).position.set(TL * 0.28, R * 0.24, 0);
   }
 
   private buildTrails() {
@@ -445,16 +535,16 @@ export class PlaneMode {
     if (this.trailTimer > 0.016) { // ~60fps trail points
       this.trailTimer = 0;
       const u = scale;
-      const R = u * 0.072, wSpan = u * 0.52, wRoot = u * 0.26, wThick = u * 0.072 * 0.32;
-      const engX = u * 0.06 - wRoot * 0.28;
-      const engY = -R - wThick - R * 0.52 * 0.7;
-      const engL = u * 0.22;
+      const R = u * 0.095, wSpan = u * 0.72, wRoot = u * 0.38, wThick = R * 0.20;
+      const engH = R * 0.60, engL = u * 0.28;
+      const engX = -wRoot * 0.12;
+      const engY = -R * 0.42 - wThick * 0.5 - engH * 0.6;
 
-      // engine exhaust exit positions in local space
+      // engine exhaust exit positions in local space (back of nacelle)
       const engineSides: [number, 'L' | 'R'][] = [[1, 'L'], [-1, 'R']];
       for (const [side, which] of engineSides) {
-        const engZ = side * wSpan * 0.42;
-        const local = new THREE.Vector3(engX - engL / 2 - R * 0.1, engY, engZ);
+        const engZ = side * wSpan * 0.44;
+        const local = new THREE.Vector3(engX - engL * 0.52, engY, engZ);
         const world = local.applyMatrix4(this.planeGroup.matrixWorld);
         this.addTrailPoint(which, world);
       }
