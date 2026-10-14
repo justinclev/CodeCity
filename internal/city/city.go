@@ -164,16 +164,19 @@ type Building struct {
 	// Shape is the building's architecture, derived from its code at the newest
 	// commit (nil when the file is absent then). It never changes between commits.
 	Shape *Shape `json:"shape,omitempty"`
-	// Docs lists the documents inside a collapsed docs folder (a "library"
-	// building: a directory of prose shown as one building, not a district).
+	// Landmark marks a grouped building that lists things rather than holding
+	// code: "library" (docs), "plant" (external dependencies), "port" (i18n).
+	Landmark string `json:"lm,omitempty"`
+	// Docs lists the items inside a landmark building (documents, dependencies
+	// or localization files). An item with an empty Path is not openable.
 	Docs []DocFile `json:"docs,omitempty"`
 }
 
-// DocFile is one document inside a library building.
+// DocFile is one item listed inside a landmark building.
 type DocFile struct {
-	Name string `json:"name"` // path relative to the library folder
-	Path string `json:"path"` // full building-style path (repo-prefixed after merge)
-	Lang string `json:"lang"`
+	Name string `json:"name"` // display name (file name, or dependency name)
+	Path string `json:"path,omitempty"` // full building-style path when openable ("" for dependencies)
+	Lang string `json:"lang"` // language, or ecosystem (npm/go/…) for a dependency
 }
 
 // Shape kinds (archetypes).
@@ -184,6 +187,8 @@ const (
 	ShapeData  = "data"  // data / config files: utility block
 	ShapeDoc   = "doc"   // documentation: library
 	ShapeTest  = "test"  // tests: lattice annex
+	ShapePlant = "plant" // external dependencies, grouped: a power plant
+	ShapePort  = "port"  // localization / i18n resources, grouped: an airport / dock
 )
 
 // Roles (rooftops), from the flow analysis at the newest commit.

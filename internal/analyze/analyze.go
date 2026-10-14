@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -45,8 +46,10 @@ type fileHist struct {
 	pts     []city.Point
 	last    city.Point
 	churn   [][4]int64
-	authors map[string]int
-	docs    []city.DocFile // non-nil: this node is a collapsed docs folder (library building)
+	authors   map[string]int
+	docs      []city.DocFile // non-nil: this node is a grouped landmark building (library/plant/port)
+	landmark  string         // Building.Landmark: "library" | "plant" | "port"
+	shapeKind string         // Shape kind: doc | plant | port
 }
 
 // Run opens the source, scans the sampled commits and lays out the city.
@@ -280,7 +283,8 @@ func assembleCity(ctx context.Context, br *gitx.BlobReader, o Options, subdir, n
 	if err != nil {
 		return nil, err
 	}
-	c := build(files, o.MinWeight, pre.bias)
+	extDeps := externalDeps(br, rtip, files)
+	c := build(files, o.MinWeight, pre.bias, extDeps)
 	if c.Facts, err = collectFacts(ctx, br, c, rtip, remote, pre.g); err != nil {
 		return nil, err
 	}
@@ -343,6 +347,46 @@ func joinSub(subdir, rel string) string {
 		return rel
 	}
 	return subdir + "/" + rel
+}
+
+// externalDeps reads the project's manifests at the newest commit and returns its
+// declared third-party dependencies (one DocFile per dependency: Name + ecosystem
+// in Lang), deduped and sorted. These populate the grouped "power plant" building.
+func externalDeps(br *gitx.BlobReader, tipOid map[string]string, files []*fileHist) []city.DocFile {
+	seen := map[string]bool{}
+	var out []city.DocFile
+	for _, f := range files {
+		if !deps.IsManifest(f.path) {
+			continue
+		}
+		oid, ok := tipOid[f.path]
+		if !ok {
+			continue
+		}
+		content, err := br.Read(oid, scan.DefaultMaxBytes)
+		if err != nil {
+			continue
+		}
+		_, ds := deps.Manifest(f.path, content)
+		for _, d := range ds {
+			if d.Kind == deps.Git || d.Name == "" {
+				continue
+			}
+			key := d.Kind + ":" + d.Name
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, city.DocFile{Name: d.Name, Lang: d.Kind})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Lang != out[j].Lang {
+			return out[i].Lang < out[j].Lang
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
 }
 
 // collectFacts reads manifests and import statements at the newest commit,
@@ -513,6 +557,26 @@ type dirNode struct {
 }
 
 // bias (optional) pulls entrance files toward the north edge of their district and exit files toward the south.
+// i18nExt are localization resource formats that stand on their own, by extension.
+var i18nExt = map[string]bool{".po": true, ".mo": true, ".pot": true, ".resx": true, ".ftl": true, ".arb": true, ".xliff": true, ".xlf": true}
+
+var i18nDir = regexp.MustCompile(`(?:^|/)(?:locales?|i18n|translations?|lang|resources)(?:/|$)`)
+var localeName = regexp.MustCompile(`(?:^|[._-])(?:[a-z]{2})(?:[._-][A-Z]{2})?\.(?:properties|json|ya?ml)$`)
+
+// i18nFile reports whether a path is a localization resource by each ecosystem's
+// convention: a dedicated format anywhere (.po/.mo/.resx/.ftl/.arb/.xliff), or a
+// properties/json/yaml locale file under a locale/i18n/translations folder.
+func i18nFile(p string) bool {
+	ext := strings.ToLower(path.Ext(p))
+	if i18nExt[ext] {
+		return true
+	}
+	if i18nDir.MatchString(p) && (ext == ".json" || ext == ".yaml" || ext == ".yml" || ext == ".properties") {
+		return true
+	}
+	return localeName.MatchString(path.Base(p)) // messages_en.properties, en.json, de-DE.yaml
+}
+
 // docsDir reports whether a directory subtree is prose-only (Markdown/Text) with
 // at least one file; such a folder is shown as a single "library" building.
 func docsDir(d *dirNode) bool {
@@ -571,38 +635,83 @@ func locAt(f *fileHist, ci int) (loc, lines, bytes int, present bool) {
 	return cur[1], cur[2], cur[3], true
 }
 
-// docFolder builds the synthetic history of a collapsed docs folder: its size at
-// each commit is the sum of its documents, and it carries the document list.
+// docFolder builds a collapsed docs folder (a library landmark) rooted at dir.
 func docFolder(dir string, docs []*fileHist, nCommits int) *fileHist {
-	h := &fileHist{path: dir, lang: "Markdown", last: city.Point{-1, city.Absent, 0, 0, 0}}
-	for ci := 0; ci < nCommits; ci++ {
-		loc, lines, bytes, present := 0, 0, 0, false
-		for _, f := range docs {
-			if l, ln, by, ok := locAt(f, ci); ok {
-				loc += l
-				lines += ln
-				bytes += by
-				present = true
-			}
-		}
-		if present {
-			record(h, city.Point{ci, loc, lines, bytes, 0})
-		} else {
-			record(h, city.Point{ci, city.Absent, 0, 0, 0})
-		}
-	}
-	for _, f := range docs {
-		h.docs = append(h.docs, city.DocFile{Name: strings.TrimPrefix(f.path, dir+"/"), Path: f.path, Lang: f.lang})
+	h := landmarkFolder(dir, "Markdown", city.ShapeDoc, docs, nil, 0)
+	for i := range h.docs { // documents are named relative to their folder
+		h.docs[i].Name = strings.TrimPrefix(h.docs[i].Path, dir+"/")
 	}
 	return h
 }
 
-func build(files []*fileHist, minWeight float64, bias map[string]float64) *city.City {
+// landmarkFolder builds a grouped landmark building's synthetic history and item
+// list. With files (docs / localization) its size sums theirs over time and each
+// file is an openable item; with items (dependencies) it is present at a fixed
+// size and the items are not openable.
+func landmarkFolder(dirPath, lang, shapeKind string, files []*fileHist, items []city.DocFile, weight int) *fileHist {
+	h := &fileHist{path: dirPath, lang: lang, last: city.Point{-1, city.Absent, 0, 0, 0},
+		shapeKind: shapeKind, landmark: landmarkName(shapeKind)}
+	if len(files) > 0 {
+		nCommits := 0
+		for _, f := range files {
+			for _, p := range f.pts {
+				if p[0]+1 > nCommits {
+					nCommits = p[0] + 1
+				}
+			}
+		}
+		for ci := 0; ci < nCommits; ci++ {
+			loc, lines, bytes, present := 0, 0, 0, false
+			for _, f := range files {
+				if l, ln, by, ok := locAt(f, ci); ok {
+					loc += l
+					lines += ln
+					bytes += by
+					present = true
+				}
+			}
+			if present {
+				record(h, city.Point{ci, loc, lines, bytes, 0})
+			} else {
+				record(h, city.Point{ci, city.Absent, 0, 0, 0})
+			}
+		}
+		for _, f := range files {
+			h.docs = append(h.docs, city.DocFile{Name: path.Base(f.path), Path: f.path, Lang: f.lang})
+		}
+	} else { // dependencies: fixed presence, listed but not openable
+		if weight < 8 {
+			weight = 8
+		}
+		record(h, city.Point{0, weight, 0, 0, 0})
+		h.docs = items
+	}
+	return h
+}
+
+// landmarkName maps a Shape kind to the Building.Landmark discriminator.
+func landmarkName(shapeKind string) string {
+	switch shapeKind {
+	case city.ShapePlant:
+		return "plant"
+	case city.ShapePort:
+		return "port"
+	default:
+		return "library"
+	}
+}
+
+func build(files []*fileHist, minWeight float64, bias map[string]float64, extDeps []city.DocFile) *city.City {
 	if minWeight <= 0 {
 		minWeight = 8
 	}
 	root := &dirNode{dirs: map[string]*dirNode{}}
+	var i18n []*fileHist
 	for _, f := range files {
+		if i18nFile(f.path) {
+			i18n = append(i18n, f)
+			continue
+		}
 		parts := strings.Split(f.path, "/")
 		d := root
 		for i := 0; i < len(parts)-1; i++ {
@@ -666,6 +775,25 @@ func build(files []*fileHist, minWeight float64, bias map[string]float64) *city.
 	}
 	ln := mk(root, "")
 
+	// grouped landmarks: one "airport/dock" for all localization resources, one
+	// "power plant" for all external dependencies, each listing its items.
+	if len(i18n) > 0 {
+		fh := landmarkFolder("(localization)", "i18n", city.ShapePort, i18n, nil, 0)
+		lnode := &layout.Node{Name: "localization", Weight: float64(fh.weight) + minWeight*2}
+		fileOf[lnode] = fh
+		ln.Children = append(ln.Children, lnode)
+	}
+	if len(extDeps) > 0 {
+		w := 8 + len(extDeps)*2
+		if w > 240 {
+			w = 240
+		}
+		fh := landmarkFolder("(dependencies)", "deps", city.ShapePlant, nil, extDeps, w)
+		lnode := &layout.Node{Name: "dependencies", Weight: float64(w) + minWeight*2}
+		fileOf[lnode] = fh
+		ln.Children = append(ln.Children, lnode)
+	}
+
 	side := math.Max(10, math.Sqrt(ln.Total())*1.25)
 	layout.Layout(ln, side, side, layout.DefaultOptions)
 
@@ -685,12 +813,13 @@ func build(files []*fileHist, minWeight float64, bias map[string]float64) *city.
 			}
 			nb := city.Building{Path: f.path, Name: ch.Name, District: idx, Lang: f.lang,
 				X: r3(ch.Inner.X), Z: r3(ch.Inner.Y), W: r3(ch.Inner.W), D: r3(ch.Inner.H), H: f.pts, Churn: f.churn}
-			if f.docs != nil { // a library building: force the docs archetype and carry its documents
+			if f.landmark != "" { // a grouped landmark: force its archetype and carry its item list
 				nb.Docs = f.docs
-				nb.Shape = &city.Shape{Kind: city.ShapeDoc, Tiers: []int{f.weight}}
+				nb.Landmark = f.landmark
+				nb.Shape = &city.Shape{Kind: f.shapeKind, Tiers: []int{f.weight}}
 			}
 			c.Buildings = append(c.Buildings, nb)
-			if f.last[1] != city.Absent { // present at the newest commit
+			if f.landmark == "" && f.last[1] != city.Absent { // present source file at the newest commit
 				c.Stats.Files++
 				c.Stats.LOC += f.last[1]
 				c.Stats.Lines += f.last[2]

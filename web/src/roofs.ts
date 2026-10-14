@@ -59,6 +59,19 @@ const RECIPES: Record<RoofKind, PieceDef[]> = {
     { prim: 'torus', at: [0, 0.5, 0], size: [0.15, 0.15, 0.15], rot: [Math.PI / 2, 0, 0], tone: 'request', light: 0.5, spin: true },
     { prim: 'sphere', at: [0, 0.84, 0], size: [0.1, 0.1, 0.1], tone: 'request', light: 1.3 },
   ],
+  stacks: [
+    { prim: 'cyl', at: [-0.22, 0.34, 0], size: [0.3, 0.68, 0.3], tone: 'effect' },
+    { prim: 'cyl', at: [0.22, 0.29, 0.06], size: [0.26, 0.58, 0.26], tone: 'effect' },
+    { prim: 'sphere', at: [-0.22, 0.72, 0], size: [0.3, 0.12, 0.3], tone: 'light', light: 0.45 },
+    { prim: 'sphere', at: [0.22, 0.62, 0.06], size: [0.26, 0.1, 0.26], tone: 'light', light: 0.45 },
+    { prim: 'box', at: [0, 0.16, -0.22], size: [0.52, 0.32, 0.12], tone: 'metal' },
+  ],
+  control: [
+    { prim: 'cyl', at: [0, 0.5, 0], size: [0.12, 1.0, 0.12], tone: 'metal' },
+    { prim: 'cyl', at: [0, 1.06, 0], size: [0.3, 0.22, 0.3], tone: 'input', light: 0.3 },
+    { prim: 'cone', at: [0, 1.28, 0], size: [0.34, 0.14, 0.34], tone: 'dark' },
+    { prim: 'sphere', at: [0, 1.44, 0], size: [0.08, 0.08, 0.08], tone: 'beacon', light: 1.6 },
+  ],
   watertower: [
     { prim: 'box', at: [-0.14, 0.2, -0.14], size: [0.035, 0.4, 0.035], tone: 'dark' },
     { prim: 'box', at: [0.14, 0.2, -0.14], size: [0.035, 0.4, 0.035], tone: 'dark' },

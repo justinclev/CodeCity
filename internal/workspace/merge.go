@@ -168,7 +168,9 @@ func merge(cities []*city.City, names []string, links []city.Link, offsets [][2]
 			if len(b.Docs) > 0 {
 				docs := make([]city.DocFile, len(b.Docs))
 				for i, df := range b.Docs {
-					df.Path = joinPath(name, df.Path)
+					if df.Path != "" {
+						df.Path = joinPath(name, df.Path)
+					}
 					docs[i] = df
 				}
 				b.Docs = docs

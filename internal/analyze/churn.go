@@ -101,6 +101,9 @@ func assignOwners(c *city.City, byPath map[string]*fileHist, authors map[string]
 	owned := map[string]int{}
 	for i, b := range c.Buildings {
 		f := byPath[b.Path]
+		if f == nil { // a grouped landmark building (library/plant/port) has no file history
+			continue
+		}
 		best, bestN := "", 0
 		for a, n := range f.authors {
 			if n > bestN || (n == bestN && a < best) {

@@ -698,3 +698,5 @@ svg.hovering .fe:not(.hov):not(.hl):not(.sel) { stroke-opacity: 0.12; }
 .ghrow:hover { background: rgba(255,255,255,0.05); }
 .ghrow .ghnm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .ghrow .ghmeta { color: var(--dim); font-size: 10px; flex: none; }
+.docs .docrow.static { cursor: default; opacity: 0.9; }
+.docs .docrow.static:hover { background: none; }

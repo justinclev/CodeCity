@@ -178,7 +178,9 @@ export interface BuildingInfo {
   looks: string[];
   /** Entrances and exits in this file (when the doors are shown). */
   gates?: { id: number; dir: 'in' | 'out'; kind: string; label: string; line?: number; edge: number }[];
-  /** A library building: the documents it holds (markdown / text). */
+  /** A landmark building: "library" (docs), "plant" (deps), "port" (i18n). */
+  landmark?: string;
+  /** The items it lists (documents, dependencies, or localization files). */
   docs?: { name: string; path: string; lang: string }[];
 }
 
@@ -380,7 +382,7 @@ export function showBuilding(d: BuildingInfo | null, h: InfoHandlers) {
     box.append(w);
   }
   box.append(depsSection(d.deps, h));
-  if (d.docs?.length) box.append(docsSection(d.docs, h)); else box.append(piecesSection(d.pieces, h));
+  if (d.docs?.length) box.append(docsSection(d.landmark ?? 'library', d.docs, h)); else box.append(piecesSection(d.pieces, h));
   if (d.links.length) {
     const links = el('div', 'links');
     for (const l of d.links) {
@@ -447,16 +449,29 @@ function depsSection(d: BuildingInfo['deps'], h: InfoHandlers): HTMLElement {
   return wrap;
 }
 
-function docsSection(docs: NonNullable<BuildingInfo['docs']>, h: InfoHandlers): HTMLElement {
+const LANDMARK_LABEL: Record<string, [string, string, string]> = {
+  library: ['Library', 'document', 'documents'],
+  plant: ['Power plant', 'dependency', 'dependencies'],
+  port: ['Airport', 'translation', 'translations'],
+};
+
+function docsSection(landmark: string, docs: NonNullable<BuildingInfo['docs']>, h: InfoHandlers): HTMLElement {
+  const [title, one, many] = LANDMARK_LABEL[landmark] ?? LANDMARK_LABEL.library;
   const wrap = el('div', 'docs');
-  wrap.append(el('h4', '', `Library · ${docs.length} ${docs.length === 1 ? 'document' : 'documents'}`));
+  wrap.append(el('h4', '', `${title} · ${docs.length} ${docs.length === 1 ? one : many}`));
   const list = el('div', 'list');
   for (const df of docs) {
-    const b = el('button', 'docrow');
-    b.title = `open ${df.path}`;
-    b.append(el('span', 'nm', df.name), el('span', 'kind', df.lang));
-    b.onclick = () => h.onDoc(df.path, df.name);
-    list.append(b);
+    if (df.path) { // an openable file
+      const b = el('button', 'docrow');
+      b.title = `open ${df.path}`;
+      b.append(el('span', 'nm', df.name), el('span', 'kind', df.lang));
+      b.onclick = () => h.onDoc(df.path, df.name);
+      list.append(b);
+    } else { // a listed dependency (not openable)
+      const row = el('div', 'docrow static');
+      row.append(el('span', 'nm', df.name), el('span', 'kind', df.lang));
+      list.append(row);
+    }
   }
   wrap.append(list);
   return wrap;

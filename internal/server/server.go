@@ -254,6 +254,9 @@ func (s *Server) finish(j *Job, c *city.City, repos []*gitx.Repo, err error, ctx
 			}
 			s.paths[b.Path] = fileRef{repo: b.Repo, path: orig, lang: b.Lang}
 			for _, df := range b.Docs { // documents inside a library building are not buildings themselves
+				if df.Path == "" { // a listed dependency, not an openable file
+					continue
+				}
 				dorig := df.Path
 				if len(c.Repos) > 0 {
 					dorig = strings.TrimPrefix(df.Path, c.Repos[b.Repo].Name+"/")

@@ -45,13 +45,15 @@ export interface Building {
   impd?: number[];
   /** Architecture from the code at the newest commit (absent if the file is gone by then). */
   shape?: Shape;
-  /** Documents inside a collapsed docs folder (a "library" building). */
+  /** Grouped landmark: "library" (docs), "plant" (deps), "port" (i18n). */
+  lm?: string;
+  /** Items inside a landmark building (documents, dependencies, or locale files). */
   docs?: DocFile[];
 }
 
 export interface DocFile { name: string; path: string; lang: string }
 
-export type ShapeKind = 'tower' | 'slab' | 'types' | 'data' | 'doc' | 'test';
+export type ShapeKind = 'tower' | 'slab' | 'types' | 'data' | 'doc' | 'test' | 'plant' | 'port';
 export type Role = 'entry' | 'serve' | 'db' | 'exec' | 'files' | 'call';
 
 export interface Shape {

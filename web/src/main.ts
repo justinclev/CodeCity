@@ -624,7 +624,8 @@ function buildingInfo(i: number): ui.BuildingInfo {
     gates: gatesOn ? (gateByBuilding.get(i) ?? []).flatMap(k => edgeGates[k].gates.filter(g => g.building === i).map(g => ({ id: g.id, dir: g.dir, kind: g.kind, label: g.label, line: g.line, edge: k }))) : undefined,
     links: links(b.path),
     pieces: piecesState(),
-    docs: b.docs?.map(df => ({ name: df.name, path: df.path, lang: df.lang })),
+    landmark: b.lm,
+    docs: b.docs?.map(df => ({ name: df.name, path: df.path ?? '', lang: df.lang })),
     looks: scene.whyLooks(i),
     deps: {
       imports: (b.imp ?? []).filter(j => scene.exists(j)).map(j => ({ index: j, path: c.buildings[j].path })),
@@ -1110,19 +1111,21 @@ const walk = new WalkMode(scene, {
     const hash = repoCommitAt(repoOf(i), scene.commit);
     if (!hash) throw new Error('file does not exist at this commit');
     const lib = c.buildings[i].docs;
-    if (lib?.length) { // a library: one floor listing the documents, each opening its markdown
+    if (lib?.length) { // a landmark: one floor listing its items (documents / dependencies / locales)
       const b = c.buildings[i];
+      const LM: Record<string, [string, string]> = { library: ['Library', 'documents'], plant: ['Power plant', 'dependencies'], port: ['Airport', 'translations'] };
+      const [lmTitle, lmWord] = LM[b.lm ?? 'library'] ?? LM.library;
       const open = async (path: string) => {
         try { const fd = await fetchFile(path, hash); file = { ...fd, path }; activePiece = 0; codeOpen = true; showCode(file, 0, codeHandlers); }
         catch (e) { ui.setJobStatus(`Could not open ${path}: ${(e as Error).message}`, true); }
       };
       const lobby: PanelRow[] = [
         { text: b.path, color: '#bff8ff', size: 30 },
-        { text: `Library · ${lib.length} ${lib.length === 1 ? 'document' : 'documents'} (click to read)`, color: '#ffe08a', size: 28 },
+        { text: `${lmTitle} · ${lib.length} ${lmWord}${lib[0].path ? ' (click to open)' : ''}`, color: '#ffe08a', size: 28 },
         { text: '' },
-        ...lib.map(df => ({ text: df.name, hint: df.lang, color: '#8fd9a8', size: 28, action: () => void open(df.path) })),
+        ...lib.map(df => ({ text: df.name, hint: df.lang, color: '#8fd9a8', size: 28, action: df.path ? () => void open(df.path) : undefined })),
       ];
-      const floor: InteriorFloor = { name: 'Documents', kind: 'library', start: 1, end: Math.max(1, lib.length), loc: scene.valuesAt(i).loc, complexity: 0, piece: 0 };
+      const floor: InteriorFloor = { name: lmWord, kind: 'library', start: 1, end: Math.max(1, lib.length), loc: scene.valuesAt(i).loc, complexity: 0, piece: 0 };
       const sp = scene.specOf(i);
       const arch: InteriorArch | undefined = scene.classicBoxes ? undefined : {
         facade: sp.facade, finish: FINISH_COLOR[sp.facade],
@@ -1130,7 +1133,7 @@ const walk = new WalkMode(scene, {
         tierOf: [0], roof: scene.whyLooks(i).filter(l => l.startsWith('Roof:')).map(l => l.slice(6)),
       };
       return { path: b.path, lang: b.lang, lines: lib.map(df => df.name), floors: [floor],
-        lobby, directory: [{ text: 'L1  Documents', size: 30, action: () => {} }], references: () => [], glyphs: scene.glyphTexture, circuit: scene.circuitTexture, arch };
+        lobby, directory: [{ text: `L1  ${lmWord}`, size: 30, action: () => {} }], references: () => [], glyphs: scene.glyphTexture, circuit: scene.circuitTexture, arch };
     }
     const f = await fetchFile(c.buildings[i].path, hash);
     // storeys follow the building's tiers, as seen outside: the podium's pieces first, then each tier's (file order within)
