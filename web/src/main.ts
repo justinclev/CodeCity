@@ -1000,7 +1000,7 @@ addEventListener('drop', e => {
 // ---------------------------------------------------------------- startup
 async function start() {
   const saved = store.get<{ source: string; ref: string; commits: number; churn?: boolean; split?: boolean }>('form');
-  if (saved) ui.setForm(saved.source, saved.ref, saved.commits, saved.churn ?? true, saved.split ?? true);
+  if (saved) ui.setForm(saved.source, saved.ref, saved.commits, saved.churn ?? true, saved.split ?? false);
 
   const src = new URLSearchParams(location.search).get('src');
   if (src) {
@@ -1017,7 +1017,7 @@ async function start() {
   }
   if (st.job?.request && !saved) {
     const r = st.job.request;
-    ui.setForm((r.sources?.length ? r.sources : [r.source ?? '']).join('\n'), r.ref, r.maxCommits, !r.noChurn, r.split ?? true);
+    ui.setForm((r.sources?.length ? r.sources : [r.source ?? '']).join('\n'), r.ref, r.maxCommits, !r.noChurn, r.split ?? false);
   }
   renderBranches();
   if (st.job?.state === 'running') { void watchJob(); return; }

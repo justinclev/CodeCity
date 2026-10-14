@@ -720,6 +720,24 @@ func (s *Server) Handler() http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(b)
 	})
+	mux.HandleFunc("POST /api/github/repos", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Token string `json:"token"`
+			User  string `json:"user"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&body); err != nil {
+			writeErr(w, errBad("invalid request"))
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		repos, err := GitHubRepos(ctx, body.Token, body.User)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"repos": repos})
+	})
 	mux.HandleFunc("POST /api/cancel", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		if s.cancel != nil && s.job != nil && s.job.State == "running" {
