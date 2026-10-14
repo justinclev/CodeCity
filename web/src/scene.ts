@@ -11,6 +11,7 @@ import { buildingMaterial, circuitMaterial, type BuildingUniforms, type CircuitU
 import { busRoute, TraceLayer, type Trace } from './links';
 import { buildSpecs, classicSpec, facadeCode, pathSeed, explain, type BuildingSpec, type Condition } from './architecture';
 import { RoofKit, type Works } from './roofs';
+import { Landmarks } from './landmarks';
 import { Walkways } from './walkways';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { HackerFx } from './fx';
@@ -163,6 +164,7 @@ export class CityScene {
   private specs: BuildingSpec[] = [];
   private classic = false;
   private roofs = new RoofKit();
+  private landmarks = new Landmarks();
   private ways = new Walkways();
   private conds: Condition[] = [];
   private worksKey = '';
@@ -221,7 +223,7 @@ export class CityScene {
     this.sun.shadow.mapSize.set(4096, 4096);
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.02;
-    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.highwayGroup, this.gates.group, this.streets.group, this.hackerFx.group, this.roofs.group, this.ways.group);
+    this.scene.add(this.hemi, this.sun, this.sun.target, this.labels, this.arcs, this.linkGroup, this.codeLinks.group, this.highwayGroup, this.gates.group, this.streets.group, this.hackerFx.group, this.roofs.group, this.landmarks.group, this.ways.group);
 
     const gm = circuitMaterial('#000000', false);
     this.groundU = gm.uniforms;
@@ -465,6 +467,7 @@ export class CityScene {
 
   /** "Classic boxes": every building a plain box (no tiers, facades, roofs or condition). */
   setClassic(on: boolean) {
+    this.landmarks?.setVisible(!on);
     if (on === this.classic) return;
     this.classic = on;
     this.ways.setVisible(!on);
@@ -509,6 +512,8 @@ export class CityScene {
     }
     this.worksKey = '';
     this.roofs.build(this.city.buildings.map((_, i) => this.specOf(i)), []);
+    this.landmarks.build(this.city, this.baseY);
+    this.landmarks.setVisible(!this.classic);
     this.moving = true;
   }
 
@@ -516,6 +521,15 @@ export class CityScene {
   private placeBuilding(i: number, h: number, hide: boolean) {
     const b = this.city.buildings[i], sp = this.specOf(i);
     const cx = b.x + b.w / 2, cz = b.z + b.d / 2, y = this.baseY[i];
+    if (b.lm && !this.classic) { // a landmark: a flat pad; the real model (landmarks.ts) sits on it
+      const u = Math.min(b.w, b.d);
+      this.tmp.position.set(cx, hide ? y - 1 : y + u * 0.03, cz);
+      this.tmp.scale.set(b.w, hide ? 0.004 : u * 0.06, b.d);
+      this.tmp.updateMatrix();
+      this.buildingMesh!.setMatrixAt(i, this.tmp.matrix);
+      this.roofs.place(i, { cx, cz, top: y, tw: b.w, td: b.d, th: 0, hide: true }); // no roof kit
+      return;
+    }
     const tiers = sp.tiers;
     for (let k = 0; k < tiers.length; k++) {
       const t = tiers[k];
