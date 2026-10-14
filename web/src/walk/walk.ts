@@ -12,6 +12,7 @@ import { Game, type GameWorld, type Reward } from './game';
 import { InfoCard, QuestLog, QuizBox, Rewards, SearchBox, StatusBar, TourCard, type CardData, type SearchHit } from './panels';
 import { Music } from './music';
 import { Props, type Shard, type Terminal } from './props';
+import { PlaneMode } from './plane';
 
 /** A definition from the symbol index: [name, kind, path, start, end]. */
 export type Sym = [string, string, string, number, number];
@@ -121,6 +122,9 @@ export class WalkMode {
   private symList: Sym[] = [];
   private seeTimer = 0;
   private mapDirty = false;
+  // plane easter egg
+  private planeCtrl: PlaneMode | null = null;
+  private piloting = false;
 
   constructor(private scene: CityScene, private host: WalkHost) {}
 
@@ -191,6 +195,7 @@ export class WalkMode {
     if (document.pointerLockElement) document.exitPointerLock();
     this.leaveInterior();
     if (this.scene.explodedBuilding >= 0) this.scene.collapse(true);
+    if (this.piloting) { this.planeCtrl?.dispose(); this.piloting = false; }
     this.props?.dispose(); this.props = null;
     this.map?.closeFull(); this.map = null;
     this.tourK = -1; this.cardFor = -1;
@@ -504,6 +509,9 @@ export class WalkMode {
   private use() {
     if (this.busy) return;
     if (this.where === 'city') {
+      // plane easter egg: board the airport plane
+      const ps = this.nearPlane();
+      if (ps && !this.piloting) { this.boardPlane(ps); return; }
       const t = this.nearTerminal();
       if (t) { this.openQuiz(t); return; }
       const roof = this.roofUnderfoot();
@@ -1079,6 +1087,13 @@ export class WalkMode {
     const cam = this.scene.camera;
     this.hudFrame(dt);
 
+    // --- plane flight mode ---
+    if (this.piloting && this.planeCtrl) {
+      const stillFlying = this.planeCtrl.frame(dt, keyDown);
+      if (!stillFlying) this.exitPlane();
+      return;
+    }
+
     if (this.tracer) {
       const tr = this.tracer;
       tr.t += dt / tr.dur;
@@ -1128,9 +1143,11 @@ export class WalkMode {
     this.trail.update(dt, this.pos, this.h * 0.32, (running || this.flying) && this.lastSpeed > this.h * 0.5);
     if (this.where === 'city' && this.time - this.lastDoorCheck > 0.3) {
       this.lastDoorCheck = this.time;
+      const plane = this.nearPlane();
       const t = this.nearTerminal();
       const near = this.nearestFacade();
-      if (t && !this.quizBox.open) this.showPrompt(`[E] quiz terminal · ${t.label}`);
+      if (plane) this.showPrompt('[E] board the plane ✈');
+      else if (t && !this.quizBox.open) this.showPrompt(`[E] quiz terminal · ${t.label}`);
       else if (near >= 0 && this.aim?.kind !== 'building' && this.aim?.kind !== 'floor') this.showPrompt(`[E] enter ${this.host.buildingName(near)} · [X] take apart · [I] info`);
     }
     if (this.where === 'city') this.cityChecks(dt);
@@ -1185,6 +1202,46 @@ export class WalkMode {
   private nearTerminal(): Terminal | null {
     for (const t of this.props?.terminals ?? []) if (Math.hypot(t.pos.x - this.pos.x, t.pos.z - this.pos.z) < this.u * 1.6 && Math.abs(t.pos.y - this.pos.y) < this.u) return t;
     return null;
+  }
+
+  private nearPlane(): THREE.Vector3 | null {
+    const spots = this.scene.landmarks?.planeSpots ?? [];
+    const thresh = this.scene.cell * 2.8;
+    for (const s of spots) {
+      if (Math.hypot(s.x - this.pos.x, s.z - this.pos.z) < thresh && Math.abs(s.y - this.pos.y) < this.u * 2) return s;
+    }
+    return null;
+  }
+
+  private boardPlane(spot: THREE.Vector3) {
+    if (this.piloting) return;
+    this.piloting = true;
+    // hide avatar + standard trail
+    this.avatar.setVisible(false);
+    this.trail.mesh.visible = false;
+    // lazily create the controller
+    if (!this.planeCtrl) this.planeCtrl = new PlaneMode(this.scene);
+    this.planeCtrl.enter(spot.clone(), this.yaw);
+    this.toast('✈  PLANE MODE  — W/S pitch · A/D roll · Space throttle+ · Shift throttle- · E land · Q eject', 7);
+  }
+
+  private exitPlane() {
+    if (!this.piloting || !this.planeCtrl) return;
+    this.piloting = false;
+    const land = this.planeCtrl.landing;
+    this.planeCtrl.dispose();
+    // restore avatar visibility
+    this.avatar.setVisible(!this.firstPerson && !this.busy);
+    this.trail.mesh.visible = true;
+    // relocate the player to where the plane landed
+    if (land) {
+      this.pos.set(land.x, Math.max(0, land.y), land.z);
+      this.yaw = land.yaw;
+      this.faceCamera();
+    }
+    // reset camera fov
+    const cam = this.scene.camera;
+    cam.fov = 70; cam.updateProjectionMatrix();
   }
 
   private lastSpeed = 0;

@@ -14,28 +14,60 @@ export class Landmarks {
   readonly group = new THREE.Group();
   private disposables: (THREE.BufferGeometry | THREE.Material)[] = [];
 
+  /** World-space positions of all airport planes after the last build(). */
+  readonly planeSpots: THREE.Vector3[] = [];
+
   /** Rebuild every landmark from the city's footprints and base heights. */
   build(city: City, baseY: number[]) {
     this.clear();
+    this.planeSpots.length = 0;
     city.buildings.forEach((b, i) => {
       if (!b.lm) return;
       const cx = b.x + b.w / 2, cz = b.z + b.d / 2, y = baseY[i] ?? 0;
       const u = Math.min(b.w, b.d);
       let g: THREE.Group | null = null;
       if (b.lm === 'plant') g = this.powerPlant(b.w, b.d, u);
-      else if (b.lm === 'port') g = this.airport(b.w, b.d, u);
+      else if (b.lm === 'port') {
+        g = this.airport(b.w, b.d, u);
+        // Record the plane's world-space position for walk-mode proximity.
+        // The plane sits at local (0, u*0.09, 0) inside the airport group.
+        this.planeSpots.push(new THREE.Vector3(cx, y + u * 0.09, cz));
+      }
       if (g) { g.position.set(cx, y, cz); this.group.add(g); }
     });
   }
 
   setVisible(on: boolean) { this.group.visible = on; }
 
+  /** Switch materials to hacker palette (glossy dark with neon emissives). */
+  setHacker(on: boolean) {
+    this.group.traverse(obj => {
+      const m = (obj as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+      if (!m?.isMeshStandardMaterial) return;
+      if (on) {
+        m.color.set(0x0a1520);
+        m.roughness = 0.12; m.metalness = 0.9;
+        // keep emissive-lit parts bright; dim others
+        if (m.emissiveIntensity > 0) { m.emissiveIntensity = Math.min(2.5, m.emissiveIntensity * 1.6); }
+      } else {
+        // restore is not tracked; caller rebuilds on theme change
+        m.roughness = m.userData.r ?? m.roughness;
+        m.metalness = m.userData.mt ?? m.metalness;
+        m.color.set(m.userData.col ?? 0xffffff);
+      }
+      m.needsUpdate = true;
+    });
+  }
+
   private mat(color: number, opts: { emissive?: number; emiss?: number; rough?: number; metal?: number; opacity?: number } = {}): THREE.MeshStandardMaterial {
+    const r = opts.rough ?? 0.8, mt = opts.metal ?? 0.1;
     const m = new THREE.MeshStandardMaterial({
-      color, roughness: opts.rough ?? 0.8, metalness: opts.metal ?? 0.1,
+      color, roughness: r, metalness: mt,
       emissive: opts.emissive ?? 0x000000, emissiveIntensity: opts.emiss ?? 1,
       transparent: opts.opacity !== undefined, opacity: opts.opacity ?? 1,
     });
+    // stash originals for hacker-mode restore
+    m.userData = { col: color, r, mt };
     this.disposables.push(m);
     return m;
   }
@@ -133,28 +165,134 @@ export class Landmarks {
     return g;
   }
 
-  /** A simple airliner: fuselage, swept wings, tail. Nose points +x (rotated by the caller). */
+  /**
+   * Build a swept wing half as a flat Shape extruded to some thickness.
+   * The shape lies in the XY plane (extruded along Z), so we rotate -90° around X
+   * to lay it flat in the world XZ plane. Root chord starts at x=0, tip swept
+   * toward +x (aft), span runs toward +y before rotation (→ +z after).
+   */
+  private wingShape(rootChord: number, tipChord: number, span: number, sweep: number, thick: number): THREE.BufferGeometry {
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0);                     // root LE
+    shape.lineTo(-rootChord, 0);            // root TE (aft = -x)
+    shape.lineTo(-sweep - tipChord, span);  // tip TE
+    shape.lineTo(-sweep, span);             // tip LE
+    shape.closePath();
+    return this.geo(new THREE.ExtrudeGeometry(shape, { depth: thick, bevelEnabled: false }));
+  }
+
+  /**
+   * A recognisable commercial airliner: tapered fuselage, swept-back wings
+   * with engine pods under them, swept horizontal stabilisers and a vertical fin.
+   * The nose points along +X; the caller rotates as needed.
+   */
   private plane(u: number): THREE.Group {
     const g = new THREE.Group();
-    const body = this.mat(0xeef2f6, { rough: 0.5, metal: 0.3 });
-    const accent = this.mat(0x2de2d0, { emissive: 0x2de2d0, emiss: 0.4 });
-    const fuseLen = u * 0.9, fuseR = u * 0.09;
-    const fuse = new THREE.Mesh(this.geo(new THREE.CylinderGeometry(fuseR, fuseR, fuseLen, 14)), body);
-    fuse.rotation.z = Math.PI / 2; g.add(fuse);
-    const nose = new THREE.Mesh(this.geo(new THREE.ConeGeometry(fuseR, u * 0.16, 14)), body);
-    nose.rotation.z = -Math.PI / 2; nose.position.x = fuseLen / 2 + u * 0.07; g.add(nose);
-    // main wing (one span across the fuselage)
-    const fullWing = new THREE.Mesh(this.geo(new THREE.BoxGeometry(u * 0.24, u * 0.02, u * 0.9)), body);
-    fullWing.position.set(-u * 0.04, 0, 0); g.add(fullWing);
-    // tailplane
-    const tailWing = new THREE.Mesh(this.geo(new THREE.BoxGeometry(u * 0.14, u * 0.02, u * 0.42)), body);
-    tailWing.position.set(-fuseLen * 0.42, 0, 0); g.add(tailWing);
-    // vertical stabiliser
-    const fin = new THREE.Mesh(this.geo(new THREE.BoxGeometry(u * 0.16, u * 0.22, u * 0.02)), body);
-    fin.position.set(-fuseLen * 0.42, u * 0.12, 0); g.add(fin);
-    const stripe = new THREE.Mesh(this.geo(new THREE.BoxGeometry(fuseLen, u * 0.03, u * 0.005)), accent);
-    stripe.position.set(0, fuseR * 0.3, fuseR * 0.96); g.add(stripe);
-    const stripe2 = stripe.clone(); stripe2.position.z = -fuseR * 0.96; g.add(stripe2);
+    const body  = this.mat(0xe8f2ff, { rough: 0.35, metal: 0.4, emissive: 0x8ab0cc, emiss: 0.12 });
+    // dark material kept for windows
+    void this.mat(0x1a2430, { rough: 0.6, metal: 0.2 }); // reserved
+    const teal  = this.mat(0x2de2d0, { emissive: 0x2de2d0, emiss: 0.6, rough: 0.3 });
+    const eng   = this.mat(0x6b7a8a, { rough: 0.5, metal: 0.7 });
+
+    // ── fuselage: three cylinder sections (nose-cone, main body, tail taper) ──
+    const R  = u * 0.072;  // main radius
+    const Lm = u * 0.62;   // main body length
+    const Ln = u * 0.18;   // nose section
+    const Lt = u * 0.14;   // tail taper section
+
+    // nose cone (front-taper: big → small)
+    const noseMesh = new THREE.Mesh(
+      this.geo(new THREE.CylinderGeometry(R * 0.18, R, Ln, 16)),
+      body);
+    noseMesh.rotation.z = Math.PI / 2;
+    noseMesh.position.x = Lm / 2 + Ln / 2;
+    g.add(noseMesh);
+
+    // main barrel
+    const barrel = new THREE.Mesh(
+      this.geo(new THREE.CylinderGeometry(R, R, Lm, 16)),
+      body);
+    barrel.rotation.z = Math.PI / 2;
+    g.add(barrel);
+
+    // tail taper (back-taper: big → small)
+    const tailMesh = new THREE.Mesh(
+      this.geo(new THREE.CylinderGeometry(R * 0.28, R, Lt, 16)),
+      body);
+    tailMesh.rotation.z = Math.PI / 2;
+    tailMesh.position.x = -(Lm / 2 + Lt / 2);
+    g.add(tailMesh);
+
+    // ── teal window-stripe along the barrel ──
+    const stripe = new THREE.Mesh(
+      this.geo(new THREE.BoxGeometry(Lm * 0.72, R * 0.28, 0.004)),
+      teal);
+    stripe.position.set(0, R * 0.55, R * 1.01); g.add(stripe);
+    const stripe2 = stripe.clone(); stripe2.position.z = -R * 1.01; g.add(stripe2);
+
+    // ── main swept wings ──
+    // built as a half-wing shape (XZ plane), then mirrored
+    const wSpan    = u * 0.52;  // half-span
+    const wRoot    = u * 0.26;  // root chord
+    const wTip     = u * 0.10;  // tip chord
+    const wSweep   = u * 0.18;  // LE sweep offset at tip (aft)
+    const wThick   = R * 0.32;  // wing thickness (extruded along Z)
+    const wingHalfGeo = this.wingShape(wRoot, wTip, wSpan, wSweep, wThick);
+    for (const side of [1, -1]) {
+      const wm = new THREE.Mesh(wingHalfGeo, body);
+      // shape is in XY, extruded along Z; rotate -90° around X so span → +z, chord → x
+      // then mirror along z for the other side
+      wm.rotation.x = -Math.PI / 2;
+      wm.scale.z = side;
+      // place so root LE is at x = +0.06 (slightly forward of centre), flush with belly
+      wm.position.set(u * 0.06, -R - wThick * 0.5, side < 0 ? -wThick : 0);
+      g.add(wm);
+    }
+
+    // ── engine pods under each wing ──
+    const engR = R * 0.52, engL = u * 0.22;
+    // engines sit under the wing at ~40% span, slightly aft of LE
+    const engX = u * 0.06 - wRoot * 0.28;  // align with swept LE at 40% span
+    const engY = -R - wThick - engR * 0.7;  // below wing belly
+    for (const side of [1, -1]) {
+      const engZ = side * wSpan * 0.42;
+      // nacelle
+      const nac = new THREE.Mesh(this.geo(new THREE.CylinderGeometry(engR, engR, engL, 12)), eng);
+      nac.rotation.z = Math.PI / 2;
+      nac.position.set(engX, engY, engZ); g.add(nac);
+      // intake lip (glowing rim)
+      const lip = new THREE.Mesh(this.geo(new THREE.TorusGeometry(engR * 0.92, engR * 0.14, 8, 14)),
+        this.mat(0x3a4050, { emissive: 0x2080ff, emiss: 0.8, rough: 0.3, metal: 0.8 }));
+      lip.rotation.y = Math.PI / 2;
+      lip.position.set(engX + engL / 2 + engR * 0.05, engY, engZ); g.add(lip);
+      // pylon (short strut from wing to engine)
+      const pyl = new THREE.Mesh(this.geo(new THREE.BoxGeometry(u * 0.05, R * 0.55 + wThick, u * 0.04)), body);
+      pyl.position.set(engX, engY + (R * 0.55 + wThick) / 2, engZ); g.add(pyl);
+    }
+
+    // ── horizontal stabilisers (smaller, more swept) ──
+    const hSpan  = wSpan * 0.42, hRoot = wRoot * 0.46, hTip = wTip * 0.55, hSweep = wSweep * 0.7;
+    const hThick = wThick * 0.7;
+    const stabGeo = this.wingShape(hRoot, hTip, hSpan, hSweep, hThick);
+    for (const side of [1, -1]) {
+      const sm = new THREE.Mesh(stabGeo, body);
+      sm.rotation.x = -Math.PI / 2;
+      sm.scale.z = side;
+      sm.position.set(-(Lm / 2 + Lt) + hRoot * 0.9, -R * 0.1, side < 0 ? -hThick : 0);
+      g.add(sm);
+    }
+
+    // ── vertical tail fin (swept trapezoid, standing upright) ──
+    const fShape = new THREE.Shape();
+    const fH = u * 0.28, fRoot = u * 0.19, fTip = u * 0.10, fSwp = u * 0.12;
+    fShape.moveTo(0, 0); fShape.lineTo(fRoot, 0);
+    fShape.lineTo(fSwp + fTip, fH); fShape.lineTo(fSwp, fH); fShape.closePath();
+    const finGeo = this.geo(new THREE.ExtrudeGeometry(fShape, { depth: 0.008, bevelEnabled: false }));
+    const fin = new THREE.Mesh(finGeo, body);
+    // fin lies in XY; shift so root aligns with tail
+    fin.position.set(-(Lm / 2 + Lt) + fRoot * 0.3, R * 0.9, -0.004);
+    g.add(fin);
+
     return g;
   }
 

@@ -164,7 +164,7 @@ export class CityScene {
   private specs: BuildingSpec[] = [];
   private classic = false;
   private roofs = new RoofKit();
-  private landmarks = new Landmarks();
+  readonly landmarks = new Landmarks();
   private ways = new Walkways();
   private conds: Condition[] = [];
   private worksKey = '';
@@ -646,6 +646,7 @@ export class CityScene {
       bm.roughness = t.hacker ? 0.15 : 0.55; bm.metalness = t.hacker ? 0.9 : 0.15;
     }
     this.roofs.setHacker(!!t.hacker);
+    this.landmarks.setHacker(!!t.hacker);
     this.ways.setTheme(!!t.hacker, t.name === 'night');
     if (this.skin) this.skin.mesh.visible = !!t.hacker;
     if (this.grid) {
