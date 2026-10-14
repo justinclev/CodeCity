@@ -110,6 +110,25 @@ export const THEMES: Record<ThemeName, Theme> = {
   },
 };
 
+// Wrap each theme's district function with a per-depth cache so paintDistricts()
+// does not allocate a new Color per district on every selection/theme change.
+for (const t of Object.values(THEMES)) t.district = cachedDistrict(t.district);
+
+/**
+ * Wrap a theme's district-color function with a small depth-keyed cache so
+ * paintDistricts() (which iterates every district on each selection/theme
+ * change) does not allocate a new THREE.Color per district per call.
+ * Depth range is small (0–~10) so the cache stays tiny.
+ */
+export function cachedDistrict(fn: (depth: number) => THREE.Color): (depth: number) => THREE.Color {
+  const cache = new Map<number, THREE.Color>();
+  return (depth: number) => {
+    let c = cache.get(depth);
+    if (!c) { c = fn(depth); cache.set(depth, c); }
+    return c;
+  };
+}
+
 /** Vertical sky gradient used as the scene background. */
 export function skyTexture(t: Theme): THREE.Texture {
   const c = document.createElement('canvas');

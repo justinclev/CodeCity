@@ -1083,11 +1083,12 @@ export class CityScene {
     const tint = this.theme.buildingTint;
     const B = this.baseline, cur = this.commit;
     this.baseColors = this.city.buildings.map((b, i) => {
+      // Always clone before multiplyScalar — languageColor/authorColor return cached shared objects.
       let c: THREE.Color;
       switch (this.colorMode) {
-        case 'language': c = languageColor(b.lang); break;
+        case 'language': c = languageColor(b.lang).clone(); break;
         case 'depth': c = depthColor(this.city.districts[b.district].depth, maxDepth); break;
-        case 'owner': c = b.own ? authorColor(b.own[0]) : new THREE.Color('#596277'); break;
+        case 'owner': c = b.own ? authorColor(b.own[0]).clone() : new THREE.Color('#596277'); break;
         case 'knowledge': c = new THREE.Color(RISK_COLORS[this.risk(i)]); break;
         case 'compare': {
           const was = this.vals.loc[i * this.C + B], now2 = this.vals.loc[i * this.C + cur];
@@ -1099,7 +1100,7 @@ export class CityScene {
         }
         default: c = heat(this.heatT[i]); // churn, hotspot, complexity, age
       }
-      return c.multiplyScalar(tint);
+      return tint === 1 ? c : c.multiplyScalar(tint);
     });
     this.change = new Uint8Array(n);
     this.changed = [];
@@ -1215,9 +1216,13 @@ export class CityScene {
   private paintDistricts() {
     const m = this.districtMesh!;
     this.city.districts.forEach((d, i) => {
-      const c = this.theme.district(d.depth);
-      if (i === this.selectedDistrict) c.lerp(this._outlineColor.set(this.theme.outline), 0.45);
-      m.setColorAt(i, c);
+      const base = this.theme.district(d.depth);
+      // district() returns a cached object — clone before mutating for the selected highlight
+      if (i === this.selectedDistrict) {
+        m.setColorAt(i, this._outlineColor.copy(base).lerp(this._dimColor.set(this.theme.outline), 0.45));
+      } else {
+        m.setColorAt(i, base);
+      }
     });
     m.instanceColor!.needsUpdate = true;
   }

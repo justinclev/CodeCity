@@ -8,11 +8,22 @@ const FIXED: Record<string, string> = {
   Makefile: '#427819', Other: '#6b7488',
 };
 
+// Pre-built cache for every language seen so far — avoids repeated allocations
+// during buildBaseColors() which maps over thousands of buildings.
+const _langCache = new Map<string, THREE.Color>();
+
 export function languageColor(lang: string): THREE.Color {
-  if (FIXED[lang]) return new THREE.Color(FIXED[lang]);
-  let h = 0;
-  for (let i = 0; i < lang.length; i++) h = (h * 31 + lang.charCodeAt(i)) >>> 0;
-  return new THREE.Color().setHSL((h % 360) / 360, 0.55, 0.55);
+  let c = _langCache.get(lang);
+  if (c) return c;
+  if (FIXED[lang]) {
+    c = new THREE.Color(FIXED[lang]);
+  } else {
+    let h = 0;
+    for (let i = 0; i < lang.length; i++) h = (h * 31 + lang.charCodeAt(i)) >>> 0;
+    c = new THREE.Color().setHSL((h % 360) / 360, 0.55, 0.55);
+  }
+  _langCache.set(lang, c);
+  return c;
 }
 
 /** t in [0,1] → cool-to-hot gradient. */
@@ -33,9 +44,13 @@ export function districtColor(depth: number): THREE.Color {
 
 const AUTHOR_PALETTE = ['#ff6b6b', '#4dabf7', '#ffd43b', '#69db7c', '#da77f2', '#ff922b', '#38d9a9', '#f783ac', '#a9e34b', '#74c0fc', '#e599f7', '#ffa94d'];
 
+// Pre-built author color objects — authorColor is called once per building per commit change.
+const _authorCache: THREE.Color[] = AUTHOR_PALETTE.map(c => new THREE.Color(c));
+const _authorFallback = new THREE.Color('#7d8597');
+
 /** Distinct colors for the top authors; everyone else shares a neutral grey. */
 export function authorColor(index: number): THREE.Color {
-  return new THREE.Color(index < AUTHOR_PALETTE.length ? AUTHOR_PALETTE[index] : '#7d8597');
+  return index < _authorCache.length ? _authorCache[index] : _authorFallback;
 }
 
 export const AUTHOR_COLORS = AUTHOR_PALETTE.length;

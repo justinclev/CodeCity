@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import type { BuildingSpec, RoofKind } from './architecture';
 
+const _c = new THREE.Color(); // scratch for paint()
+
 /**
  * Rooftop equipment (what a file does, from the flow analysis) and construction
  * (scaffolding and cranes for recent churn), as a parametric kit: one InstancedMesh
@@ -252,12 +254,11 @@ export class RoofKit {
 
   private paint() {
     const pal = PALETTE[this.hacker ? 'hacker' : 'normal'];
-    const c = new THREE.Color();
     for (const ps of this.pieces) {
       for (const p of ps) {
         const mesh = this.meshes.get(p.prim);
         if (!mesh) continue;
-        mesh.setColorAt(p.slot, c.set(pal[p.def.tone]));
+        mesh.setColorAt(p.slot, _c.set(pal[p.def.tone]));
         (mesh.geometry.getAttribute('aLight') as THREE.InstancedBufferAttribute).setX(p.slot, p.def.light ?? 0);
       }
     }

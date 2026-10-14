@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 
 const TEAL = new THREE.Color(0x2de2d0), CORAL = new THREE.Color(0xff6b5b);
+const WHITE = new THREE.Color(1, 1, 1);  // scratch — shared, never mutated
+const _c = new THREE.Color();             // scratch for per-frame colour calculations
 
 export interface GateSpot { x: number; z: number; dir: 'in' | 'out'; label: string }
 
@@ -97,7 +99,7 @@ export class GateMarks {
     // flare: 0 → 1 → settle at 0.35 with a slow shimmer
     const flare = age < 0.7 ? Math.sin((age / 0.7) * Math.PI * 0.5) : 0.35 + 0.12 * Math.sin(now / 260) + 0.65 * Math.exp(-(age - 0.7) * 2.5);
     const gain = 1 + flare * 2.2;
-    const c = base.clone().lerp(new THREE.Color(1, 1, 1), 0.35 * flare).multiplyScalar(gain);
+    const c = _c.copy(base).lerp(WHITE, 0.35 * flare).multiplyScalar(gain);
     for (let j = 0; j < 3; j++) m.setColorAt(k * 3 + j, c);
     m.instanceColor.needsUpdate = true;
     const g = this.spots[k], w = this.width, h = w * 1.15;
@@ -114,8 +116,8 @@ export class GateMarks {
     if (!m?.instanceColor) return;
     const paint = (i: number, on: boolean) => {
       if (i < 0 || i >= this.spots.length) return;
-      const c = (this.spots[i].dir === 'in' ? TEAL : CORAL).clone();
-      if (on) c.lerp(new THREE.Color(1, 1, 1), 0.65);
+      const c = _c.copy(this.spots[i].dir === 'in' ? TEAL : CORAL);
+      if (on) c.lerp(WHITE, 0.65);
       for (let j = 0; j < 3; j++) m.setColorAt(i * 3 + j, c);
     };
     paint(this.selected, false);
