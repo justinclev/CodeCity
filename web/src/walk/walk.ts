@@ -126,6 +126,17 @@ export class WalkMode {
   private planeCtrl: PlaneMode | null = null;
   private piloting = false;
 
+  // Pre-allocated scratch vectors — reused each frame to avoid GC pressure
+  private readonly _fwd   = new THREE.Vector3();
+  private readonly _right = new THREE.Vector3();
+  private readonly _eye   = new THREE.Vector3();
+  private readonly _look  = new THREE.Vector3();
+  private readonly _pivot = new THREE.Vector3();
+  private readonly _back  = new THREE.Vector3();
+  private readonly _want  = new THREE.Vector3();
+  private readonly _body  = new THREE.Vector3();
+  private readonly _ndc   = new THREE.Vector2();
+
   constructor(private scene: CityScene, private host: WalkHost) {}
 
   /** Outdoor scale: body height in city units. */
@@ -1175,7 +1186,7 @@ export class WalkMode {
         if (dx * dx + dz * dz < r * r && !this.game.isSeen(b.i)) { this.game.see(b.i); this.mapDirty = true; }
       }
     }
-    const body = this.pos.clone().add(new THREE.Vector3(0, this.h * 0.5, 0));
+    const body = this._body.copy(this.pos).add(this._eye.set(0, this.h * 0.5, 0));
     for (const sh of this.props?.shards ?? []) {
       if (sh.taken || sh.pos.distanceTo(body) > this.u * 1.3) continue;
       this.collect(sh);
@@ -1262,8 +1273,8 @@ export class WalkMode {
     const key = (c: string) => !typing && keyDown.has(c);
     const f = (key('KeyW') || key('ArrowUp') ? 1 : 0) - (key('KeyS') || key('ArrowDown') ? 1 : 0);
     const sd = (key('KeyD') || key('ArrowRight') ? 1 : 0) - (key('KeyA') || key('ArrowLeft') ? 1 : 0);
-    const fwd = new THREE.Vector3(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-    const right = new THREE.Vector3(-fwd.z, 0, fwd.x);
+    const fwd = this._fwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    const right = this._right.set(-fwd.z, 0, fwd.x);
     const dir = fwd.multiplyScalar(f).add(right.multiplyScalar(sd));
     if (dir.lengthSq() > 0) {
       // W/A/S/D move relative to the camera; the body turns to walk that way (S walks towards the camera)
@@ -1384,24 +1395,23 @@ export class WalkMode {
 
   private updateCamera(dt: number) {
     const cam = this.scene.camera;
-    const eye = this.pos.clone().add(new THREE.Vector3(0, this.h * 0.86, 0));
-    const look = new THREE.Vector3(-Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), -Math.cos(this.yaw) * Math.cos(this.pitch));
+    const eye = this._eye.copy(this.pos).add(this._body.set(0, this.h * 0.86, 0));
+    const look = this._look.set(-Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), -Math.cos(this.yaw) * Math.cos(this.pitch));
     if (cam.fov !== 70) { cam.fov += (70 - cam.fov) * Math.min(1, dt * 5); cam.updateProjectionMatrix(); }
     if (this.firstPerson) {
       cam.position.copy(eye);
       cam.lookAt(eye.clone().add(look));
       return;
     }
-    const pivot = this.pos.clone().add(new THREE.Vector3(0, this.h * 0.95, 0));
-    const shoulder = new THREE.Vector3(Math.cos(this.yaw), 0, -Math.sin(this.yaw)).multiplyScalar(this.h * 0.25);
-    pivot.add(shoulder);
+    const pivot = this._pivot.copy(this.pos).add(this._body.set(0, this.h * 0.95, 0));
+    pivot.addScaledVector(this._right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw)), this.h * 0.25);
     let dist = this.camDist;
-    const back = look.clone().multiplyScalar(-1);
+    const back = this._back.copy(look).multiplyScalar(-1);
     if (this.where === 'city') {
       const hit = this.scene.rayDistance(pivot, back, dist);
       if (hit < dist) dist = Math.max(this.h * 0.4, hit - this.h * 0.2);
     }
-    const want = pivot.clone().addScaledVector(back, dist);
+    const want = this._want.copy(pivot).addScaledVector(back, dist);
     if (this.where === 'inside') {
       const L = this.interior!.levelAt(this.pos.y);
       want.x = Math.max(-7.7, Math.min(7.7, want.x));
@@ -1415,13 +1425,13 @@ export class WalkMode {
     }
     if (this.snapCam) { cam.position.copy(want); this.snapCam = false; } // just arrived: no swoop from the ride camera
     else cam.position.lerp(want, Math.min(1, dt * 12));
-    cam.lookAt(pivot.clone().addScaledVector(look, this.h * 2));
+    cam.lookAt(this._body.copy(pivot).addScaledVector(look, this.h * 2));
   }
 
   /** What is under the crosshair (or the mouse when it is not captured). */
   private updateAim() {
     const cam = this.scene.camera;
-    const ndc = this.locked || this.firstPerson ? new THREE.Vector2(0, 0) : this.mouse;
+    const ndc = this.locked || this.firstPerson ? this._ndc.set(0, 0) : this.mouse;
     this.raycaster.setFromCamera(ndc, cam);
     let aim: WalkMode['aim'] = null;
     if (this.where === 'inside') {

@@ -287,6 +287,7 @@ function show(c: City) {
   stopPlayback();
   const wanted = new URLSearchParams(location.hash.slice(1)).get('file'); // read before writeHash() replaces it
   city = c;
+  pathIndex = new Map(); // invalidate — will be rebuilt lazily or on walk start
   selected = selectedDistrict = -1;
   tourAt = -1; tourBar(); historyCache.clear();
   flowView.reset();
@@ -553,8 +554,7 @@ function startRoute(k: number, doorAt = 0) {
   const c = city, e = edgeGates[k];
   if (!c || !e || !gateGraph) return;
   const door = e.gates[doorAt] ?? e.gates[0];
-  const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
-  const steps = traceRoute(gateGraph, door, p => pathIndex.get(p) ?? -1);
+  const steps = traceRoute(gateGraph, door, p => getPathIndex().get(p) ?? -1);
   if (steps.length < 2) { ui.setGateCount('no route found'); return; }
   const legs: NonNullable<typeof route>['legs'] = [];
   let here: number | undefined;
@@ -939,42 +939,8 @@ chart.addEventListener('click', e => {
 });
 addEventListener('resize', () => redrawChart());
 
-addEventListener('keydown', e => {
-  if (flowView.open) return; // the flow view has its own keys
-  const t = e.target as HTMLElement;
-  const typing = (t.tagName === 'INPUT' && !['range', 'checkbox'].includes((t as HTMLInputElement).type)) || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA';
-  if (typing) return;
-  if (e.code === 'Space') { e.preventDefault(); playing ? stopPlayback() : startPlayback(); }
-  else if (e.key === 'ArrowLeft' && city) { stopPlayback(); setCommit(scene.commit - 1); }
-  else if (e.key === 'ArrowRight' && city) { stopPlayback(); setCommit(scene.commit + 1); }
-  else if (e.key === 'Escape') {
-    if (codeOpen) closeCode();
-    else if (scene.explodedBuilding >= 0) { scene.collapse(); refreshSelection(); }
-    else { closeInfo(); if (scene.authorFilter >= 0) setAuthorFilter(-1); }
-  }
-  else if (e.key === 'e' || e.key === 'E') toggleExplode();
-  else if (e.key === 'u' || e.key === 'U') { if (tourAt >= 0) endTour(); else startTour(); }
-  else if ((e.key === 'n' || e.key === 'N') && tourAt >= 0) tourGo(tourAt + 1);
-  else if ((e.key === 'b' || e.key === 'B') && tourAt >= 0) tourGo(tourAt - 1);
-  else if (e.key === 'b' || e.key === 'B') {
-    const classic = !scene.classicBoxes;
-    ui.setBuildingsMode(classic);
-    setBuildings(classic);
-  }
-  else if (e.key === 'l' || e.key === 'L') {
-    const order = ['selection', 'all', 'off'] as const;
-    scene.codeLinkMode = order[(order.indexOf(scene.codeLinkMode) + 1) % 3];
-    ui.setCodeLinksMode(scene.codeLinkMode);
-    store.set('codelinks.' + scene.theme.name, scene.codeLinkMode);
-    scene.refreshCodeLinks();
-  }
-  else if (e.key === '[') stepPiece(-1);
-  else if (e.key === ']') stepPiece(1);
-  else if (e.key === 'f' || e.key === 'F') { if (city) scene.frame(); }
-  else if (e.key === 't' || e.key === 'T') toggleDayNight();
-  else if (e.key === 'h' || e.key === 'H') toggleHacker();
-  else if (e.key === '/') { e.preventDefault(); (document.getElementById('search') as HTMLInputElement).focus(); }
-});
+// Single consolidated keydown handler — kept after walk/flow/flowbtn are defined
+// (the actual registration is at the bottom of the file near those declarations)
 
 // ---------------------------------------------------------------- pointer
 const canvas = scene.renderer.domElement;
@@ -1091,6 +1057,12 @@ void start();
 // ---------------------------------------------------------------- walk mode
 const MAX_FLOORS = 60;
 let pathIndex = new Map<string, number>();
+
+/** Build (or reuse) the path → building-index map for the current city. */
+function getPathIndex(): Map<string, number> {
+  if (!pathIndex.size && city) pathIndex = new Map(city.buildings.map((b, i) => [b.path, i]));
+  return pathIndex;
+}
 
 function interiorFloors(f: FileData): InteriorFloor[] {
   const fl = floorsOf(f).map(x => {
@@ -1277,8 +1249,8 @@ const walk = new WalkMode(scene, {
   doorRoute: (k, doorAt = 0) => {
     const c = city, e = edgeGates[k];
     if (!c || !e || !gateGraph) return null;
-    const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
-    const steps = traceRoute(gateGraph, e.gates[doorAt] ?? e.gates[0], p => pathIndex.get(p) ?? -1);
+    const pi = getPathIndex();
+    const steps = traceRoute(gateGraph, e.gates[doorAt] ?? e.gates[0], p => pi.get(p) ?? -1);
     return steps.length < 2 ? null : { title: e.label, steps };
   },
 });
@@ -1287,7 +1259,7 @@ let walkTour: TourStop[] = [];
 
 /** Directories one level below the repository root(s). */
 function topDistricts() {
-  return city!.districts.filter(d => d.depth === 1 && scene.districtMembers(city!.districts.indexOf(d)).length > 0);
+  return city!.districts.filter((d, i) => d.depth === 1 && scene.districtMembers(i).length > 0);
 }
 
 /** One landmark per rooftop role (spire, antenna, tanks, …), the most-imported file of each kind first. */
@@ -1339,15 +1311,10 @@ function startWalk(at = -1) {
   closeInfo();
   if (scene.commit !== city.commits.length - 1) setCommit(city.commits.length - 1);
   if (scene.theme.name !== 'hacker') applyTheme('hacker');
-  pathIndex = new Map(city.buildings.map((b, i) => [b.path, i]));
+  pathIndex = new Map(city.buildings.map((b, i) => [b.path, i])); // rebuild for new city
   walk.start(at);
 }
 document.getElementById('walk')!.addEventListener('click', () => startWalk());
-addEventListener('keydown', e => {
-  const t = e.target as HTMLElement;
-  if (walk.active || flowView.open || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
-  if (e.key === 'g' || e.key === 'G') startWalk();
-});
 
 // debug handle for automated checks (no behaviour change)
 (window as unknown as { __codecity: unknown }).__codecity = { scene, walk };
@@ -1390,8 +1357,8 @@ async function setGatesOn(on: boolean) {
     const g = await flowGraph();
     if (city !== c || !gatesOn) return;
     gateGraph = g;
-    const pathIndex = new Map(c.buildings.map((b, i) => [b.path, i] as const));
-    const gates = buildGates(g, p => pathIndex.get(p) ?? -1);
+    const pi = getPathIndex();
+    const gates = buildGates(g, p => pi.get(p) ?? -1);
     edgeGates = layoutGates(gates, b => c.buildings[b].repo ?? 0, r => scene.cityRect(r), b => c.buildings[b].x + c.buildings[b].w / 2, scene.gateWidth, scene.gateOffset);
     gateByBuilding = new Map();
     edgeGates.forEach((e, k) => { for (const g of e.gates) { const l = gateByBuilding.get(g.building); if (l) l.push(k); else gateByBuilding.set(g.building, [k]); } });
@@ -1403,7 +1370,7 @@ async function setGatesOn(on: boolean) {
   } catch (e) {
     box.checked = gatesOn = false;
     ui.setGateCount(apiAvailable ? 'failed' : 'needs the server');
-    console.warn('doors:', (e as Error).message);
+    if (apiAvailable) ui.setJobStatus(`Doors: ${(e as Error).message}`, true);
   }
 }
 
@@ -1442,16 +1409,55 @@ function openFlow() {
   else void flowView.show();
 }
 document.getElementById('flowbtn')!.addEventListener('click', () => (flowView.open ? flowView.close() : openFlow()));
-addEventListener('keydown', e => {
-  const t = e.target as HTMLElement;
-  if (walk.active || flowView.open || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
-  if (e.key === 'd' || e.key === 'D') openFlow();
-});
 
+// ---------------------------------------------------------------- consolidated keydown handler
 addEventListener('keydown', e => {
-  if (!route || walk.active || flowView.open) return;
   const t = e.target as HTMLElement;
-  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') return;
-  if (e.key === 'ArrowRight') { void goStep(Math.min(route.steps.length - 1, route.at + 1)); e.preventDefault(); }
-  else if (e.key === 'ArrowLeft') { void goStep(Math.max(0, route.at - 1)); e.preventDefault(); }
+  const typing = (t.tagName === 'INPUT' && !['range', 'checkbox'].includes((t as HTMLInputElement).type)) || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA';
+  if (typing) return;
+
+  // walk mode captures its own keys
+  if (walk.active) return;
+
+  // route step navigation (arrow keys when following a route)
+  if (route && !flowView.open) {
+    if (e.key === 'ArrowRight') { void goStep(Math.min(route.steps.length - 1, route.at + 1)); e.preventDefault(); return; }
+    if (e.key === 'ArrowLeft') { void goStep(Math.max(0, route.at - 1)); e.preventDefault(); return; }
+  }
+
+  // flow view has its own keys except 'D' to close
+  if (flowView.open) {
+    if (e.key === 'd' || e.key === 'D') openFlow();
+    return;
+  }
+
+  // city view keys
+  if (e.code === 'Space') { e.preventDefault(); playing ? stopPlayback() : startPlayback(); }
+  else if (e.key === 'ArrowLeft' && city) { stopPlayback(); setCommit(scene.commit - 1); }
+  else if (e.key === 'ArrowRight' && city) { stopPlayback(); setCommit(scene.commit + 1); }
+  else if (e.key === 'Escape') {
+    if (codeOpen) closeCode();
+    else if (scene.explodedBuilding >= 0) { scene.collapse(); refreshSelection(); }
+    else { closeInfo(); if (scene.authorFilter >= 0) setAuthorFilter(-1); }
+  }
+  else if (e.key === 'e' || e.key === 'E') toggleExplode();
+  else if (e.key === 'u' || e.key === 'U') { if (tourAt >= 0) endTour(); else startTour(); }
+  else if ((e.key === 'n' || e.key === 'N') && tourAt >= 0) tourGo(tourAt + 1);
+  else if ((e.key === 'b' || e.key === 'B') && tourAt >= 0) tourGo(tourAt - 1);
+  else if (e.key === 'b' || e.key === 'B') { const classic = !scene.classicBoxes; ui.setBuildingsMode(classic); setBuildings(classic); }
+  else if (e.key === 'g' || e.key === 'G') startWalk();
+  else if (e.key === 'd' || e.key === 'D') openFlow();
+  else if (e.key === 'l' || e.key === 'L') {
+    const order = ['selection', 'all', 'off'] as const;
+    scene.codeLinkMode = order[(order.indexOf(scene.codeLinkMode) + 1) % 3];
+    ui.setCodeLinksMode(scene.codeLinkMode);
+    store.set('codelinks.' + scene.theme.name, scene.codeLinkMode);
+    scene.refreshCodeLinks();
+  }
+  else if (e.key === '[') stepPiece(-1);
+  else if (e.key === ']') stepPiece(1);
+  else if (e.key === 'f' || e.key === 'F') { if (city) scene.frame(); }
+  else if (e.key === 't' || e.key === 'T') toggleDayNight();
+  else if (e.key === 'h' || e.key === 'H') toggleHacker();
+  else if (e.key === '/') { e.preventDefault(); (document.getElementById('search') as HTMLInputElement).focus(); }
 });
