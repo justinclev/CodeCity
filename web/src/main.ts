@@ -1034,8 +1034,8 @@ canvas.addEventListener('pointerup', e => {
   if (hit?.kind === 'link') selectLink(hit.index);
   else if (hit?.kind === 'gate') selectGate(hit.index);
   else if (hit?.kind === 'floor') openPiece(scene.floorAt(hit.index)!.piece);
-  else if (hit?.kind === 'building') selectBuilding(hit.index, false);
-  else if (hit?.kind === 'district') selectDistrict(hit.index, false);
+  else if (hit?.kind === 'building') selectBuilding(hit.index, true);
+  else if (hit?.kind === 'district') selectDistrict(hit.index, true);
   else closeInfo();
 });
 canvas.addEventListener('dblclick', e => {
