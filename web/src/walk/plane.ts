@@ -43,16 +43,17 @@ export class PlaneMode {
   // plane state
   private pos    = new THREE.Vector3();
   private vel    = new THREE.Vector3();   // world-space velocity
-  private throttle = 0.45;              // 0-1
+  private throttle = 0.65;              // 0-1
   private pitch  = 0;                    // plane nose pitch (radians, +up)
   private roll   = 0;                    // bank angle
   private yaw    = 0;                    // heading (radians)
   private speed  = 0;                    // m/s in city units
 
   // camera
-  private camYaw   = 0;
-  private camPitch = 0.25;
   private camDist  = 0;
+  // pan offset in camera-right / camera-up space (decays back to 0)
+  private camPanX  = 0;
+  private camPanY  = 0;
 
   // 3d objects
   private planeGroup = new THREE.Group();
@@ -91,12 +92,12 @@ export class PlaneMode {
     this.pos.copy(at);
     this.yaw   = startYaw;
     this.pitch = 0; this.roll = 0;
-    this.throttle = 0.45;
+    this.throttle = 0.65;
     this.speed = 0;
     this.vel.set(0, 0, 0);
-    this.camYaw   = 0;
-    this.camPitch = 0.25;
-    this.camDist  = this.scene.cell * 3.5;
+    this.camDist  = this.scene.cell * 8;
+    this.camPanX  = 0;
+    this.camPanY  = 0;
     this.landTimer = 0;
     this.time = 0;
     this.trailCountL = this.trailCountR = 0;
@@ -391,7 +392,7 @@ export class PlaneMode {
     this.altEl = document.createElement('div');
     const controls = document.createElement('div');
     controls.style.cssText = 'color:rgba(45,226,208,0.55); font-size:10px; margin-top:6px; line-height:1.6;';
-    controls.innerHTML = 'W/S pitch · A/D roll<br>Space throttle+ · Shift throttle-<br>E land · Q eject';
+    controls.innerHTML = 'W/S pitch · A/D roll<br>Space throttle+ · Shift throttle-<br>Drag to pan view · E land · Q eject';
 
     panel.append(this.throttleBar, this.speedEl, this.altEl, controls);
     this.hud.appendChild(panel);
@@ -426,11 +427,16 @@ export class PlaneMode {
     };
     on<MouseEvent>(window, 'mousemove', e => {
       if (this.drag) {
-        this.camYaw   -= e.movementX * 0.003;
-        this.camPitch  = Math.max(-0.2, Math.min(0.8, this.camPitch - e.movementY * 0.0025));
+        // pan: translate the camera's look-at target in screen space
+        const panScale = this.camDist * 0.0012;
+        this.camPanX -= e.movementX * panScale;
+        this.camPanY += e.movementY * panScale;
       }
     });
-    on<MouseEvent>(this.scene.renderer.domElement, 'mousedown', () => { this.drag = { x: 0, y: 0 }; });
+    on<MouseEvent>(this.scene.renderer.domElement, 'mousedown', e => {
+      e.preventDefault();
+      this.drag = { x: e.clientX, y: e.clientY };
+    });
     on<MouseEvent>(window, 'mouseup', () => { this.drag = null; });
   }
 
@@ -447,17 +453,17 @@ export class PlaneMode {
                                    this.throttle = Math.max(0, this.throttle - dt * 0.55);
 
     // --- pitch and roll ---
-    const pitchRate = 1.4, rollRate = 1.8;
-    if (keyDown.has('KeyW'))  this.pitch = Math.max(-0.9, this.pitch - dt * pitchRate);
-    else if (keyDown.has('KeyS')) this.pitch = Math.min(0.9, this.pitch + dt * pitchRate);
-    else this.pitch *= (1 - dt * 2.5); // auto-level
+    const pitchRate = 2.5, rollRate = 2.8;
+    if (keyDown.has('KeyW'))  this.pitch = Math.min(0.9, this.pitch + dt * pitchRate);   // W = nose up
+    else if (keyDown.has('KeyS')) this.pitch = Math.max(-0.9, this.pitch - dt * pitchRate); // S = nose down
+    else this.pitch *= (1 - dt * 3.0); // auto-level
 
     if (keyDown.has('KeyA'))  this.roll = Math.max(-1.1, this.roll - dt * rollRate);
     else if (keyDown.has('KeyD')) this.roll = Math.min(1.1, this.roll + dt * rollRate);
-    else this.roll *= (1 - dt * 2.2); // auto-level
+    else this.roll *= (1 - dt * 2.5); // auto-level
 
-    // yaw follows roll (coordinated turn)
-    this.yaw -= this.roll * dt * 1.1;
+    // yaw follows roll (coordinated turn) — snappier
+    this.yaw -= this.roll * dt * 2.0;
 
     // --- velocity update ---
     const speedFrac  = this.speed / maxSpeed;
@@ -560,22 +566,42 @@ export class PlaneMode {
     const cam = this.scene.camera;
     const u = this.scene.cell;
 
-    // chase camera orbits around the plane
-    const camFwd = new THREE.Vector3(
-      Math.sin(this.yaw + this.camYaw),
-      Math.sin(this.camPitch) * 1.2,
-      Math.cos(this.yaw + this.camYaw)
+    // Forward direction the plane is flying
+    const forward = new THREE.Vector3(
+      Math.sin(this.yaw),
+      Math.sin(this.pitch) * 0.8,
+      Math.cos(this.yaw)
     ).normalize();
 
-    const target = this.pos.clone().add(new THREE.Vector3(0, u * 0.3, 0));
-    const want = target.clone().addScaledVector(camFwd, this.camDist);
-    want.y = Math.max(want.y, 0.5); // never underground
+    // Camera sits BEHIND and above the plane
+    const behind = forward.clone().negate();
+    const up = new THREE.Vector3(0, 1, 0);
+    const right = new THREE.Vector3().crossVectors(forward, up).normalize();
 
-    cam.position.lerp(want, Math.min(1, 0.016 * 14));
-    cam.lookAt(target);
+    // Base look-at target is slightly ahead of/above the plane
+    const lookTarget = this.pos.clone()
+      .addScaledVector(forward, u * 0.5)
+      .add(new THREE.Vector3(0, u * 0.2, 0));
+
+    // Apply pan offset in camera-right / camera-up space
+    // Decay pan slowly so it re-centres when drag stops
+    this.camPanX *= 0.92;
+    this.camPanY *= 0.92;
+    const panTarget = lookTarget.clone()
+      .addScaledVector(right, this.camPanX)
+      .add(new THREE.Vector3(0, this.camPanY, 0));
+
+    // Camera position: behind + up offset
+    const want = this.pos.clone()
+      .addScaledVector(behind, this.camDist)
+      .add(new THREE.Vector3(0, u * 1.2, 0));
+    want.y = Math.max(want.y, 0.5);
+
+    cam.position.lerp(want, Math.min(1, 0.016 * 10));
+    cam.lookAt(panTarget);
 
     // speed-dependent FOV
-    const fovWant = 72 + (this.speed / (this.scene.cell * 14)) * 22;
+    const fovWant = 68 + (this.speed / (this.scene.cell * 14)) * 20;
     cam.fov += (fovWant - cam.fov) * 0.08;
     cam.updateProjectionMatrix();
   }
