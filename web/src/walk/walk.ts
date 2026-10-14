@@ -1206,9 +1206,9 @@ export class WalkMode {
 
   private nearPlane(): THREE.Vector3 | null {
     const spots = this.scene.landmarks?.planeSpots ?? [];
-    const thresh = this.scene.cell * 2.8;
+    const thresh = this.scene.cell * 5.5;
     for (const s of spots) {
-      if (Math.hypot(s.x - this.pos.x, s.z - this.pos.z) < thresh && Math.abs(s.y - this.pos.y) < this.u * 2) return s;
+      if (Math.hypot(s.x - this.pos.x, s.z - this.pos.z) < thresh && Math.abs(s.y - this.pos.y) < this.u * 5) return s;
     }
     return null;
   }
