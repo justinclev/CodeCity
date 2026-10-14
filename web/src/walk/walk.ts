@@ -1216,6 +1216,7 @@ export class WalkMode {
   private boardPlane(spot: THREE.Vector3) {
     if (this.piloting) return;
     this.piloting = true;
+    this.showPrompt(''); // clear any stale walk-mode label
     // hide avatar + standard trail
     this.avatar.setVisible(false);
     this.trail.mesh.visible = false;
