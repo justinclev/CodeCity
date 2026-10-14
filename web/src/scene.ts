@@ -192,6 +192,11 @@ export class CityScene {
   private tmp = new THREE.Object3D();
   private last = performance.now();
   private flowTime = 0;
+  // scratch colors — reused every frame to avoid GC pressure in the paint hot path
+  private readonly _scratchColor  = new THREE.Color();
+  private readonly _WHITE         = new THREE.Color(0xffffff);
+  private readonly _COLOR_ADD     = new THREE.Color(0x4dff88);
+  private readonly _COLOR_CHANGE  = new THREE.Color(0xffc233);
   private fly: { p0: THREE.Vector3; t0: THREE.Vector3; p1: THREE.Vector3; t1: THREE.Vector3; start: number; dur: number } | null = null;
 
   commit = 0;
@@ -1143,15 +1148,20 @@ export class CityScene {
   }
 
   private colorFor(i: number): THREE.Color {
-    const c = this.baseColors[i].clone();
-    if (i === this.selected) return this.theme.hacker ? c : c.lerp(new THREE.Color(0xffffff), 0.35);
-    if (i === this.hovered) return c.lerp(new THREE.Color(0xffffff), 0.25);
-    if (this.dimmed[i]) return c.lerp(new THREE.Color(this.theme.dim), 0.85);
+    // writes into _scratchColor — caller must not hold a reference across calls
+    const c = this._scratchColor.copy(this.baseColors[i]);
+    if (i === this.selected) return this.theme.hacker ? c : c.lerp(this._WHITE, 0.35);
+    if (i === this.hovered) return c.lerp(this._WHITE, 0.25);
+    if (this.dimmed[i]) return c.lerp(this._scratchDim(), 0.85);
     if (this.showChanges && this.pulse > 0 && this.change[i]) {
-      return c.lerp(new THREE.Color(this.change[i] === 1 ? 0x4dff88 : 0xffc233), 0.75 * this.pulse);
+      return c.lerp(this.change[i] === 1 ? this._COLOR_ADD : this._COLOR_CHANGE, 0.75 * this.pulse);
     }
     return c;
   }
+
+  // re-set dim colour from theme (theme can change at runtime)
+  private readonly _dimColor = new THREE.Color();
+  private _scratchDim(): THREE.Color { return this._dimColor.set(this.theme.dim); }
 
   private glowFor(i: number): number {
     const night = this.theme.night;
@@ -1201,11 +1211,12 @@ export class CityScene {
     this.flushPaint();
   }
 
+  private readonly _outlineColor = new THREE.Color();
   private paintDistricts() {
     const m = this.districtMesh!;
     this.city.districts.forEach((d, i) => {
       const c = this.theme.district(d.depth);
-      if (i === this.selectedDistrict) c.lerp(new THREE.Color(this.theme.outline), 0.45);
+      if (i === this.selectedDistrict) c.lerp(this._outlineColor.set(this.theme.outline), 0.45);
       m.setColorAt(i, c);
     });
     m.instanceColor!.needsUpdate = true;
@@ -1401,15 +1412,28 @@ export class CityScene {
     return new THREE.Vector3(x.x + x.w / 2, this.districtTop(Math.max(0, x.depth)) + lift, x.z + x.d / 2);
   }
 
+  // Pre-allocated link color palettes keyed by `${theme}:${kind}` — avoids heap churn on every rebuild
+  private static readonly LINK_COLORS: Record<string, [THREE.Color, THREE.Color]> = {
+    'day:data':       [new THREE.Color('#862e9c'), new THREE.Color('#be4bdb')],
+    'night:data':     [new THREE.Color('#b57cff'), new THREE.Color('#ff7ad9')],
+    'hacker:data':    [new THREE.Color('#b57cff'), new THREE.Color('#ff7ad9')],
+    'day:api':        [new THREE.Color('#d9480f'), new THREE.Color('#f59f00')],
+    'night:api':      [new THREE.Color('#ff9f1c'), new THREE.Color('#ffd166')],
+    'hacker:api':     [new THREE.Color('#ff9f1c'), new THREE.Color('#ffd166')],
+    'day:message':    [new THREE.Color('#087f5b'), new THREE.Color('#0ca678')],
+    'night:message':  [new THREE.Color('#2bffb0'), new THREE.Color('#7dffe0')],
+    'hacker:message': [new THREE.Color('#2bffb0'), new THREE.Color('#7dffe0')],
+    'day:people':     [new THREE.Color('#e8590c'), new THREE.Color('#f08c00')],
+    'night:people':   [new THREE.Color('#ffb547'), new THREE.Color('#ff7ad9')],
+    'hacker:people':  [new THREE.Color('#ffb547'), new THREE.Color('#ff7ad9')],
+    'hacker:dependency': [new THREE.Color('#d23cff'), new THREE.Color('#36e0ff')],
+    'day:dependency':    [new THREE.Color('#1c7ed6'), new THREE.Color('#7048e8')],
+    'night:dependency':  [new THREE.Color('#4dd4ff'), new THREE.Color('#b18cff')],
+  };
+
   private linkColors(kind: LinkKind): [THREE.Color, THREE.Color] {
     const t = this.theme.name;
-    if (kind === 'data') return t === 'day' ? [new THREE.Color('#862e9c'), new THREE.Color('#be4bdb')] : [new THREE.Color('#b57cff'), new THREE.Color('#ff7ad9')];
-    if (kind === 'api') return t === 'day' ? [new THREE.Color('#d9480f'), new THREE.Color('#f59f00')] : [new THREE.Color('#ff9f1c'), new THREE.Color('#ffd166')];
-    if (kind === 'message') return t === 'day' ? [new THREE.Color('#087f5b'), new THREE.Color('#0ca678')] : [new THREE.Color('#2bffb0'), new THREE.Color('#7dffe0')];
-    if (kind === 'people') return t === 'day' ? [new THREE.Color('#e8590c'), new THREE.Color('#f08c00')] : [new THREE.Color('#ffb547'), new THREE.Color('#ff7ad9')];
-    if (t === 'hacker') return [new THREE.Color('#d23cff'), new THREE.Color('#36e0ff')];
-    if (t === 'day') return [new THREE.Color('#1c7ed6'), new THREE.Color('#7048e8')];
-    return [new THREE.Color('#4dd4ff'), new THREE.Color('#b18cff')];
+    return CityScene.LINK_COLORS[`${t}:${kind}`] ?? CityScene.LINK_COLORS[`night:${kind}`] ?? [new THREE.Color('#4dd4ff'), new THREE.Color('#b18cff')];
   }
 
   /** Draw arcs between cities (dependency: flowing from dependent to dependency). */
