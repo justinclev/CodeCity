@@ -78,8 +78,6 @@ func RunAll(ctx context.Context, o Options, progress Progress) ([]*city.City, er
 	return cities, err
 }
 
-// RunRepo is Run but hands back the open repository (for reading files later);
-// the caller must Close it. On error the repository is already closed.
 // RunRepoN is Run but hands back the open repository (for reading files later)
 // and may return more than one city: when Options.Split is set and the
 // repository holds several projects (directories with a build manifest), each
